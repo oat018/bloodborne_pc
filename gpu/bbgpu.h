@@ -18,6 +18,8 @@ typedef struct {
 void bbgpu_register_kernel(void);
 /* Co-op: the game folder and param.sfo identity for the network and PSN libraries. */
 void bbnet_configure(const char *app0, const char *serial, const char *title, const char *app_ver);
+/* Co-op: seamless co-op changes to the game code (image still writable; no-op when off). */
+void bbnet_install_coop(void *image, uint64_t size);
 /* Creates window, Vulkan device, presenter and GPU command processor. */
 int bbgpu_init(const BbGpuConfig *config);
 /* Function for an imported NID ("NID#lib#mod"), or 0 when the GPU library does not provide it. */
@@ -32,6 +34,10 @@ int bbgpu_text_input_begin(const char *initial_utf8, const char *prompt_utf8);
 int bbgpu_text_input_poll(char *out_utf8, uint64_t size);
 /* 1 while the in-game settings menu is open: the game's pad input is held neutral. */
 int bbgpu_overlay_captures_input(void);
+/* Consumes mouse motion (pixels) accumulated since the last call. */
+void bbgpu_consume_mouse_delta(float *dx, float *dy);
+/* Returns 1 if mouse & keyboard mode is on; fills the camera settings. */
+int bbgpu_get_mk_config(float *sens_x, float *sens_y, int *invert_x, int *invert_y, float *deadzone, float *smoothing);
 /* Number of symbols registered by the vendored libraries (diagnostics). */
 unsigned bbgpu_symbol_count(void);
 #ifdef __cplusplus

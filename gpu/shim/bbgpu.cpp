@@ -333,6 +333,26 @@ extern "C" int bbgpu_overlay_captures_input(void) {
     return BbOverlay::CapturesInput() ? 1 : 0;
 }
 
+extern "C" void bbgpu_consume_mouse_delta(float* dx, float* dy) {
+    if (g_window) {
+        g_window->ConsumeMouseDelta(dx, dy);
+    } else {
+        if (dx) *dx = 0.0f;
+        if (dy) *dy = 0.0f;
+    }
+}
+
+extern "C" int bbgpu_get_mk_config(float* sens_x, float* sens_y, int* invert_x, int* invert_y, float* deadzone, float* smoothing) {
+    const auto& s = BbSettings::Get();
+    if (sens_x) *sens_x = s.mk_sens_x.load();
+    if (sens_y) *sens_y = s.mk_sens_y.load();
+    if (invert_x) *invert_x = s.mk_invert_x.load() ? 1 : 0;
+    if (invert_y) *invert_y = s.mk_invert_y.load() ? 1 : 0;
+    if (deadzone) *deadzone = s.mk_deadzone.load();
+    if (smoothing) *smoothing = s.mk_smoothing.load();
+    return s.mk_enabled.load() ? 1 : 0;
+}
+
 extern "C" int bbgpu_text_input_begin(const char* initial, const char* prompt) {
     if (!g_window) return 0;
     g_window->BeginTextInput(initial ? initial : "", prompt ? prompt : "Text");

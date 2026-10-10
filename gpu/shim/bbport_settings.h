@@ -67,6 +67,14 @@ struct Values {
     std::atomic<float> reactive_max{0.9f};
     std::atomic<int> debug_view{DebugNone};
     std::atomic<bool> show_fps{false};
+    /// Mouse & keyboard controls (runtime_pad.c, window.cpp).
+    std::atomic<bool> mk_enabled{false};
+    std::atomic<float> mk_sens_x{1.0f};
+    std::atomic<float> mk_sens_y{1.0f};
+    std::atomic<bool> mk_invert_x{false};
+    std::atomic<bool> mk_invert_y{false};
+    std::atomic<float> mk_deadzone{0.24f};   // the game's stick dead zone: tilts start above it
+    std::atomic<float> mk_smoothing{35.0f};  // ms
     // FSR 4 checks (menu): the provider's auto exposure, the jitter sign it is given.
     std::atomic<bool> fsr4_auto_exposure{true};
     std::atomic<bool> fsr4_invert_jitter{false};

@@ -32,6 +32,7 @@ namespace Libraries::Net {
 namespace {
 
 constexpr u16 kSignalingVPortNbo = 0xffff;
+constexpr u16 kSeamlessNoteVPortNbo = 0xfeff; // not a port a game binds
 constexpr size_t kVPortHeaderSize = 4;
 constexpr size_t kMaxUdpPayload = 65507;
 constexpr size_t kMaxP2PPayload = kMaxUdpPayload - kVPortHeaderSize;
@@ -330,6 +331,61 @@ public:
                          dest_port_nbo);
     }
 
+    // Seamless co-op notes: a few bytes each peer tells the peers it exchanges game packets
+    // with (where it is). They travel on their own virtual port; a build without this drops
+    // them as packets for an unknown socket.
+    void NotePeer(u32 addr_nbo, u16 port_nbo, const u8* note, size_t size) {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lock(note_mutex);
+        auto it = std::find_if(peer_notes.begin(), peer_notes.end(), [&](const PeerNote& peer) {
+            return peer.addr == addr_nbo && peer.port == port_nbo;
+        });
+        if (it == peer_notes.end()) {
+            if (peer_notes.size() >= 8) {
+                peer_notes.erase(peer_notes.begin());
+            }
+            it = peer_notes.insert(peer_notes.end(), PeerNote{addr_nbo, port_nbo});
+        }
+        it->seen = now;
+        if (note != nullptr && size <= it->note.size()) {
+            std::memcpy(it->note.data(), note, size);
+            it->note_size = static_cast<u32>(size);
+            it->noted = now;
+        }
+    }
+
+    int BroadcastNote(const void* data, u32 len) {
+        std::vector<std::pair<u32, u16>> targets;
+        {
+            const auto now = std::chrono::steady_clock::now();
+            std::lock_guard lock(note_mutex);
+            for (const auto& peer : peer_notes) {
+                if (now - peer.seen < std::chrono::seconds{10}) {
+                    targets.emplace_back(peer.addr, peer.port);
+                }
+            }
+        }
+        for (const auto& [addr, port] : targets) {
+            SendFrame(kSeamlessNoteVPortNbo, kSeamlessNoteVPortNbo, data, len, addr, port);
+        }
+        return static_cast<int>(targets.size());
+    }
+
+    int CollectNotes(void* out, u32 entry_size, u32 max_entries) {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard lock(note_mutex);
+        u32 count = 0;
+        for (const auto& peer : peer_notes) {
+            if (count < max_entries && peer.note_size == entry_size &&
+                now - peer.noted < std::chrono::seconds{6}) {
+                std::memcpy(static_cast<u8*>(out) + count * entry_size, peer.note.data(),
+                            entry_size);
+                ++count;
+            }
+        }
+        return static_cast<int>(count);
+    }
+
     int ReceiveInternal(InternalChannel channel, void* buf, u32 len, u32* from_addr,
                         u16* from_port) {
         std::lock_guard lock(internal_mutex);
@@ -438,6 +494,10 @@ private:
                              from.sin_port, payload, payload_size);
                 continue;
             }
+            if (dest_vport_nbo == kSeamlessNoteVPortNbo) {
+                NotePeer(from.sin_addr.s_addr, from.sin_port, payload, payload_size);
+                continue;
+            }
 
             std::lock_guard lock(registry_mutex);
             const auto it = game_sockets.find(dest_vport_nbo);
@@ -446,6 +506,7 @@ private:
                 continue;
             }
 
+            NotePeer(from.sin_addr.s_addr, from.sin_port, nullptr, 0); // a peer of the game
             P2PDatagram packet{};
             packet.source_addr = from.sin_addr.s_addr;
             packet.source_port = from.sin_port;
@@ -462,6 +523,17 @@ private:
 
     net_socket host_socket{kInvalidSocket};
     u16 physical_port{0};
+
+    struct PeerNote {
+        u32 addr{};
+        u16 port{};
+        std::chrono::steady_clock::time_point seen{};
+        std::chrono::steady_clock::time_point noted{};
+        std::array<u8, 32> note{};
+        u32 note_size{};
+    };
+    std::mutex note_mutex;
+    std::vector<PeerNote> peer_notes;
 
     std::mutex registry_mutex;
     std::unordered_map<u16, P2PSocket*> game_sockets;
@@ -982,6 +1054,15 @@ int P2PControlSendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port) {
 int P2PControlRecvFrom(void* buf, u32 len, u32* from_addr, u16* from_port) {
     return P2PTransport::Instance().ReceiveInternal(InternalChannel::Control, buf, len, from_addr,
                                                     from_port);
+}
+
+int P2PSeamlessBroadcast(const void* data, u32 len) {
+    return P2PTransport::Instance().IsReady() ? P2PTransport::Instance().BroadcastNote(data, len)
+                                              : 0;
+}
+
+int P2PSeamlessCollect(void* out, u32 entry_size, u32 max_entries) {
+    return P2PTransport::Instance().CollectNotes(out, entry_size, max_entries);
 }
 
 int P2PMatching2SendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port) {

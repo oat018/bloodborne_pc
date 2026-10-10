@@ -201,6 +201,10 @@ if (WIN32)
     target_link_libraries(bbnet PUBLIC ws2_32 iphlpapi bcrypt crypt32)
 endif()
 target_link_libraries(bbgpu PUBLIC bbnet)
+# Seamless co-op: shadp2p's Bloodborne code and its guest code hook. They use the instruction
+# decoder and xbyak, so they are built into bbgpu itself.
+target_sources(bbgpu PRIVATE bbnet/bloodborne_re.cpp bbnet/guest_hook.cpp)
+target_include_directories(bbgpu PRIVATE third_party/xbyak)
 # In-game settings menu: Dear ImGui (third_party/imgui, MIT) with its Vulkan backend, and an
 # embedded Cyrillic font (third_party/fonts).
 target_sources(bbgpu PRIVATE third_party/imgui/imgui.cpp third_party/imgui/imgui_draw.cpp

@@ -52,6 +52,20 @@ void Set(Values& v, const std::string& key, const std::string& value) {
         v.debug_view = std::clamp(i, 0, DebugViewCount - 1);
     } else if (key == "show_fps") {
         v.show_fps = i != 0;
+    } else if (key == "mk_enabled") {
+        v.mk_enabled = i != 0;
+    } else if (key == "mk_sens_x") {
+        v.mk_sens_x = Clamp(f, 0.1f, 10.0f);
+    } else if (key == "mk_sens_y") {
+        v.mk_sens_y = Clamp(f, 0.1f, 10.0f);
+    } else if (key == "mk_invert_x") {
+        v.mk_invert_x = i != 0;
+    } else if (key == "mk_invert_y") {
+        v.mk_invert_y = i != 0;
+    } else if (key == "mk_deadzone") {
+        v.mk_deadzone = Clamp(f, 0.0f, 0.5f);
+    } else if (key == "mk_smoothing") {
+        v.mk_smoothing = Clamp(f, 0.0f, 200.0f);
     } else if (key == "fsr4_auto_exposure") {
         v.fsr4_auto_exposure = i != 0;
     } else if (key == "fsr4_invert_jitter") {
@@ -128,6 +142,10 @@ void Load() {
     v.startup_model_lod = v.model_lod;
     v.startup_output_res = v.output_res;
     v.startup_live_resolution = v.live_resolution;
+    // BB_MOUSE_KEYBOARD=1/0 forces mouse & keyboard mode for this run ("... with mouse.bat").
+    if (const char* mk = std::getenv("BB_MOUSE_KEYBOARD"); mk && *mk) {
+        v.mk_enabled = std::atoi(mk) != 0;
+    }
 }
 
 void ConfigureUpscalerSupport(bool fsr4, bool fsr411) {
@@ -188,13 +206,17 @@ void Save() {
                  "# bbport settings (in-game menu: Insert / L3+R3)\n"
                  "upscaler=%s\npreset=%d\nsharpen=%d\nsharpness=%.2f\njitter=%d\n"
                  "reactive=%d\nobject_motion=%d\nreactive_scale=%.2f\nreactive_threshold=%.2f\nreactive_max=%.2f\n"
-                 "debug_view=%d\nshow_fps=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n",
+                 "debug_view=%d\nshow_fps=%d\nfsr4_auto_exposure=%d\nfsr4_invert_jitter=%d\n"
+                 "mk_enabled=%d\nmk_sens_x=%.2f\nmk_sens_y=%.2f\nmk_invert_x=%d\nmk_invert_y=%d\nmk_deadzone=%.2f\nmk_smoothing=%.2f\n",
                  UpscalerName(v.upscaler), v.preset.load(), int(v.sharpen.load()),
                  v.sharpness.load(), int(v.jitter.load()), int(v.reactive.load()),
                  int(v.object_motion.load()),
                  v.reactive_scale.load(), v.reactive_threshold.load(), v.reactive_max.load(),
                  v.debug_view.load(), int(v.show_fps.load()),
-                 int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()));
+                 int(v.fsr4_auto_exposure.load()), int(v.fsr4_invert_jitter.load()),
+                 int(v.mk_enabled.load()), v.mk_sens_x.load(), v.mk_sens_y.load(),
+                 int(v.mk_invert_x.load()), int(v.mk_invert_y.load()),
+                 v.mk_deadzone.load(), v.mk_smoothing.load());
     // Read by patches.py at start.
     for (int e = 0; e < EffectCount; ++e) {
         std::fprintf(file, "%s=%d\n", Effects[e].key, int(v.effects[e].load()));

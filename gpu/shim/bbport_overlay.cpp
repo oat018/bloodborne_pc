@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+#include "core/bloodborne_re.h"
 #include "bbport_overlay.h"
 
 #include <atomic>
@@ -362,7 +363,7 @@ void Menu() {
     }
     Hint("Эффекты включаются и выключаются патчами игры при запуске (patches/Bloodborne.xml). "
          "Размытие в движении и тени от динамических источников заметно нагружают GPU.");
-    Hint("Свободная камера: удерживайте Cross и нажимайте L3 (клавиатура: Space + Z). "
+    Hint("Свободная камера: удерживайте Cross и нажимайте L3 (клавиатура: Space + Z; M&K: E + C). "
          "Debug menu: левый touchpad / Tab. Нужны DbgFont14h.ccm и DbgFont14h.tpf "
          "в dvdroot_ps4/font из мода Nexus #253. Правый touchpad: Backspace.");
 
@@ -384,6 +385,20 @@ void Menu() {
 
     ImGui::SeparatorText("Прочее");
     Checkbox("Счётчик FPS в углу", s.show_fps);
+
+    ImGui::SeparatorText("Mouse & keyboard");
+    Checkbox("Mouse & keyboard controls", s.mk_enabled);
+    Hint("Mouse: camera, left click R1, right click L2, side buttons R2 / L1, middle click or Q lock on. "
+         "WASD move, Space / Left Shift dodge (hold: run), E interact, R blood vial, F use item, "
+         "1-4 and arrows d-pad, G gestures, Esc menu. A gamepad keeps working alongside. "
+         "Off: the old keyboard layout.");
+    if (s.mk_enabled) {
+        Slider("Camera speed X", s.mk_sens_x, 0.1f, 5.0f);
+        Slider("Camera speed Y", s.mk_sens_y, 0.1f, 5.0f);
+        Checkbox("Invert horizontal", s.mk_invert_x);
+        Checkbox("Invert vertical", s.mk_invert_y);
+        Slider("Smoothing (ms)", s.mk_smoothing, 0.0f, 100.0f);
+    }
 
     ImGui::Spacing();
     if (ImGui::Button("Закрыть")) {
@@ -538,6 +553,26 @@ bool HandleEvent(const SDL_Event& event) {
             return true;
         }
         if (!is_open) {
+            // Co-op hotkeys (no-ops unless seamless co-op is on): ring a bell without the item,
+            // leave the session, or leave and ring again.
+            if (down && !event.key.repeat) {
+                switch (event.key.key) {
+                case SDLK_PAGEUP:
+                    Core::Bloodborne::RequestBellUse(200); // Beckoning Bell
+                    return true;
+                case SDLK_PAGEDOWN:
+                    Core::Bloodborne::RequestBellUse(205); // Small Resonant Bell
+                    return true;
+                case SDLK_HOME:
+                    Core::Bloodborne::RequestSessionStop();
+                    return true;
+                case SDLK_END:
+                    Core::Bloodborne::RequestSessionStop(true);
+                    return true;
+                default:
+                    break;
+                }
+            }
             return false;
         }
         io.AddKeyEvent(ImGuiMod_Ctrl, (event.key.mod & SDL_KMOD_CTRL) != 0);

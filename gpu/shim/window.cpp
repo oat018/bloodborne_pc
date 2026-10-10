@@ -6,6 +6,7 @@
 #include "common/logging/log.h"
 #include "sdl_window.h"
 #include "bbport_overlay.h"
+#include "bbport_settings.h"
 
 namespace Frontend {
 
@@ -53,6 +54,7 @@ WindowSDL::WindowSDL(s32 width_, s32 height_, const char* title) : width{width_}
     width = w;
     height = h;
     LOG_INFO(Frontend, "Window {}x{} on {}", w, h, driver);
+    last_mouse_motion_ms = SDL_GetTicks();
 }
 
 WindowSDL::~WindowSDL() {
@@ -122,8 +124,21 @@ bool WindowSDL::PollEvents() {
             UpdateTextTitle();
             continue;
         }
+        if (event.type == SDL_EVENT_MOUSE_MOTION || event.type == SDL_EVENT_MOUSE_BUTTON_DOWN ||
+            event.type == SDL_EVENT_MOUSE_BUTTON_UP || event.type == SDL_EVENT_MOUSE_WHEEL) {
+            last_mouse_motion_ms = SDL_GetTicks();
+            if (mouse_cursor_hidden && !relative_mouse_active) {
+                SDL_ShowCursor();
+                mouse_cursor_hidden = false;
+            }
+        }
         if (BbOverlay::HandleEvent(event)) {
             continue;
+        }
+        if (event.type == SDL_EVENT_MOUSE_MOTION && relative_mouse_active) {
+            std::scoped_lock lock{mouse_delta_mutex};
+            accumulated_mouse_dx += event.motion.xrel;
+            accumulated_mouse_dy += event.motion.yrel;
         }
         switch (event.type) {
         case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
@@ -142,7 +157,46 @@ bool WindowSDL::PollEvents() {
             break;
         }
     }
+
+    const uint64_t now_ms = SDL_GetTicks();
+
+    // Mouse & keyboard mode grabs the mouse (relative mode); menus and text entry release it.
+    const bool overlay_capturing = BbOverlay::CapturesInput() || text_active;
+    const bool want_relative = BbSettings::Get().mk_enabled.load() && !overlay_capturing;
+    if (want_relative != relative_mouse_active) {
+        relative_mouse_active = want_relative;
+        SDL_SetWindowRelativeMouseMode(window, want_relative);
+        if (want_relative) {
+            SDL_HideCursor();
+            mouse_cursor_hidden = true;
+            std::scoped_lock lock{mouse_delta_mutex};
+            accumulated_mouse_dx = accumulated_mouse_dy = 0.0f;
+        } else {
+            SDL_ShowCursor();
+            mouse_cursor_hidden = false;
+        }
+    }
+    if (!relative_mouse_active) {
+        // Hide the idle cursor after 3 seconds, except while a menu is open.
+        if (!overlay_capturing) {
+            if (!mouse_cursor_hidden && now_ms - last_mouse_motion_ms >= 3000) {
+                SDL_HideCursor();
+                mouse_cursor_hidden = true;
+            }
+        } else if (mouse_cursor_hidden) {
+            SDL_ShowCursor();
+            mouse_cursor_hidden = false;
+        }
+    }
     return is_open;
+}
+
+void WindowSDL::ConsumeMouseDelta(float* dx, float* dy) {
+    std::scoped_lock lock{mouse_delta_mutex};
+    if (dx) *dx = accumulated_mouse_dx;
+    if (dy) *dy = accumulated_mouse_dy;
+    accumulated_mouse_dx = 0.0f;
+    accumulated_mouse_dy = 0.0f;
 }
 
 } // namespace Frontend

@@ -5,6 +5,8 @@
 
 static int capture;
 int bbgpu_overlay_captures_input(void) { return capture; }
+void bbgpu_consume_mouse_delta(float *dx, float *dy) { if (dx) *dx = 0.0f; if (dy) *dy = 0.0f; }
+int bbgpu_get_mk_config(float *sx, float *sy, int *ix, int *iy, float *dz, float *sm) { (void)sx; (void)sy; (void)ix; (void)iy; (void)dz; (void)sm; return 0; } /* M&K off: the tests cover the base layout */
 uintptr_t runtime_lookup(const RuntimeExport *table, size_t count, const char *name) {
     (void)table; (void)count; (void)name;
     return 0;

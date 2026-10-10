@@ -5,13 +5,20 @@
  *   WASD left stick, arrow keys right stick, Space Cross, LShift Circle,
  *   E Square, Q Triangle, 1 L1, 3 R1, R L2, F R2, Z L3, C R3,
  *   Enter Options, Tab left touchpad, Backspace right touchpad,
- *   IJKL d-pad (I up, K down, J left, L right). */
+ *   IJKL d-pad (I up, K down, J left, L right).
+ *
+ * Mouse & keyboard mode (bbport.ini mk_enabled or BB_MOUSE_KEYBOARD=1; works alongside a gamepad):
+ *   mouse camera, LMB R1, RMB L2, side buttons R2 / L1, MMB or Q R3, WASD left stick,
+ *   Space / LShift Circle, E / Enter Cross, R Triangle, F Square, C L3, Esc Options,
+ *   G / Tab left touchpad, Backspace right touchpad, 1 2 3 4 d-pad left right up down, arrows d-pad.
+ *   With mk_enabled=0 the layout above applies. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #include "gpu/bbgpu.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <pthread.h>
 #include <time.h>
 #include <SDL3/SDL.h>
@@ -96,8 +103,15 @@ static void sample_host(PadData *d) {
     d->connected=1; d->connected_count=connected_count ? connected_count : 1;
     d->timestamp=now_us();
     SDL_Gamepad *g=current_gamepad();
-    if (bbgpu_overlay_captures_input()) return; /* settings menu open: neutral input */
+    if (bbgpu_overlay_captures_input()) { /* settings menu open: neutral input */
+        float dx, dy; bbgpu_consume_mouse_delta(&dx,&dy);
+        return;
+    }
     const bool *k=SDL_WasInit(SDL_INIT_VIDEO) ? SDL_GetKeyboardState(NULL) : NULL;
+    float mouse_dx=0, mouse_dy=0, sens_x=1, sens_y=1, deadzone=0.05f, smoothing=0.2f;
+    int inv_x=0, inv_y=0;
+    const int mk=bbgpu_get_mk_config(&sens_x,&sens_y,&inv_x,&inv_y,&deadzone,&smoothing);
+    bbgpu_consume_mouse_delta(&mouse_dx,&mouse_dy);
     if (g) {
         static const struct { SDL_GamepadButton sdl; uint32_t ps; } map[]={
             {SDL_GAMEPAD_BUTTON_SOUTH,BTN_CROSS}, {SDL_GAMEPAD_BUTTON_EAST,BTN_CIRCLE},
@@ -130,9 +144,55 @@ static void sample_host(PadData *d) {
         if ((d->buttons & BTN_TOUCHPAD) && !d->touch_count) touch_click(d,0);
         if (k && k[SDL_SCANCODE_TAB]) touch_click(d,0);
         if (k && k[SDL_SCANCODE_BACKSPACE]) touch_click(d,1);
-        return;
+        if (!mk) return; /* with mouse & keyboard mode on, they add to the pad */
     }
     if (!k) return;
+    if (mk) {
+        const SDL_MouseButtonFlags mb=SDL_GetMouseState(NULL,NULL);
+        static const struct { SDL_Scancode key; uint32_t ps; } mk_keys[]={
+            {SDL_SCANCODE_SPACE,BTN_CIRCLE}, {SDL_SCANCODE_LSHIFT,BTN_CIRCLE},
+            {SDL_SCANCODE_E,BTN_CROSS}, {SDL_SCANCODE_RETURN,BTN_CROSS}, {SDL_SCANCODE_KP_ENTER,BTN_CROSS},
+            {SDL_SCANCODE_R,BTN_TRIANGLE}, {SDL_SCANCODE_F,BTN_SQUARE}, {SDL_SCANCODE_Q,BTN_R3},
+            {SDL_SCANCODE_C,BTN_L3}, {SDL_SCANCODE_ESCAPE,BTN_OPTIONS},
+            {SDL_SCANCODE_1,BTN_LEFT}, {SDL_SCANCODE_2,BTN_RIGHT}, {SDL_SCANCODE_3,BTN_UP}, {SDL_SCANCODE_4,BTN_DOWN},
+            {SDL_SCANCODE_UP,BTN_UP}, {SDL_SCANCODE_DOWN,BTN_DOWN}, {SDL_SCANCODE_LEFT,BTN_LEFT}, {SDL_SCANCODE_RIGHT,BTN_RIGHT},
+        };
+        for (size_t i=0;i<sizeof(mk_keys)/sizeof(*mk_keys);++i) if (k[mk_keys[i].key]) d->buttons|=mk_keys[i].ps;
+        if (mb & SDL_BUTTON_LMASK) d->buttons|=BTN_R1;
+        if (mb & SDL_BUTTON_RMASK) d->buttons|=BTN_L2;
+        if (mb & SDL_BUTTON_MMASK) d->buttons|=BTN_R3;
+        if (mb & SDL_BUTTON_X1MASK) d->buttons|=BTN_R2;
+        if (mb & SDL_BUTTON_X2MASK) d->buttons|=BTN_L1;
+        if (k[SDL_SCANCODE_TAB] || k[SDL_SCANCODE_G]) touch_click(d,0);
+        if (k[SDL_SCANCODE_BACKSPACE]) touch_click(d,1);
+        if ((d->buttons & BTN_L2) && d->l2<255) d->l2=255;
+        if ((d->buttons & BTN_R2) && d->r2<255) d->r2=255;
+        const int move_x=(k[SDL_SCANCODE_D] ? 1 : 0)-(k[SDL_SCANCODE_A] ? 1 : 0);
+        const int move_y=(k[SDL_SCANCODE_S] ? 1 : 0)-(k[SDL_SCANCODE_W] ? 1 : 0);
+        if (move_x || move_y) {
+            const float reach=move_x && move_y ? 90.0f : 127.0f; /* diagonals stay on the circle */
+            d->left_x=(uint8_t)(128+(int)(move_x*reach)); d->left_y=(uint8_t)(128+(int)(move_y*reach));
+        }
+        /* Camera: the mouse speed (counts/ms, smoothed over mk_smoothing ms) sets the tilt of the
+         * right stick, along the direction of the motion. The game ignores small tilts, so the
+         * tilt starts just above its dead zone and slow aiming still moves the camera. */
+        static float vx, vy; static uint64_t last_us;
+        const uint64_t now=d->timestamp;
+        float dt=(float)(now-last_us)/1000.0f;
+        last_us=now;
+        if (dt>100.0f) { vx=vy=0; dt=100.0f; }   /* first sample, or back from a menu or a stall */
+        if (dt<0.1f) dt=0.1f;
+        const float keep=smoothing>0.0f ? expf(-dt/smoothing) : 0.0f;
+        vx=vx*keep+mouse_dx/dt*(1.0f-keep);
+        vy=vy*keep+mouse_dy/dt*(1.0f-keep);
+        const float x=vx*0.45f*sens_x*(inv_x ? -1.0f : 1.0f), y=vy*0.35f*sens_y*(inv_y ? -1.0f : 1.0f);
+        const float size=sqrtf(x*x+y*y);
+        if (size>=0.015f) {
+            const float tilt=(deadzone+(1.0f-deadzone)*(size<1.0f ? size : 1.0f))*127.0f/size;
+            d->right_x=(uint8_t)(128+(int)(x*tilt)); d->right_y=(uint8_t)(128+(int)(y*tilt));
+        }
+        return;
+    }
     static const struct { SDL_Scancode key; uint32_t ps; } keys[]={
         {SDL_SCANCODE_SPACE,BTN_CROSS}, {SDL_SCANCODE_LSHIFT,BTN_CIRCLE}, {SDL_SCANCODE_E,BTN_SQUARE},
         {SDL_SCANCODE_Q,BTN_TRIANGLE}, {SDL_SCANCODE_1,BTN_L1}, {SDL_SCANCODE_3,BTN_R1},

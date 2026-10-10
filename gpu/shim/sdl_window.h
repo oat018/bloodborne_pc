@@ -34,11 +34,19 @@ public:
     void BeginTextInput(const std::string& initial, const std::string& prompt);
     /// 0 while typing, 1 confirmed (Enter), 2 cancelled (Escape); text is UTF-8.
     int PollTextInput(std::string& text);
+    /// Mouse motion (pixels) accumulated since the last call, for the pad's right stick.
+    void ConsumeMouseDelta(float* dx, float* dy);
 
 private:
     std::atomic<s32> width, height;
     std::atomic<bool> is_open{true};
     std::mutex text_mutex;
+    std::mutex mouse_delta_mutex;
+    float accumulated_mouse_dx = 0.0f;
+    float accumulated_mouse_dy = 0.0f;
+    bool relative_mouse_active = false;
+    uint64_t last_mouse_motion_ms = 0;
+    bool mouse_cursor_hidden = false;
     bool text_requested{}, text_active{};
     int text_state{};
     std::string text, text_prompt, base_title;

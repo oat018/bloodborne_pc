@@ -26,6 +26,7 @@
 #endif
 
 #include "common/elf_info.h"
+#include "common/memory_patcher.h"
 #include "common/types.h"
 #include "core/emulator_settings.h"
 #include "core/bloodborne_re.h"
@@ -315,30 +316,6 @@ s32 GetCurrentPid() {
 }
 } // namespace Core::Debugger
 
-namespace Core::Bloodborne {
-namespace {
-std::mutex placement_mutex;
-std::optional<std::string> placement;
-} // namespace
-std::optional<std::string> GetSeamlessHostPlacementHeader() {
-    std::scoped_lock lock{placement_mutex};
-    return placement;
-}
-bool SetSeamlessHostPlacementHeader(std::string_view value) {
-    if (value.empty() || value.size() > 4096) {
-        return false;
-    }
-    std::scoped_lock lock{placement_mutex};
-    placement = std::string{value};
-    return true;
-}
-void ClearSeamlessHostPlacementHeader() {
-    std::scoped_lock lock{placement_mutex};
-    placement.reset();
-}
-void TraceMatching2LeaveRoom(std::uintptr_t, std::uint64_t) {}
-} // namespace Core::Bloodborne
-
 // ---- Notifications (log only for now) ------------------------------------------------------------
 
 namespace ImGui::ShadNetNotify {
@@ -449,6 +426,29 @@ extern "C" void bbnet_configure(const char* app0, const char* serial, const char
     std::printf("Co-op: %s, NP communication id %s%s\n", serial ? serial : "?",
                 ids.empty() ? "missing" : ids.front().c_str(),
                 EmulatorSettings.IsShadNetEnabled() ? "; online play on" : "");
+}
+
+// ---- Seamless co-op -------------------------------------------------------------------------------
+
+// The game image for the seamless co-op code (shadPS4's patcher itself is not part of the port).
+namespace MemoryPatcher {
+EXPORT uintptr_t g_eboot_address;
+uint64_t g_eboot_image_size;
+std::string g_game_serial;
+} // namespace MemoryPatcher
+
+// Called by the loader once the image is relocated and patched, while it is still writable:
+// the seamless co-op code (bbnet/bloodborne_re.cpp) checks every site byte for byte and then
+// changes the game code. Off unless SHADPS4_BLOODBORNE_SEAMLESS_COOP=1 (same switch as shadp2p).
+extern "C" void bbnet_install_coop(void* image, uint64_t size) {
+    if (!EmulatorSettings.IsShadNetEnabled()) {
+        return;
+    }
+    MemoryPatcher::g_eboot_address = reinterpret_cast<uintptr_t>(image);
+    MemoryPatcher::g_eboot_image_size = size;
+    MemoryPatcher::g_game_serial = Common::ElfInfo::Instance().GameSerial();
+    Core::Bloodborne::InstallSeamlessCoopPatches();
+    Core::Bloodborne::InstallReverseEngineeringTrace();
 }
 
 // ---- Registration ------------------------------------------------------------------------------

@@ -1,0 +1,52 @@
+name: build-linux
+# Builds the Linux version (bb-probe + libbbgpu.so) and the AppImage with Nix, as shell.nix and
+# packaging/appimage.sh do on a developer machine.
+on:
+  push:
+    branches: [seamless-coop]
+    tags: ['seamless-*']
+  workflow_dispatch:
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Build
+        run: nix-shell shell.nix --run "BB_LTO=OFF bash build.sh"
+      - name: Build log on failure
+        if: failure()
+        run: grep -n -B2 -A12 'error' out/gpu-build.log | head -300 || tail -100 out/gpu-build.log
+      - name: Plain build archive
+        run: |
+          mkdir -p dist/bbport-linux/out/gpu
+          cp out/bb-probe out/bb-gpu-capabilities dist/bbport-linux/out/
+          cp out/gpu/libbbgpu.so dist/bbport-linux/out/gpu/
+          cp -r run.sh run.py scripts patches fsr4_shaders launcher LICENSE README.md docs dist/bbport-linux/
+          cp packaging/seamless/play-seamless-coop.sh dist/bbport-linux/
+          tar -C dist -czf dist/bbport-seamless-linux-nix-build.tar.gz bbport-linux
+      - name: AppImage
+        continue-on-error: true
+        run: |
+          bash packaging/appimage.sh
+          cp packaging/seamless/play-seamless-coop.sh dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bbport-seamless-linux
+          path: |
+            dist/*.AppImage
+            dist/*.tar.gz
+            dist/play-seamless-coop.sh
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/seamless-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/*.AppImage dist/play-seamless-coop.sh --clobber || true
+    permissions:
+      contents: write

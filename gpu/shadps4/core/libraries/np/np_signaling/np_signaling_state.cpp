@@ -1005,6 +1005,12 @@ void HandleHandshakePacket(u32 from_addr, u16 from_port, const SignalingHandshak
                 reply = MakeHandshakeLocked(ci, HandshakeKind::Accept);
                 send_reply = true;
                 reply_conn = conn_id;
+            } else {
+                // The peer restarted and is handshaking again on a connection we still consider
+                // established; answer so it can complete instead of timing out.
+                reply = MakeHandshakeLocked(ci, HandshakeKind::Accept);
+                send_reply = true;
+                reply_conn = conn_id;
             }
         } else if (conn_id == 0) {
             return;
