@@ -28,7 +28,9 @@ jobs:
           mkdir -p dist/bbport-linux/out/gpu
           cp out/bb-probe out/bb-gpu-capabilities dist/bbport-linux/out/
           cp out/gpu/libbbgpu.so dist/bbport-linux/out/gpu/
-          cp -r run.sh run.py scripts patches fsr4_shaders launcher LICENSE README.md docs dist/bbport-linux/
+          for item in run.sh run.py scripts patches fsr4_shaders launcher LICENSE README.md docs; do
+            if [ -e "$item" ]; then cp -r "$item" dist/bbport-linux/; fi
+          done
           cp packaging/seamless/play-seamless-coop.sh dist/bbport-linux/
           tar -C dist -czf dist/bbport-seamless-linux-nix-build.tar.gz bbport-linux
       - name: AppImage
