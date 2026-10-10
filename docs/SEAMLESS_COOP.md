@@ -34,6 +34,14 @@ the host's position; a guest that respawned or travelled looks like an ordinary 
 own screen; three or more players were never tried; enemy scaling and the other extras of the
 Souls mods do not exist.
 
+Known problem: sometimes a match does not complete. The server shows the host claiming the
+guest again and again while the guest never joins (in the two-instance tests this happened in
+roughly one start out of three on a bad evening, and not at all on others). Restarting both
+games has always cleared it.
+
+The Linux build is compiled by the workflow of this branch and has not been run by the author
+(no Linux machine); only the Windows build was tested.
+
 Every player of a session needs the same build and the same switches.
 
 ## Using it
