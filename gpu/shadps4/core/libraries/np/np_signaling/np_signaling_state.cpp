@@ -770,6 +770,14 @@ void EstablishConnection(s32 conn_id, bool peer_activated_hint) {
             }
         }
 
+        // A later round on a connection that stayed established (deactivated, then activated
+        // again by the peer while this side has not activated yet).
+        if (!first_establish && ci.state == ConnState::Established && ci.peer_activated &&
+            !ci.locally_activated && !ci.peer_activated_fired) {
+            ci.peer_activated_fired = true;
+            fire_peer_activated = true;
+        }
+
         if (ci.locally_activated && ci.state == ConnState::Established &&
             !ci.established_event_fired) {
             ci.established_event_fired = true;
@@ -817,6 +825,9 @@ void DeactivateConnectionFaithful(s32 conn_id) {
             SendControlCloseLocked(ci, ControlReason::Deactivate);
             ci.locally_activated = false;
             ci.deactivate_lingering = true;
+            ci.established_event_fired = false;
+            ci.mutual_fired = false;
+            ci.peer_activated_fired = false;
             CancelStepCalloutLocked(ci);
             ArmTimeoutCalloutLocked(ci, 60'000'000);
             LOG_DEBUG(Lib_NpSignaling,
@@ -1259,6 +1270,9 @@ void HandleControlPacket(u32 from_addr, u16 from_port, const SignalingControl& p
             send_ack = true;
             ack_addr = ci.addr;
             ack_port = ci.port;
+            if (ci.state == ConnState::Established) {
+                establish_conn = conn_id; // PEER_ACTIVATED / MUTUAL_ACTIVATED of a new round
+            }
         } else if (conn_id == 0) {
             LOG_INFO(Lib_NpSignaling,
                      "Control RECV ignored: kind={} from='{}' src={:#x}:{} no matching connection",
@@ -1285,6 +1299,9 @@ void HandleControlPacket(u32 from_addr, u16 from_port, const SignalingControl& p
                      static_cast<s32>(ci.state));
             if (reason == ControlReason::Deactivate && ci.state == ConnState::Established) {
                 peer_deactivated_conn = conn_id;
+                ci.peer_activated = false;
+                ci.mutual_fired = false;
+                ci.peer_activated_fired = false;
             } else {
                 dead_conn = conn_id;
             }
