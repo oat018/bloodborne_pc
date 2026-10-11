@@ -21,6 +21,11 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
 - The session survives a boss kill. Nobody is sent home.
 - The host can use lanterns inside the session. When the host travels, guests are taken to the
   same lantern, and from there to the spot where the host stands.
+- Guests keep the host's progress (new in v2.2; `SHADPS4_BLOODBORNE_SHARE_PROGRESS=0` turns it
+  off). When the host's world kills a boss during the session, the guest's own save gets the
+  same boss flags and the boss's item (the game gives that to the host only), so the boss is
+  dead in the guest's world too. Lanterns the host has lit and comes near are lit for the
+  guest as well.
 - Bell hotkeys, so no Insight or bell items are needed: PgUp = Beckoning Bell (host),
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
 - With `SHADPS4_BLOODBORNE_AUTO_REJOIN=1` the same bell is rung again when the players really
@@ -28,6 +33,13 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
 - Built-in mouse and keyboard controls (`BB_MOUSE_KEYBOARD=1`, or the "Mouse & keyboard"
   section at the bottom of the Insert menu). The relative-mouse plumbing comes from
   `Mush-iii/bloodborne_pc`.
+
+Shared progress is limited to bosses and lanterns: doors, shortcuts, items lying in the world
+and NPC quests still belong to the host alone, and chalice dungeons were not tried. A boss
+killed before the guest joined is not handed over. The game puts a guest's own flags back
+when it leaves a session, so the mod writes them again in the guest's own world (and keeps
+them in `user/seamless_progress.txt` until they have stayed, which also covers closing the
+game from inside the host's world).
 
 Known limits: guests cannot use lanterns themselves; a guest that respawned or travelled looks
 like an ordinary player on its own screen; three or more players were never tried; enemy scaling and the other extras of the
@@ -101,6 +113,11 @@ That file is generated from shadp2p's `src/core/bloodborne_re.cpp` by
   Once the host's character is in the guest's world, the guest is placed at its position with
   the game's own same-map placement helper (the one behind the debug command
   `RemoteWarpPlayer`).
+- Shared progress: the host watches its event scripts. From an event's "Handle Boss Defeat"
+  instruction on, the flags that event sets and the item lots it awards are collected, with the
+  event's own flag; for lanterns the "lit" flag (registration flag + 10) of every lantern the
+  game has registered. The entries ride in the once-a-second note, four at a time, and the
+  guest sets the flags with the game's own flag setter and awards itself the item lots.
 - Matching speed: the timing values of the game's network settings are lowered in memory, and
   the HTTP layer repeats the guest's last advertisement between the game's own repeats (the
   answer to it is what sends a guest to a host in another area).

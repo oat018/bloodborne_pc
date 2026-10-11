@@ -67,6 +67,7 @@ int P2PSeamlessCollect(void* out, u32 entry_size, u32 max_entries);
 
 namespace Core::Bloodborne {
 void ApplyGuestReinsertAfterReload();
+void ApplySharedProgressTick();
 // The game's list of CSMultiPlayerIns tasks, known once one has been created.
 static std::uint64_t multi_player_ins_manager{};
 
@@ -1701,6 +1702,34 @@ constexpr u64 WorldChrManCountOffset = 0x30;
 constexpr u64 WorldChrManEntriesOffset = 0x38;
 constexpr u64 WorldChrManEntrySize = 0x38;
 constexpr u64 EventManPointerOffset = 0x553B108;
+constexpr u64 EventFlagManPointerOffset = 0x0553B100;
+constexpr u64 EventFlagGetOffset = 0x01399BF0; // (unused, flag id) -> state
+constexpr u64 EventFlagSetOffset = 0x013CFCC0; // (flag manager, flag id, state)
+constexpr u64 ItemLotManPointerOffset = 0x0553D6E0;
+constexpr u64 ItemLotAwardOffset = 0x017DDC50; // (manager, item lot id, host only)
+
+bool GetEventFlag(s32 flag) {
+    using Get = bool PS4_SYSV_ABI (*)(u64 unused, s32 flag);
+    return flag >= 0 && ReadValue<u64>(image_base + EventFlagManPointerOffset, 0) >= 0x10000 &&
+           reinterpret_cast<Get>(image_base + EventFlagGetOffset)(0, flag);
+}
+
+void SetEventFlag(s32 flag, bool state) {
+    using Set = void PS4_SYSV_ABI (*)(u64 manager, s32 flag, s32 state);
+    const u64 manager = ReadValue<u64>(image_base + EventFlagManPointerOffset, 0);
+    if (flag >= 0 && manager >= 0x10000) {
+        reinterpret_cast<Set>(image_base + EventFlagSetOffset)(manager, flag, state ? 1 : 0);
+    }
+}
+
+// Gives the local player an item lot, also when it is a guest in somebody's world.
+void AwardItemLot(s32 lot) {
+    using Award = void PS4_SYSV_ABI (*)(u64 manager, s32 lot, s32 host_only);
+    const u64 manager = ReadValue<u64>(image_base + ItemLotManPointerOffset, 0);
+    if (lot > 0 && manager >= 0x10000) {
+        reinterpret_cast<Award>(image_base + ItemLotAwardOffset)(manager, lot, 0);
+    }
+}
 constexpr s32 DeathLatchBusy = 4;
 std::atomic<bool> requested_death_release{};
 
@@ -2280,6 +2309,24 @@ void ApplyDebugCommands() {
         }
         taken = clock::now();
         LOG_INFO(Debug, "Bloodborne debug: {} candidates {}", command, candidates.size());
+    } else if (command == "flag" || command == "setflag" || command == "lot") {
+        // flag <id>: an event flag; setflag <id> <0|1>; lot <id>: award an item lot
+        s32 id = 0;
+        s32 value = 1;
+        words >> std::dec >> id >> value;
+        if (command == "setflag") {
+            SetEventFlag(id, value != 0);
+        } else if (command == "lot") {
+            AwardItemLot(id);
+        }
+        LOG_INFO(Debug, "Bloodborne debug: {} {} = {}", command, id, GetEventFlag(id));
+    } else if (command == "light") {
+        // light <lantern object entity id>: what the event scripts do when a lantern is lit
+        s32 entity = 0;
+        words >> std::dec >> entity;
+        using Light = void PS4_SYSV_ABI (*)(u64 unused, s32 entity);
+        reinterpret_cast<Light>(image_base + 0x0131E4A0)(0, entity);
+        LOG_INFO(Debug, "Bloodborne debug: light {}", entity);
     } else if (command == "gohost") {
         const float moved = MoveToPartner(world_chr_man, player, 0.0f);
         LOG_INFO(Debug, "Bloodborne debug: gohost {}", moved);
@@ -3673,6 +3720,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         ApplyDebugCommands();
         ApplyFastMatching(registers->rdi);
         ApplyGuestReinsertAfterReload();
+        ApplySharedProgressTick();
         ApplyRequestedBellUse();
         ApplyRequestedSessionStop();
         ApplySharedDeathRule();
@@ -4381,7 +4429,12 @@ enum SessionHook : u64 {
     SessionHookTimerA, // (object, id, name in rdx, ...)
     SessionHookTimerB, // (object, id, value, name in rcx)
     SessionHookCall,   // (object, name in rsi)
+    SessionHookEventCommand, // (?, event executor in rsi): event script class 2003
+    SessionHookLantern,      // (manager, flag in rsi, entity, ...): a lit lantern is registered
+    SessionHookFlagSet,      // (flag manager, flag in rsi, state in rdx): test aid
 };
+constexpr u64 EventCommandHandlerOffset = 0x017C0420;
+constexpr u64 LanternRegisterOffset = 0x0133B030;
 constexpr u64 MultiPlayerInsConstructorOffset = 0x01E4F9F0;
 constexpr u64 MultiPlayerInsRequestGuestOffset = 0x01E54B60; // (manager, handle): type 1
 constexpr u64 MultiPlayerInsRequestHostOffset = 0x01E54A90;  // (manager, handle): type 2
@@ -4433,8 +4486,94 @@ void RememberPartnerHandle(u64 key, s32 type) {
              free_slot - partner_handles.data(), type);
 }
 
+// Shared progress. The host collects what its guests should keep from its world: the flags
+// and item lots of a boss kill during the session, and the flag of every lantern its game has
+// registered (those it has lit). One entry is a kind in the top 4 bits and an id below.
+constexpr u32 ProgressFlag = 1;
+constexpr u32 ProgressItemLot = 2;
+std::mutex progress_mutex;
+std::vector<u32> progress_boss;     // of this session
+std::vector<u32> progress_lanterns; // base flags of the lanterns seen since the game started
+constexpr s32 LanternLitFlagOffset = 10;
+
+bool ShareProgressEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_BLOODBORNE_SHARE_PROGRESS");
+        return EnvFlagEnabled("SHADPS4_BLOODBORNE_STAY_IN_SESSION") &&
+               (value == nullptr || std::string_view{value} != "0");
+    }();
+    return enabled;
+}
+
+void AddProgress(std::vector<u32>& list, u32 kind, s32 id, const char* what) {
+    if (id <= 0 || id >= (1 << 28)) {
+        return;
+    }
+    const u32 entry = kind << 28 | static_cast<u32>(id);
+    std::scoped_lock lock{progress_mutex};
+    if (list.size() < 96 && !std::ranges::contains(list, entry)) {
+        list.push_back(entry);
+        LOG_INFO(Debug, "Bloodborne progress: {} {}", what, id);
+    }
+}
+
+// A 2003 instruction of an event script is about to run on this client.
+void NoteEventCommand(u64 executor) {
+    using clock = std::chrono::steady_clock;
+    static u64 boss_executor = 0;
+    static clock::time_point boss_until{};
+    const u64 instruction = ReadValue<u64>(executor, 0xB0);
+    const s32 index = instruction >= 0x10000 ? ReadValue<s32>(instruction, 4) : 0;
+    if (index != 2 && index != 4 && index != 12) {
+        return;
+    }
+    const u64 multi_play = GetMatchingState();
+    if (multi_play < 0x10000 || ReadValue<s32>(multi_play, 0x124) != 3) {
+        return; // only a host with guests
+    }
+    u64 arguments = ReadValue<u64>(executor, 0xB8);
+    if (arguments == 0) {
+        const u64 event = ReadValue<u64>(executor, 0xA8);
+        const u64 file = event >= 0x10000 ? ReadValue<u64>(event, 8) : 0;
+        if (file < 0x10000) {
+            return;
+        }
+        arguments = file + ReadValue<u64>(file, 0x78) + ReadValue<u64>(instruction, 0x10);
+    }
+    const s32 value = ReadValue<s32>(arguments, 0);
+    const auto now = clock::now();
+    if (index == 12) { // Handle Boss Defeat: what this event does from here on is the kill
+        boss_executor = executor;
+        boss_until = now + std::chrono::seconds{120};
+        AddProgress(progress_boss, ProgressFlag, ReadValue<s32>(executor, 0x28), "host notes boss event");
+    } else if (executor == boss_executor && now < boss_until) {
+        if (index == 4) {
+            AddProgress(progress_boss, ProgressItemLot, value, "host notes boss item lot");
+        } else if (ReadValue<u8>(arguments, 4) != 0) {
+            AddProgress(progress_boss, ProgressFlag, value, "host notes boss flag");
+        }
+    }
+}
+
 void PS4_SYSV_ABI SessionEntry(u64 tag, const GuestRegisterSnapshot* registers) {
     if (registers == nullptr || image_base == 0) {
+        return;
+    }
+    if (tag == SessionHookEventCommand) {
+        NoteEventCommand(registers->rsi);
+        return;
+    }
+    if (tag == SessionHookFlagSet) {
+        const s32 flag = static_cast<s32>(registers->rsi);
+        if (GetEventFlag(flag) != (static_cast<s32>(registers->rdx) != 0)) {
+            LOG_INFO(Debug, "Bloodborne flag: {} -> {} caller={:#x}", flag,
+                     static_cast<s32>(registers->rdx), ReadValue<u64>(registers->rsp, 0) - image_base);
+        }
+        return;
+    }
+    if (tag == SessionHookLantern) {
+        AddProgress(progress_lanterns, ProgressFlag, static_cast<s32>(registers->rsi),
+                    "lantern seen, base flag");
         return;
     }
     if (tag == SessionHookTimerA || tag == SessionHookTimerB || tag == SessionHookCall) {
@@ -4568,11 +4707,31 @@ struct PlaceNote {
     s32 session;     // SprjSessionManager state: 3 hosting, 6 guest
     u32 map;         // packed map
     s32 return_point;
+    std::array<u32, 4> progress; // a host's shared progress, a few entries at a time
 };
-constexpr u32 PlaceNoteMagic = 0x31534242;
+constexpr u32 PlaceNoteMagic = 0x32534242;
 
 void PublishOwnPlace(s32 session) {
-    const PlaceNote note{PlaceNoteMagic, session, GetCurrentPackedMap(), last_return_point.load()};
+    PlaceNote note{PlaceNoteMagic, session, GetCurrentPackedMap(), last_return_point.load(), {}};
+    if (session == 3 && ShareProgressEnabled()) {
+        // Boss entries go out first and at least two per note; the lanterns take turns.
+        static size_t boss_turn = 0;
+        static size_t lantern_turn = 0;
+        std::scoped_lock lock{progress_mutex};
+        size_t used = 0;
+        const size_t boss = std::min<size_t>(progress_boss.size(),
+                                             progress_lanterns.empty() ? 4 : 2);
+        for (size_t index = 0; index < boss; ++index) {
+            note.progress[used++] = progress_boss[boss_turn++ % progress_boss.size()];
+        }
+        for (size_t index = 0; used < 4 && index < progress_lanterns.size(); ++index) {
+            const u32 lit = progress_lanterns[lantern_turn++ % progress_lanterns.size()] +
+                            LanternLitFlagOffset;
+            if (GetEventFlag(static_cast<s32>(lit & 0x0FFFFFFF))) {
+                note.progress[used++] = lit;
+            }
+        }
+    }
     if (IsUsablePackedMap(note.map)) {
         Libraries::Net::P2PSeamlessBroadcast(&note, sizeof(note));
     }
@@ -4604,6 +4763,156 @@ s32 HostPlaceToFollow() {
         return any_lantern; // the host respawned there: any lantern of that map
     }
     return 0;
+}
+
+// The guest's side of the shared progress: take what the host's notes carry. The game puts a
+// guest's own flags back when it leaves the session, so every flag is kept, also in a file
+// (the guest may quit the game from the host's world), and written again in the guest's own
+// world until it has stayed set there for a while.
+struct KeptProgress {
+    std::string owner; // the character it belongs to
+    u32 entry;
+    std::chrono::steady_clock::time_point set_since{};
+};
+
+// The local character's name as hex text (PlayerGameData+0xA8, UTF-16), or empty.
+std::string ProgressOwner() {
+    const u64 game_data_man = ReadValue<u64>(image_base + GameDataManPointerOffset, 0);
+    const u64 game_data = game_data_man >= 0x10000 ? ReadValue<u64>(game_data_man, 8) : 0;
+    std::string owner;
+    for (u64 index = 0; game_data >= 0x10000 && index < 16; ++index) {
+        const u16 letter = ReadValue<u16>(game_data, 0xA8 + index * 2);
+        if (letter == 0) {
+            break;
+        }
+        owner += fmt::format("{:04x}", letter);
+    }
+    return owner;
+}
+
+void ApplySharedProgress(s32 session, bool in_world) {
+    using clock = std::chrono::steady_clock;
+    static std::vector<KeptProgress> kept;
+    static std::vector<u32> awarded;
+    static bool loaded = false;
+    static clock::time_point next_at_home{};
+    if (!ShareProgressEnabled() || !in_world) {
+        return;
+    }
+    static const std::filesystem::path path =
+        Common::FS::GetUserPath(Common::FS::PathType::UserDir) / "seamless_progress.txt";
+    const auto save = [] {
+        std::ofstream file{path, std::ios::trunc};
+        for (const auto& item : kept) {
+            file << item.owner << ' ' << item.entry << std::endl;
+        }
+    };
+    if (!loaded) {
+        loaded = true;
+        std::ifstream file{path};
+        KeptProgress item;
+        while (file >> item.owner >> item.entry) {
+            kept.push_back(item);
+        }
+        if (!kept.empty()) {
+            LOG_INFO(Debug, "Bloodborne progress: {} kept entries read", kept.size());
+        }
+    }
+    const std::string owner = ProgressOwner();
+    if (owner.empty()) {
+        return;
+    }
+    const auto now = clock::now();
+    if (session == 0) {
+        if (now < next_at_home) {
+            return;
+        }
+        next_at_home = now + std::chrono::seconds{5};
+        const size_t before = kept.size();
+        std::erase_if(kept, [&](KeptProgress& item) {
+            if (item.owner != owner) {
+                return false;
+            }
+            const s32 id = static_cast<s32>(item.entry & 0x0FFFFFFF);
+            if (item.entry >> 28 != ProgressFlag) {
+                return true; // item lots were handed over in the session
+            }
+            if (!GetEventFlag(id)) {
+                SetEventFlag(id, true);
+                item.set_since = now;
+                LOG_INFO(Debug, "Bloodborne progress: guest sets flag {} in its own world", id);
+                return false;
+            }
+            if (item.set_since == clock::time_point{}) {
+                item.set_since = now;
+            }
+            return now - item.set_since >= std::chrono::seconds{90}; // it has stayed: done
+        });
+        if (kept.size() != before) {
+            save();
+            LOG_INFO(Debug, "Bloodborne progress: {} entries settled, {} still kept",
+                     before - kept.size(), kept.size());
+        }
+        return;
+    }
+    if (session != 6) {
+        return;
+    }
+    std::array<PlaceNote, 4> notes{};
+    const int count = Libraries::Net::P2PSeamlessCollect(notes.data(), sizeof(PlaceNote),
+                                                         static_cast<u32>(notes.size()));
+    for (int index = 0; index < count; ++index) {
+        if (notes[index].magic != PlaceNoteMagic || notes[index].session != 3) {
+            continue;
+        }
+        for (const u32 entry : notes[index].progress) {
+            const s32 id = static_cast<s32>(entry & 0x0FFFFFFF);
+            if (entry == 0) {
+                continue;
+            }
+            if (kept.size() < 512 && std::ranges::none_of(kept, [&](const KeptProgress& item) {
+                    return item.entry == entry && item.owner == owner;
+                })) {
+                kept.push_back({owner, entry, {}});
+                save();
+            }
+            for (auto& item : kept) {
+                item.set_since = {}; // nothing counts as settled before the guest is home
+            }
+            if (entry >> 28 == ProgressFlag && !GetEventFlag(id)) {
+                SetEventFlag(id, true);
+                LOG_INFO(Debug, "Bloodborne progress: guest sets flag {}", id);
+            } else if (entry >> 28 == ProgressItemLot && !std::ranges::contains(awarded, entry)) {
+                awarded.push_back(entry);
+                AwardItemLot(id);
+                LOG_INFO(Debug, "Bloodborne progress: guest receives item lot {}", id);
+            }
+        }
+    }
+}
+
+// Four times a second from the game's update, in a session or not.
+void ApplySharedProgressTick() {
+    using clock = std::chrono::steady_clock;
+    static clock::time_point next_check{};
+    const auto now = clock::now();
+    if (!ShareProgressEnabled() || now < next_check) {
+        return;
+    }
+    next_check = now + std::chrono::milliseconds{250};
+    const u64 multi_play = GetMatchingState();
+    const u64 state = GetGlobalState();
+    const u64 world_chr_man = ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0);
+    const u64 player = world_chr_man >= 0x10000 ? ReadValue<u64>(world_chr_man, 0x60) : 0;
+    const u64 data = GetChrDataModule(player);
+    const s32 session = multi_play >= 0x10000 ? ReadValue<s32>(multi_play, 0x124) : 0;
+    if (session != 3) { // a host forgets its boss entries with the session
+        std::scoped_lock lock{progress_mutex};
+        progress_boss.clear();
+    }
+    ApplySharedProgress(session, state >= 0x10000 && ReadValue<u8>(state, 0x08) == 0 &&
+                                     ReadValue<u8>(state, 0x1520) == 0 && data != 0 &&
+                                     ReadValue<s32>(data, DataModuleHpOffset) > 0);
 }
 
 // In a session, in the world, but a player of the session has no character here: this client's
@@ -4788,6 +5097,24 @@ static void InstallSessionHooks(u64 base) {
     if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + StageTransitionOffset), Prologue,
                               SessionHookTransition, SessionEntry)) {
         LOG_ERROR(Debug, "Bloodborne session hook failed at the stage transition request");
+    }
+    // SHADPS4_BLOODBORNE_FLAG_LOG=1: every event flag that changes, with the caller (test aid).
+    static constexpr std::array<u8, 6> FlagSetPrologue{0x41, 0x89, 0xD0, 0x8B, 0x4F, 0x1C};
+    if (EnvFlagEnabled("SHADPS4_BLOODBORNE_FLAG_LOG") &&
+        !InstallGuestCodeHook(reinterpret_cast<void*>(base + EventFlagSetOffset), FlagSetPrologue,
+                              SessionHookFlagSet, SessionEntry)) {
+        LOG_ERROR(Debug, "Bloodborne session hook failed at the event flag setter");
+    }
+    if (ShareProgressEnabled()) {
+        if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + EventCommandHandlerOffset),
+                                  Prologue, SessionHookEventCommand, SessionEntry)) {
+            LOG_ERROR(Debug, "Bloodborne session hook failed at the event command handler");
+        }
+        if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_RE_TRACE") &&
+            !InstallGuestCodeHook(reinterpret_cast<void*>(base + LanternRegisterOffset), Prologue,
+                                  SessionHookLantern, SessionEntry)) {
+            LOG_ERROR(Debug, "Bloodborne session hook failed at the lantern registration");
+        }
     }
 }
 
