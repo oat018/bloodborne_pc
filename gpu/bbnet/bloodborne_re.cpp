@@ -56,6 +56,10 @@ extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 #define LOG_WARNING(log_class, ...) BB_COOP_LOG(__VA_ARGS__)
 #define LOG_ERROR(log_class, ...) BB_COOP_LOG(__VA_ARGS__)
 
+namespace Libraries::Http {
+void ReplayBloodborneSummonCreate(u32 interval_seconds);
+} // namespace Libraries::Http
+
 namespace Libraries::Net {
 int P2PSeamlessBroadcast(const void* data, u32 len);
 int P2PSeamlessCollect(void* out, u32 entry_size, u32 max_entries);
@@ -1848,14 +1852,122 @@ void ApplyAutoRejoin() {
     requested_bell_goods.store(goods_id);
 }
 
+// Puts the local player where another player of the session stands, with the game's same-map
+// placement helper (the one behind the debug command "RemoteWarpPlayer"):
+//   0x0154B110(map manager [0x553B148], &block id, &position, &orientation)
+// A character's transform is [[chr + 0x3B0] + 0x68]: orientation at +0x1D0, position at +0x1E0.
+// Returns the distance moved, or a negative number when nothing was done.
+constexpr u64 MapManagerPointerOffset = 0x0553B148;
+constexpr u64 SameMapPlacementOffset = 0x0154B110;
+
+u64 GetChrTransform(u64 chr) {
+    const u64 modules = chr >= 0x10000 ? ReadValue<u64>(chr, ChrModulesOffset) : 0;
+    const u64 transform = modules >= 0x10000 ? ReadValue<u64>(modules, 0x68) : 0;
+    return transform >= 0x10000 && HasMemoryAccess(transform, 0x1F0, MemoryProt::CpuRead)
+               ? transform
+               : 0;
+}
+
+float MoveToPartner(u64 world_chr_man, u64 player, float min_distance) {
+    const u64 own = GetChrTransform(player);
+    const u64 map_manager = ReadValue<u64>(image_base + MapManagerPointerOffset, 0);
+    if (own == 0 || map_manager < 0x10000 || world_chr_man < 0x10000) {
+        return -1.0f;
+    }
+    // The host is the partner that is not a phantom (character type 0); else any partner.
+    u64 target = 0;
+    const s32 count = ReadValue<s32>(world_chr_man, WorldChrManCountOffset);
+    const u64 entries = ReadValue<u64>(world_chr_man, WorldChrManEntriesOffset);
+    for (s32 index = 0; entries >= 0x10000 && index < std::min(count, 8); ++index) {
+        const u64 chr = ReadValue<u64>(entries, index * WorldChrManEntrySize);
+        const u64 chr_data = chr != player ? GetChrDataModule(chr) : 0;
+        if (chr_data == 0 || ReadValue<s32>(chr_data, DataModuleHpOffset) <= 0 ||
+            GetChrTransform(chr) == 0) {
+            continue;
+        }
+        if (target == 0 || ReadValue<s32>(chr, 0x78) == 0) {
+            target = chr;
+        }
+    }
+    if (target == 0) {
+        return -1.0f;
+    }
+    const u64 transform = GetChrTransform(target);
+    alignas(16) std::array<float, 4> position{};
+    alignas(16) std::array<float, 4> orientation{};
+    float distance_squared = 0.0f;
+    for (size_t index = 0; index < 4; ++index) {
+        position[index] = ReadValue<float>(transform, 0x1E0 + index * sizeof(float));
+        orientation[index] = ReadValue<float>(transform, 0x1D0 + index * sizeof(float));
+        if (!std::isfinite(position[index]) || !std::isfinite(orientation[index])) {
+            return -1.0f;
+        }
+        if (index < 3) {
+            const float delta =
+                position[index] - ReadValue<float>(own, 0x1E0 + index * sizeof(float));
+            distance_squared += delta * delta;
+        }
+    }
+    const float distance = std::sqrt(distance_squared);
+    if (distance < min_distance) {
+        return -1.0f;
+    }
+    s32 block = ReadValue<s32>(player, 0x3F8); // the player's own block: the helper's same-map path
+    using Place = void PS4_SYSV_ABI (*)(u64 map_manager, s32* block, float* position,
+                                        float* orientation);
+    reinterpret_cast<Place>(image_base + SameMapPlacementOffset)(map_manager, &block,
+                                                                 position.data(),
+                                                                 orientation.data());
+    LOG_INFO(Debug, "Bloodborne session: moved {:.1f} m to the other player at {:.1f} {:.1f} {:.1f}",
+             distance, position[0], position[1], position[2]);
+    return distance;
+}
+
+// The game asks the server for hosts every SummonDataGetListInterval seconds (35 with shadNet's
+// settings) and a rung Small Resonant Bell advertises every 30 s, so a match took one to two
+// minutes. Both waits are capped here: SHADPS4_BLOODBORNE_MATCH_INTERVAL=<seconds>, default 5,
+// 0 leaves the game's own timing.
+//   host:  settings object [SprjNetworkClientMan + 0x18], dword +0x8A0, read again for every search
+//   guest: countdown float at +0x210 of the object updated by SosStatus.Update (its rdi)
+void ApplyFastMatching(u64 sos_status) {
+    static const u32 seconds = [] {
+        const char* value = std::getenv("SHADPS4_BLOODBORNE_MATCH_INTERVAL");
+        const long parsed = value != nullptr && *value != '\0' ? std::strtol(value, nullptr, 10) : 5;
+        return static_cast<u32>(std::clamp<long>(parsed, 0, 60));
+    }();
+    if (seconds == 0 || image_base == 0) {
+        return;
+    }
+    // guest: its advertisement is repeated by the game every 30 s only; the HTTP layer repeats
+    // the last one in between (the answer is what sends a guest to a host in another area)
+    Libraries::Http::ReplayBloodborneSummonCreate(seconds);
+    const u64 client = ReadValue<u64>(image_base + 0x5540288, 0);
+    const u64 settings = client >= 0x10000 ? ReadValue<u64>(client, 0x18) : 0;
+    // +0x8A4 SummonDataGetListGuardTimer and +0x8C8 ...CoopGuardTimerClampTime (both 60): how
+    // long the host leaves a guest alone after a summon that did not complete.
+    if (settings >= 0x10000 && HasMemoryAccess(settings + 0x8A0, 0x30, MemoryProt::CpuWrite)) {
+        for (const u64 offset : {0x8A0ULL, 0x8A4ULL, 0x8C8ULL}) {
+            if (ReadValue<u32>(settings, offset) > seconds) {
+                WriteValue(settings, offset, seconds);
+            }
+        }
+    }
+    if (sos_status >= 0x10000 &&
+        HasMemoryAccess(sos_status + 0x210, sizeof(float), MemoryProt::CpuWrite) &&
+        ReadValue<float>(sos_status, 0x210) > static_cast<float>(seconds)) {
+        WriteValue(sos_status, 0x210, static_cast<float>(seconds));
+    }
+}
+
 // Test aid, on with SHADPS4_BLOODBORNE_DEBUG_FILE=<file>: logs the session state when it changes
 // and runs one command line written to that file (the file is emptied once read):
-//   kill | hp <n> | bell <goods> | stop | regroup | warp <return point id>
+//   kill | hp <n> | bell <goods> | stop | regroup | warp <return point id> | gohost
 //   enemies | mark <max hp> | killmark     (the scan of enemies/mark stalls the game ~30 s)
 //   peek <image offset> [<offset> ...]             follows the pointer chain, dumps 8 qwords
 //   poke32 <value> <image offset> [<offset> ...]   writes a dword at the end of the chain
 // Numbers are hexadecimal except for hp and bell.
 u64 marked_character{};
+u64 sos_status_object{}; // rdi of SosStatus.Update
 
 void ApplyDebugCommands() {
     static const char* path = std::getenv("SHADPS4_BLOODBORNE_DEBUG_FILE");
@@ -1889,6 +2001,37 @@ void ApplyDebugCommands() {
         state >= 0x10000 ? ReadValue<u8>(state, 0x1520) : 0xFF,
         latch_owner >= 0x10000 ? ReadValue<s32>(latch_owner, 8) : -1,
         HasPlayerEffect(player, 9000), HasPlayerEffect(player, SmallResonantBellEffectId));
+    // What the guest's join decision in SosStatus.Update (0x0187382B..) looks at: the status
+    // object's flag +0x1F8, the pending summon requests ([FrpgNetMan + 0xC50] + 0x158) and the
+    // player's area ids.
+    {
+        const u64 net_man = ReadValue<u64>(image_base + 0x553B120, 0);
+        const u64 sos_man = net_man >= 0x10000 ? ReadValue<u64>(net_man, 0xC50) : 0;
+        const u64 head = sos_man >= 0x10000 ? ReadValue<u64>(sos_man, 0x158) : 0;
+        // A request can be taken (0x014BB200) when its +0xC8 is non-zero, its data +0xB8 is
+        // there and the object at +0xC0 is absent or has state 3 at +0x114 (1 = keep waiting,
+        // 0 / 2 = the request is thrown away).
+        int requests = 0;
+        std::string request_state;
+        for (u64 node = head >= 0x10000 ? ReadValue<u64>(head, 0) : 0;
+             node >= 0x10000 && node != head && requests < 8; node = ReadValue<u64>(node, 0)) {
+            ++requests;
+            const u64 entry = ReadValue<u64>(node, 0x10);
+            if (entry >= 0x10000 && HasMemoryAccess(entry, 0xD0, MemoryProt::CpuRead)) {
+                const u64 extra = ReadValue<u64>(entry, 0xC0);
+                request_state += fmt::format(
+                    "[c8={} data={} len={} extra={}]", ReadValue<s32>(entry, 0xC8),
+                    ReadValue<u64>(entry, 0xB8) != 0, ReadValue<u32>(entry, 0xB0),
+                    extra >= 0x10000 ? ReadValue<s32>(extra, 0x114) : -1);
+            }
+        }
+        status += fmt::format(
+            " sos={} req={}{} area={}/{}",
+            sos_status_object >= 0x10000 ? ReadValue<u8>(sos_status_object, 0x1F8) : 0xFF, requests,
+            request_state,
+            player >= 0x10000 ? ReadValue<s32>(player, 0x278) : 0,
+            player >= 0x10000 ? ReadValue<s32>(player, 0x27C) : 0);
+    }
     // Insertion tasks as type:step:flags.
     std::string tasks;
     if (multi_player_ins_manager >= 0x10000 &&
@@ -2065,6 +2208,60 @@ void ApplyDebugCommands() {
         RequestSessionStop(false);
     } else if (command == "regroup") {
         RequestSessionStop(true);
+    } else if (command == "fscan" || command == "fdiff") {
+        static std::vector<std::pair<u64, float>> candidates;
+        static clock::time_point taken{};
+        const float passed = std::chrono::duration<float>(now - taken).count();
+        if (command == "fscan") {
+            u64 low = 0;
+            u64 high = 0;
+            words >> std::hex >> low >> high;
+            candidates.clear();
+            for (u64 page = low & ~0xFFFULL; page < high && candidates.size() < 6000000;
+                 page += 0x1000) {
+                if (!HasMemoryAccess(page, 0x1000, MemoryProt::CpuRead)) {
+                    continue;
+                }
+                for (u64 at = page; at < page + 0x1000; at += 4) {
+                    float value;
+                    std::memcpy(&value, reinterpret_cast<const void*>(at), sizeof(value));
+                    if (value >= 0.05f && value <= 40.0f) {
+                        candidates.emplace_back(at, value);
+                    }
+                }
+            }
+        } else {
+            std::vector<std::pair<u64, float>> kept;
+            u64 checked_page = ~0ULL;
+            bool readable = false;
+            for (const auto& [at, before] : candidates) {
+                if ((at & ~0xFFFULL) != checked_page) {
+                    checked_page = at & ~0xFFFULL;
+                    readable = HasMemoryAccess(checked_page, 0x1000, MemoryProt::CpuRead);
+                }
+                if (!readable) {
+                    continue;
+                }
+                float value;
+                std::memcpy(&value, reinterpret_cast<const void*>(at), sizeof(value));
+                const float moved = std::abs(value - before);
+                if (moved >= passed * 0.8f && moved <= passed * 1.2f) {
+                    kept.emplace_back(at, value);
+                }
+            }
+            candidates = std::move(kept);
+            std::string list;
+            for (size_t index = 0; index < std::min<size_t>(candidates.size(), 40); ++index) {
+                list += fmt::format(" {:#x}={:.2f}", candidates[index].first,
+                                    candidates[index].second);
+            }
+            LOG_INFO(Debug, "Bloodborne debug: fdiff after {:.1f} s:{}", passed, list);
+        }
+        taken = clock::now();
+        LOG_INFO(Debug, "Bloodborne debug: {} candidates {}", command, candidates.size());
+    } else if (command == "gohost") {
+        const float moved = MoveToPartner(world_chr_man, player, 0.0f);
+        LOG_INFO(Debug, "Bloodborne debug: gohost {}", moved);
     } else if (command == "peek") {
         const u64 address = follow();
         std::string dump;
@@ -3451,7 +3648,9 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         ApplyPreMatchCrossMapGuestWarp();
         ApplyDeferredSummonReload();
         ResumePreMatchCrossMapResponder();
+        sos_status_object = registers->rdi;
         ApplyDebugCommands();
+        ApplyFastMatching(registers->rdi);
         ApplyGuestReinsertAfterReload();
         ApplyRequestedBellUse();
         ApplyRequestedSessionStop();
@@ -4455,6 +4654,7 @@ void ApplyGuestReinsertAfterReload() {
         // still starting up (before "InGameStart") crashes the game.
         static clock::time_point settled_since{};
         static clock::time_point next_follow{};
+        static clock::time_point join_spot_until{};
         static u32 settled_map = 0;
         const u32 current_map = GetCurrentPackedMap();
         if (current_map != settled_map) {
@@ -4465,6 +4665,7 @@ void ApplyGuestReinsertAfterReload() {
             now - settled_since >= std::chrono::seconds{8}) {
             if (const s32 lantern = HostPlaceToFollow(); lantern != 0) {
                 next_follow = now + std::chrono::seconds{30};
+                join_spot_until = now + std::chrono::seconds{120};
                 LOG_INFO(Debug,
                          "Bloodborne session: guest in map {:#x} follows the host to return "
                          "point {}",
@@ -4472,6 +4673,23 @@ void ApplyGuestReinsertAfterReload() {
                 using WarpToLantern = void PS4_SYSV_ABI (*)(s32 return_point);
                 reinterpret_cast<WarpToLantern>(image_base + ReturnPointWarpOffset)(lantern);
                 return;
+            }
+        }
+        // Arrived at the host's lantern: go on to where the host stands, once the host's
+        // character has been in this world for a few seconds.
+        static int host_seen = 0;
+        if (session != 6 || now >= join_spot_until) {
+            host_seen = 0;
+        } else if (now - settled_since >= std::chrono::seconds{4}) {
+            host_seen = GetPartnerState(world_chr_man, player).alive > 0 ? host_seen + 1 : 0;
+            // 3 s of 250 ms checks. The host's character first shows up at the arrival point and
+            // takes its real position a moment later, so keep looking for 20 s.
+            if (host_seen == 12) {
+                join_spot_until = std::min(join_spot_until, now + std::chrono::seconds{20});
+            }
+            if (host_seen >= 12 && MoveToPartner(world_chr_man, player, 5.0f) > 0.0f) {
+                join_spot_until = {};
+                host_seen = 0;
             }
         }
     }

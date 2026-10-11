@@ -20,7 +20,7 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   taken back to the host's area a few seconds later.
 - The session survives a boss kill. Nobody is sent home.
 - The host can use lanterns inside the session. When the host travels, guests are taken to the
-  same lantern.
+  same lantern, and from there to the spot where the host stands.
 - Bell hotkeys, so no Insight or bell items are needed: PgUp = Beckoning Bell (host),
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
 - With `SHADPS4_BLOODBORNE_AUTO_REJOIN=1` the same bell is rung again when the players really
@@ -29,15 +29,23 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   section at the bottom of the Insert menu). The relative-mouse plumbing comes from
   `Mush-iii/bloodborne_pc`.
 
-Known limits: guests cannot use lanterns themselves and arrive at the host's lantern, not at
-the host's position; a guest that respawned or travelled looks like an ordinary player on its
-own screen; three or more players were never tried; enemy scaling and the other extras of the
+Known limits: guests cannot use lanterns themselves; a guest that respawned or travelled looks
+like an ordinary player on its own screen; three or more players were never tried; enemy scaling and the other extras of the
 Souls mods do not exist.
 
-Known problem: sometimes a match does not complete. The server shows the host claiming the
-guest again and again while the guest never joins (in the two-instance tests this happened in
-roughly one start out of three on a bad evening, and not at all on others). Restarting both
-games has always cleared it.
+Matching takes about 10 s when both players are in the same area and about 30 s when the guest
+first has to load the host's area (measured with two copies of the game on one PC; it was one
+to two minutes). The game itself looks for hosts every 35 s, repeats a guest's advertisement
+every 30 s and leaves a guest alone for a minute after a summon that did not complete; these
+waits are capped at 5 s (`SHADPS4_BLOODBORNE_MATCH_INTERVAL=<seconds>`, 0 for the game's own
+timing).
+
+Known problem: in roughly one cross-area match out of eight the first summon does not complete.
+The two games connect and the host sends its summon request, but the guest's game does not act
+on it and closes the connection 7 s later (no packet is lost; the cause is not found yet). The
+host tries again by itself about a minute later, and a guest still waiting after 100 s rings
+its bell anew; most of these matches form within two to three minutes. If one does not,
+restarting both games has always cleared it.
 
 The Linux build is compiled by the workflow of this branch and has not been run by the author
 (no Linux machine); only the Windows build was tested.
@@ -54,8 +62,7 @@ Every player of a session needs the same build and the same switches.
 3. Copy the launch script from `packaging/seamless/` next to the game launcher, put the
    server address and your account in it, and start the game with it:
    `Play Seamless Co-op.bat` on Windows, `play-seamless-coop.sh` on Linux.
-4. Choose "Play Online", then the host presses PgUp and the guest PgDn. The first match takes
-   up to a minute.
+4. Choose "Play Online", then the host presses PgUp and the guest PgDn.
 
 ## Building
 
@@ -85,6 +92,13 @@ That file is generated from shadp2p's `src/core/bloodborne_re.cpp` by
   travelled to, once a second, on a spare virtual port of the P2P transport
   (`gpu/shadps4/core/libraries/network/p2p_sockets.cpp`). A guest in another map than the host
   uses the game's own headstone warp to that lantern.
+  Once the host's character is in the guest's world, the guest is placed at its position with
+  the game's own same-map placement helper (the one behind the debug command
+  `RemoteWarpPlayer`).
+- Matching speed: the timing values of the game's network settings are lowered in memory, and
+  the HTTP layer repeats the guest's last advertisement between the game's own repeats (the
+  answer to it is what sends a guest to a host in another area).
 
+`SHADPS4_P2P_LOG=1` logs the first 3000 P2P datagrams of the game (needs `BB_GPU_LOG=info`).
 `SHADPS4_BLOODBORNE_DEBUG_FILE=<file>` turns on a test aid: the session state is logged when it
 changes and one command line written to that file is run (see `ApplyDebugCommands`).

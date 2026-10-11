@@ -1705,6 +1705,75 @@ int PS4_SYSV_ABI sceHttpRequestGetAllHeaders() {
     return ORBIS_OK;
 }
 
+// Bloodborne seamless: the game's last summon advertisement, repeated on request by
+// ReplayBloodborneSummonCreate. Dropped when the game removes its advertisement, when the server
+// answers with a host placement (the guest is about to travel and will advertise anew), or when
+// the game has not advertised for 45 s.
+namespace {
+struct BloodborneCreateReplay {
+    std::mutex mutex;
+    SendRequestPlan plan;
+    bool valid = false;
+    bool busy = false;
+    std::chrono::steady_clock::time_point last_native{};
+    std::chrono::steady_clock::time_point last_sent{};
+};
+BloodborneCreateReplay g_bloodborne_create_replay;
+
+void NoteBloodborneSummonRequest(const SendRequestPlan& plan) {
+    auto& replay = g_bloodborne_create_replay;
+    std::lock_guard<std::mutex> lock(replay.mutex);
+    if (IsBloodborneSummonCreatePath(plan.path)) {
+        replay.plan = plan;
+        replay.valid = true;
+        replay.last_native = replay.last_sent = std::chrono::steady_clock::now();
+    } else if (plan.path.find("/summon_messenger/delete") != std::string::npos) {
+        replay.valid = false;
+    }
+}
+} // namespace
+
+void ReplayBloodborneSummonCreate(u32 interval_seconds) {
+    auto& replay = g_bloodborne_create_replay;
+    SendRequestPlan plan;
+    {
+        std::lock_guard<std::mutex> lock(replay.mutex);
+        const auto now = std::chrono::steady_clock::now();
+        if (!replay.valid || replay.busy ||
+            now - replay.last_sent < std::chrono::seconds{interval_seconds}) {
+            return;
+        }
+        if (now - replay.last_native > std::chrono::seconds{45}) {
+            replay.valid = false;
+            return;
+        }
+        replay.busy = true;
+        replay.last_sent = now;
+        plan = replay.plan;
+    }
+    std::thread([plan = std::move(plan)]() {
+        HttpResponse response;
+        u32 event_bits = 0;
+        const s32 error = RunRealHttpRequest(plan, response, event_bits);
+        bool placed = false;
+        if (error == 0) {
+            if (const auto placement =
+                    FindResponseHeader(response.all_headers_blob, BloodborneHostPlacementHeader)) {
+                placed = Core::Bloodborne::SetSeamlessHostPlacementHeader(*placement);
+            }
+        }
+        LOG_INFO(Lib_Http, "Bloodborne seamless: advertisement repeated (errno={:#x} status={}{})",
+                 static_cast<u32>(error), response.status_code,
+                 placed ? ", host placement received" : "");
+        auto& state = g_bloodborne_create_replay;
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.busy = false;
+        if (placed) {
+            state.valid = false;
+        }
+    }).detach();
+}
+
 int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
     LOG_INFO(Lib_Http, "called reqId={}, postData={}, size={}", reqId, fmt::ptr(postData), size);
     std::shared_ptr<HttpRequest> req_ptr;
@@ -1777,7 +1846,9 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
         }
     }
 
-    ApplyBloodborneSeamlessRoute(plan);
+    if (ApplyBloodborneSeamlessRoute(plan)) {
+        NoteBloodborneSummonRequest(plan);
+    }
 
     const bool online = EmulatorSettings.IsConnectedToNetwork();
     LOG_INFO(Lib_Http, "reqId={} dispatched to async worker [{} {} {}://{}:{}{}]", reqId,

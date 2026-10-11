@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <string>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -28,6 +29,33 @@
 #include "net_error.h"
 
 namespace Libraries::Net {
+
+// SHADPS4_P2P_LOG=1: the first datagrams of the game at Info level (see the TX / RX sites).
+static bool P2PLogWanted() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_P2P_LOG");
+        return value != nullptr && value[0] == '1';
+    }();
+    static std::atomic<int> budget{3000};
+    return enabled && budget.fetch_sub(1) > 0;
+}
+
+static long long P2PLogNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+static std::string P2PLogHead(const void* data, size_t size) {
+    static const char digits[] = "0123456789abcdef";
+    std::string out;
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (size_t index = 0; index < size && index < 96; ++index) {
+        out += digits[bytes[index] >> 4];
+        out += digits[bytes[index] & 15];
+    }
+    return out;
+}
 
 namespace {
 
@@ -821,6 +849,11 @@ int P2PSocket::SendPacket(const void* msg, u32 len, int flags, const OrbisNetSoc
     LOG_TRACE(Lib_Net, "P2P TX {} bytes vport {} -> {} dst={:#x}:{}", len,
               ntohs(local_addr.sin_vport), ntohs(target.sin_vport), target.sin_addr,
               ntohs(target.sin_port));
+    if (P2PLogWanted()) {
+        LOG_INFO(Lib_Net, "P2P TX t={} {} bytes vport {} -> {} dst={:#x}:{} head={}", P2PLogNowMs(),
+                 len, ntohs(local_addr.sin_vport), ntohs(target.sin_vport), target.sin_addr,
+                 ntohs(target.sin_port), P2PLogHead(msg, len));
+    }
     return rc;
 }
 
@@ -1003,6 +1036,12 @@ void P2PSocket::EnqueuePacket(P2PDatagram packet) {
     LOG_TRACE(Lib_Net, "P2P RX {} bytes vport {} <- {} src={:#x}:{}", packet.payload.size(),
               ntohs(local_addr.sin_vport), ntohs(packet.source_vport), packet.source_addr,
               ntohs(packet.source_port));
+    if (P2PLogWanted()) {
+        LOG_INFO(Lib_Net, "P2P RX t={} {} bytes vport {} <- {} src={:#x}:{} head={}",
+                 P2PLogNowMs(), packet.payload.size(), ntohs(local_addr.sin_vport),
+                 ntohs(packet.source_vport), packet.source_addr, ntohs(packet.source_port),
+                 P2PLogHead(packet.payload.data(), packet.payload.size()));
+    }
     receive_queue.push_back(std::move(packet));
 
 #ifdef _WIN32
