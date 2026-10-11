@@ -19,6 +19,10 @@ set SHADPS4_BLOODBORNE_AUTO_REJOIN=1
 rem Seamless rules: the session survives deaths and boss kills, lanterns work inside the session
 rem and guests follow the host when it travels. Every player needs the same setting.
 set SHADPS4_BLOODBORNE_STAY_IN_SESSION=1
+rem Experimental: every player has its own items lying in the world (a guest picks up
+rem the host world's items for itself). Every player needs the same setting; remove "rem " from
+rem the next line.
+rem set SHADPS4_BLOODBORNE_GUEST_ITEMS=1
 rem Built-in mouse + keyboard controls: remove "rem " from the next line.
 rem set BB_MOUSE_KEYBOARD=1
 

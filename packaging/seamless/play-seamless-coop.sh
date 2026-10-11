@@ -21,6 +21,10 @@ export SHADPS4_BLOODBORNE_AUTO_REJOIN=1
 # Seamless rules: the session survives deaths and boss kills, lanterns work inside the session
 # and guests follow the host when it travels. Every player needs the same setting.
 export SHADPS4_BLOODBORNE_STAY_IN_SESSION=1
+# Experimental: every player has its own items lying in the world (a guest picks up
+# the host world's items for itself). Every player needs the same setting; remove "# " from
+# the next line.
+# export SHADPS4_BLOODBORNE_GUEST_ITEMS=1
 # export BB_MOUSE_KEYBOARD=1   # built-in mouse + keyboard controls
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)

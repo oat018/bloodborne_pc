@@ -19,6 +19,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <sstream>
 #include <string>
@@ -2172,10 +2173,25 @@ void ApplyDebugCommands() {
         }
         LOG_INFO(Debug, "Bloodborne debug: marked character {:#x} hp set to 0 (data {:#x})",
                  marked_character, chr_data);
-    } else if (command == "enemies" || command == "mark") {
+    } else if (command == "enemies" || command == "mark" || command == "killall") {
         // Characters reachable from WorldChrMan (pointer arrays found by scanning it), by max HP.
+        // killall <lowest max hp> <highest max hp>: hp 0 for every living character in the range.
         s32 wanted_max_hp = 0;
+        s32 highest_max_hp = 0;
+        s32 killed = 0;
         words >> std::dec >> wanted_max_hp; // mark <max hp>, e.g. 3015 for the Cleric Beast
+        words >> highest_max_hp;
+        // Plain reads after "mapped": the access check of ReadValue costs a millisecond.
+        const auto raw = [](u64 address) {
+            u64 value = 0;
+            std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+            return value;
+        };
+        const auto raw32 = [](u64 address) {
+            s32 value = 0;
+            std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+            return value;
+        };
         bool done = false;                  // "mark" stops at the first match
         std::vector<std::pair<s32, u64>> found;
         // Page access is cached for the scan: asking the system for every pointer is too slow.
@@ -2199,21 +2215,26 @@ void ApplyDebugCommands() {
             if (chr == player || (chr & 7) != 0 || !mapped(chr, 0x3C0)) {
                 return false;
             }
-            const u64 modules = ReadValue<u64>(chr, ChrModulesOffset);
+            const u64 modules = raw(chr + ChrModulesOffset);
             if ((modules & 7) != 0 || !mapped(modules, 0x28)) {
                 return false;
             }
-            const u64 chr_data = ReadValue<u64>(modules, ChrDataModuleOffset);
+            const u64 chr_data = raw(modules + ChrDataModuleOffset);
             if ((chr_data & 7) != 0 || !mapped(chr_data, 0x208)) {
                 return false;
             }
-            const s32 hp = ReadValue<s32>(chr_data, DataModuleHpOffset);
-            const s32 max_hp = ReadValue<s32>(chr_data, 0xFC);
+            const s32 hp = raw32(chr_data + DataModuleHpOffset);
+            const s32 max_hp = raw32(chr_data + 0xFC);
             if (max_hp <= 0 || max_hp > 500000 || hp < 0 || hp > max_hp) {
                 return false;
             }
             if (std::ranges::none_of(found, [&](const auto& item) { return item.second == chr; })) {
                 found.emplace_back(max_hp, chr);
+                if (command == "killall" && hp > 0 && max_hp >= wanted_max_hp &&
+                    max_hp <= highest_max_hp) {
+                    WriteValue(chr_data, DataModuleHpOffset, s32{0});
+                    ++killed;
+                }
                 if (command == "mark" && max_hp == wanted_max_hp) {
                     marked_character = chr;
                     done = true;
@@ -2228,24 +2249,36 @@ void ApplyDebugCommands() {
                 continue;
             }
             for (u64 i = 0; i < 64 && !done && mapped(first + i * 8, 8); ++i) {
-                const u64 second = ReadValue<u64>(first, i * 8);
+                const u64 second = raw(first + i * 8);
                 if ((second & 7) != 0 || consider(second)) {
                     continue;
                 }
                 for (u64 j = 0; j < 2048 && !done && mapped(second + j * 8, 8); ++j) {
-                    consider(ReadValue<u64>(second, j * 8));
+                    consider(raw(second + j * 8));
                 }
             }
         }
         std::ranges::sort(found, std::greater{});
         std::string list;
-        for (size_t index = 0; index < std::min<size_t>(found.size(), 12); ++index) {
+        // One of each max hp (9999 = map objects), the first sixteen: hp/max hp(chr type)xcount.
+        for (size_t index = 0, shown = 0; index < found.size() && shown < 16; ++index) {
+            if (found[index].first == 9999 ||
+                (index > 0 && found[index].first == found[index - 1].first)) {
+                continue;
+            }
             const u64 chr_data = ReadValue<u64>(ReadValue<u64>(found[index].second, ChrModulesOffset),
                                                 ChrDataModuleOffset);
-            list += fmt::format(" {}/{}(t{})", ReadValue<s32>(chr_data, DataModuleHpOffset),
-                                found[index].first, ReadValue<s32>(found[index].second, 0x78));
+            list += fmt::format(" {}/{}(t{})x{}", ReadValue<s32>(chr_data, DataModuleHpOffset),
+                                found[index].first, ReadValue<s32>(found[index].second, 0x78),
+                                std::ranges::count(found, found[index].first,
+                                                   &std::pair<s32, u64>::first));
+            ++shown;
         }
         LOG_INFO(Debug, "Bloodborne debug: {} characters, by max hp:{}", found.size(), list);
+        if (command == "killall") {
+            LOG_INFO(Debug, "Bloodborne debug: killall {}..{}: {} characters", wanted_max_hp,
+                     highest_max_hp, killed);
+        }
         if (command == "mark") {
             LOG_INFO(Debug, "Bloodborne debug: marked the {} max hp character: {:#x}", wanted_max_hp,
                      done ? marked_character : 0);
@@ -2330,6 +2363,55 @@ void ApplyDebugCommands() {
     } else if (command == "gohost") {
         const float moved = MoveToPartner(world_chr_man, player, 0.0f);
         LOG_INFO(Debug, "Bloodborne debug: gohost {}", moved);
+    } else if (command == "pos" || command == "goto") {
+        // pos: the player's position; goto <x> <y> <z>: placed there (same map)
+        const u64 own = GetChrTransform(player);
+        alignas(16) std::array<float, 4> position{};
+        alignas(16) std::array<float, 4> orientation{};
+        for (size_t index = 0; own != 0 && index < 4; ++index) {
+            position[index] = ReadValue<float>(own, 0x1E0 + index * sizeof(float));
+            orientation[index] = ReadValue<float>(own, 0x1D0 + index * sizeof(float));
+        }
+        const u64 map_manager = ReadValue<u64>(image_base + MapManagerPointerOffset, 0);
+        if (command == "goto" && own != 0 && map_manager >= 0x10000) {
+            words >> std::dec >> position[0] >> position[1] >> position[2];
+            s32 block = ReadValue<s32>(player, 0x3F8);
+            using Place = void PS4_SYSV_ABI (*)(u64 map_manager, s32* block, float* position,
+                                                float* orientation);
+            reinterpret_cast<Place>(image_base + SameMapPlacementOffset)(
+                map_manager, &block, position.data(), orientation.data());
+        }
+        LOG_INFO(Debug, "Bloodborne debug: {} {:.1f} {:.1f} {:.1f}", command, position[0],
+                 position[1], position[2]);
+    } else if (command == "pickup") {
+        // pickup <item id hex>: the pick-up of an item lying in the world, by its list id
+        u32 id = 0;
+        words >> std::hex >> id;
+        const u64 manager = ReadValue<u64>(image_base + 0x0553D6E0, 0);
+        using PickUp = void PS4_SYSV_ABI (*)(u64 manager, u32* id);
+        reinterpret_cast<PickUp>(image_base + 0x017D8570)(manager, &id);
+        LOG_INFO(Debug, "Bloodborne debug: pickup {:#x}", id);
+    } else if (command == "items") {
+        // items: the map item manager's lists (items lying in the world)
+        const u64 manager = ReadValue<u64>(image_base + 0x0553D6E0, 0);
+        for (const u64 list : {0x18, 0x28, 0x38, 0xA0}) {
+            u64 node = manager >= 0x10000 ? ReadValue<u64>(manager, list) : 0;
+            s32 count = 0;
+            for (; node >= 0x10000 && count < 60; node = ReadValue<u64>(node, 0), ++count) {
+                LOG_INFO(Debug,
+                         "Bloodborne debug: item list {:#x} node {:#x} id={:#x} 24={:#x} 28={:#x} "
+                         "2c={:#x} pos={:.1f},{:.1f},{:.1f} 40={:#x} flags={:#x} 4c={:#x} 50={:#x} "
+                         "n={} item={:#x}/{}",
+                         list, node, ReadValue<u32>(node, 0x20), ReadValue<u32>(node, 0x24),
+                         ReadValue<u32>(node, 0x28), ReadValue<u32>(node, 0x2C),
+                         ReadValue<float>(node, 0x30), ReadValue<float>(node, 0x34),
+                         ReadValue<float>(node, 0x38), ReadValue<u64>(node, 0x40),
+                         ReadValue<u16>(node, 0x48), ReadValue<u32>(node, 0x4C),
+                         ReadValue<u32>(node, 0x50), ReadValue<s32>(node, 0x54),
+                         ReadValue<u32>(node, 0x58), ReadValue<s32>(node, 0x60));
+            }
+            LOG_INFO(Debug, "Bloodborne debug: item list {:#x} has {} nodes", list, count);
+        }
     } else if (command == "peek") {
         const u64 address = follow();
         std::string dump;
@@ -2391,9 +2473,13 @@ void ApplyDebugCommands() {
         u32 value = 0;
         words >> std::hex >> value;
         const u64 address = follow();
-        const bool ok = HasMemoryAccess(address, sizeof(u32), MemoryProt::CpuWrite);
+        // The image's code is writable in this process (the patches above write it), although
+        // the guest's protection flags say otherwise.
+        const bool ok = HasMemoryAccess(address, sizeof(u32), MemoryProt::CpuWrite) ||
+                        (address >= image_base &&
+                         address - image_base < MemoryPatcher::g_eboot_image_size);
         if (ok) {
-            WriteValue(address, 0, value);
+            std::memcpy(reinterpret_cast<void*>(address), &value, sizeof(value));
         }
         LOG_INFO(Debug, "Bloodborne debug: poke32 {:#x} = {:#x} {}", address, value,
                  ok ? "done" : "not writable");
@@ -4432,6 +4518,13 @@ enum SessionHook : u64 {
     SessionHookEventCommand, // (?, event executor in rsi): event script class 2003
     SessionHookLantern,      // (manager, flag in rsi, entity, ...): a lit lantern is registered
     SessionHookFlagSet,      // (flag manager, flag in rsi, state in rdx): test aid
+    SessionHookItemAdd,      // test aid: map item manager, a node enters the treasure list
+    SessionHookItemRemove,   // test aid: (manager, &item id, picked)
+    SessionHookItemPickup,   // test aid: (manager, &item id)
+    SessionHookItemObject,   // test aid: an object's treasure is set up
+    SessionHookItemRoll,     // test aid: an item lot is rolled (request in rdi, flag in rsi)
+    SessionHookItemClear,    // test aid: the treasure list is emptied
+    SessionHookItemClearShared, // test aid: the shared nodes of the treasure list are removed
 };
 constexpr u64 EventCommandHandlerOffset = 0x017C0420;
 constexpr u64 LanternRegisterOffset = 0x0133B030;
@@ -4505,6 +4598,22 @@ bool ShareProgressEnabled() {
     return enabled;
 }
 
+// Items lying in the world, each player its own (SHADPS4_BLOODBORNE_GUEST_ITEMS=1 with the
+// shared progress on). The game sets an object's treasure up for the host only; with the three
+// patches in the stay-in-session function a guest gets the same nodes, picks them up for
+// itself, and neither side's pick-up touches the other's node. The game does not set the
+// item's flag for a guest, so the mod does (kept like the boss flags).
+constexpr u64 MapItemManPointerOffset = 0x0553D6E0; // lists: +0x18, +0x28 (treasure), +0x38
+constexpr u64 MapItemRemoveOffset = 0x017D6780;     // (manager, &list id, picked up)
+constexpr u64 MapItemTreasureList = 0x28;           // node: +0 next, +0x20 id, +0x28 flag,
+                                                    // +0x2C object handle
+bool GuestItemsEnabled() {
+    static const bool enabled =
+        ShareProgressEnabled() && EnvFlagEnabled("SHADPS4_BLOODBORNE_GUEST_ITEMS");
+    return enabled;
+}
+std::vector<u32> guest_picked_flags; // flags of the items a guest picked up, not yet kept
+
 void AddProgress(std::vector<u32>& list, u32 kind, s32 id, const char* what) {
     if (id <= 0 || id >= (1 << 28)) {
         return;
@@ -4568,6 +4677,82 @@ void PS4_SYSV_ABI SessionEntry(u64 tag, const GuestRegisterSnapshot* registers) 
         if (GetEventFlag(flag) != (static_cast<s32>(registers->rdx) != 0)) {
             LOG_INFO(Debug, "Bloodborne flag: {} -> {} caller={:#x}", flag,
                      static_cast<s32>(registers->rdx), ReadValue<u64>(registers->rsp, 0) - image_base);
+        }
+        return;
+    }
+    if (tag == SessionHookItemRemove && GuestItemsEnabled() && registers->rdx == 1 &&
+        registers->rsi >= 0x10000) {
+        // The player picks an item up: note the item's flag (a guest's is kept, see
+        // ApplySharedProgress; at home it only completes the list of taken items).
+        const u32 id = ReadValue<u32>(registers->rsi, 0);
+        u64 node = ReadValue<u64>(registers->rdi, MapItemTreasureList);
+        for (s32 guard = 0; node >= 0x10000 && guard < 4096; ++guard) {
+            if (ReadValue<u32>(node, 0x20) == id) {
+                const s32 flag = ReadValue<s32>(node, 0x28);
+                if (flag > 0 && flag < 0x10000000) {
+                    std::scoped_lock lock{progress_mutex};
+                    guest_picked_flags.push_back(static_cast<u32>(flag));
+                }
+                break;
+            }
+            node = ReadValue<u64>(node, 0);
+        }
+    }
+    static const bool item_log = EnvFlagEnabled("SHADPS4_BLOODBORNE_ITEM_LOG");
+    if (tag >= SessionHookItemAdd && tag <= SessionHookItemClearShared && !item_log) {
+        return;
+    }
+    if (tag == SessionHookItemClear || tag == SessionHookItemClearShared) {
+        LOG_INFO(Debug, "Bloodborne item: {} state={} caller={:#x}",
+                 tag == SessionHookItemClear ? "clear" : "clear-shared",
+                 ReadValue<s32>(ReadValue<u64>(image_base + 0x05540290, 0), 0x124),
+                 ReadValue<u64>(registers->rsp, 0) - image_base);
+        return;
+    }
+    if (tag == SessionHookItemRoll || tag == SessionHookItemObject) {
+        static std::array<s32, 16> logged{};
+        const s32 state = ReadValue<s32>(ReadValue<u64>(image_base + 0x05540290, 0), 0x124);
+        const size_t slot = (tag == SessionHookItemRoll ? 8 : 0) + static_cast<size_t>(state & 7);
+        if (logged[slot]++ < 6) {
+            const u64 game_data = ReadValue<u64>(ReadValue<u64>(image_base + 0x0553B130, 0), 8);
+            const u64 request = registers->rdi;
+            LOG_INFO(Debug,
+                     "Bloodborne item: {} state={} chr_type={} rsi={:#x} request={:#x} {:#x} {:#x} "
+                     "{:#x} caller={:#x}",
+                     tag == SessionHookItemRoll ? "roll" : "object-detail", state,
+                     game_data >= 0x10000 ? ReadValue<s32>(game_data, 0xA4) : -1, registers->rsi,
+                     ReadValue<u64>(request, 0), ReadValue<u64>(request, 8),
+                     ReadValue<u64>(request, 0x10), ReadValue<u64>(request, 0x18),
+                     ReadValue<u64>(registers->rsp, 0) - image_base);
+        }
+        if (tag == SessionHookItemRoll) {
+            return;
+        }
+    }
+    if (tag >= SessionHookItemAdd && tag <= SessionHookItemObject) {
+        // SHADPS4_BLOODBORNE_ITEM_LOG=1: who adds, removes and picks up items lying in the world
+        static std::array<std::set<u64>, 4> seen;
+        static constexpr std::array<const char*, 4> names{"add", "remove", "pickup", "object"};
+        const size_t kind = tag - SessionHookItemAdd;
+        std::string chain = fmt::format("{:#x}", ReadValue<u64>(registers->rsp, 0) - image_base);
+        u64 key = ReadValue<u64>(registers->rsp, 0) +
+                  static_cast<u64>(ReadValue<s32>(ReadValue<u64>(image_base + 0x05540290, 0), 0x124));
+        u64 frame = registers->rbp;
+        for (s32 depth = 0; depth < 5 && frame >= 0x10000 &&
+                            HasMemoryAccess(frame, 16, MemoryProt::CpuRead); ++depth) {
+            const u64 ret = ReadValue<u64>(frame, 8);
+            chain += fmt::format(" < {:#x}", ret - image_base);
+            key = key * 31 + ret;
+            frame = ReadValue<u64>(frame, 0);
+        }
+        const bool fresh = seen[kind].insert(key).second;
+        if (fresh || kind != 0) {
+            const u64 argument = registers->rsi;
+            LOG_INFO(Debug, "Bloodborne item: {} arg={:#x} rdx={:#x} state={} chain {}", names[kind],
+                     kind == 0 || kind == 3 || argument < 0x10000 ? argument
+                                                                    : ReadValue<u32>(argument, 0),
+                     registers->rdx,
+                     ReadValue<s32>(ReadValue<u64>(image_base + 0x05540290, 0), 0x124), chain);
         }
         return;
     }
@@ -4823,6 +5008,119 @@ void ApplySharedProgress(s32 session, bool in_world) {
         return;
     }
     const auto now = clock::now();
+    // Items lying in the world. In a session a guest's treasure nodes come from the host's
+    // flags, so the items this character already took at home would be there again: at home
+    // the "taken" flags of every item lot are read (ItemLotParam: eight flags at +0x60 and a
+    // common one at +0x80), and in a session the nodes of those flags are removed.
+    static std::set<s32> home_taken;
+    static clock::time_point next_item_check{};
+    static std::set<s32> scan;
+    static u32 next_row = 0;
+    static std::string scanned_owner;
+    static clock::time_point home_since{};
+    static clock::duration scan_time{};
+    if (GuestItemsEnabled() && session == 0) {
+        {
+            std::scoped_lock lock{progress_mutex};
+            home_taken.insert(guest_picked_flags.begin(), guest_picked_flags.end());
+            guest_picked_flags.clear();
+        }
+        // One pass over the table per character, a small slice per call (four calls a second,
+        // about six seconds), so that the game never waits long for it. What the player picks
+        // up afterwards comes from the removal hook.
+        if (home_since == clock::time_point{}) {
+            home_since = now;
+        }
+        if (owner != scanned_owner && now - home_since >= std::chrono::seconds{15}) {
+            const u64 repository = ReadValue<u64>(image_base + 0x05540340, 0);
+            const u64 holder = repository >= 0x10000 ? ReadValue<u64>(repository, 0x5D0) : 0;
+            const u64 file = holder >= 0x10000 ? ReadValue<u64>(holder, 0x70) : 0;
+            const u64 param = file >= 0x10000 ? ReadValue<u64>(file, 0x70) : 0;
+            if (param >= 0x10000) {
+                const u32 rows = ReadValue<u16>(param, 0x0A);
+                const u8 format = ReadValue<u8>(param, 0x2D);
+                const bool wide = format > 3 && (ReadValue<u8>(param, 0x2E) & 2) != 0;
+                // The memory checks of ReadValue cost about a millisecond each: one check for
+                // the slice's row descriptors and one for its rows, then plain reads.
+                const u32 end = std::min(rows, next_row + 400);
+                const u64 step = format == 2 || !wide ? 12 : 24;
+                const u64 table = param + (format == 2 ? 0x34 : wide ? 0x48 : 0x44);
+                const auto row_offset = [&](u32 row) {
+                    u64 offset = 0;
+                    std::memcpy(&offset, reinterpret_cast<const void*>(table + row * step),
+                                wide && format != 2 ? 8 : 4);
+                    return offset;
+                };
+                u64 low = ~0ULL;
+                u64 high = 0;
+                const bool table_ok = HasMemoryAccess(table + next_row * step,
+                                                      (end - next_row) * step, MemoryProt::CpuRead);
+                for (u32 row = next_row; table_ok && row < end; ++row) {
+                    low = std::min(low, row_offset(row));
+                    high = std::max(high, row_offset(row));
+                }
+                const bool flags_ok =
+                    ReadValue<u64>(image_base + EventFlagManPointerOffset, 0) >= 0x10000;
+                if (table_ok && flags_ok && high - low < 0x100000 &&
+                    HasMemoryAccess(param + low, high - low + 0x84, MemoryProt::CpuRead)) {
+                    using Get = bool PS4_SYSV_ABI (*)(u64 unused, s32 flag);
+                    const auto get = reinterpret_cast<Get>(image_base + EventFlagGetOffset);
+                    for (u32 row = next_row; row < end; ++row) {
+                        const u64 data = param + row_offset(row);
+                        for (u64 field = 0x60; field <= 0x80; field += 4) {
+                            s32 flag = 0;
+                            std::memcpy(&flag, reinterpret_cast<const void*>(data + field), 4);
+                            if (flag > 0 && !scan.contains(flag) && get(0, flag)) {
+                                scan.insert(flag);
+                            }
+                        }
+                    }
+                }
+                next_row = end;
+                scan_time += clock::now() - now;
+                if (next_row >= rows) {
+                    home_taken.insert(scan.begin(), scan.end());
+                    LOG_INFO(Debug,
+                             "Bloodborne progress: {} item lots, {} items taken at home ({} ms)",
+                             rows, home_taken.size(),
+                             std::chrono::duration_cast<std::chrono::milliseconds>(scan_time)
+                                 .count());
+                    scanned_owner = owner;
+                    scan.clear();
+                    next_row = 0;
+                    scan_time = {};
+                }
+            }
+        }
+    } else if (GuestItemsEnabled()) {
+        // In a session the flags are the host's: an unfinished pass starts again at home.
+        scan.clear();
+        next_row = 0;
+        scan_time = {};
+        home_since = {};
+    }
+    if (GuestItemsEnabled() && now >= next_item_check && session == 6) {
+        next_item_check = now + std::chrono::seconds{3};
+        const u64 manager = ReadValue<u64>(image_base + MapItemManPointerOffset, 0);
+        if (manager >= 0x10000 && !home_taken.empty()) {
+            std::vector<u32> gone;
+            u64 node = ReadValue<u64>(manager, MapItemTreasureList);
+            for (s32 guard = 0; node >= 0x10000 && guard < 4096; ++guard) {
+                if (home_taken.contains(ReadValue<s32>(node, 0x28))) {
+                    gone.push_back(ReadValue<u32>(node, 0x20));
+                }
+                node = ReadValue<u64>(node, 0);
+            }
+            using Remove = void PS4_SYSV_ABI (*)(u64 manager, u32* id, u32 picked);
+            for (u32 id : gone) {
+                reinterpret_cast<Remove>(image_base + MapItemRemoveOffset)(manager, &id, 0);
+            }
+            if (!gone.empty()) {
+                LOG_INFO(Debug, "Bloodborne progress: {} items this guest already has removed",
+                         gone.size());
+            }
+        }
+    }
     if (session == 0) {
         if (now < next_at_home) {
             return;
@@ -4857,6 +5155,23 @@ void ApplySharedProgress(s32 session, bool in_world) {
     }
     if (session != 6) {
         return;
+    }
+    std::vector<u32> picked;
+    {
+        std::scoped_lock lock{progress_mutex};
+        picked.swap(guest_picked_flags);
+    }
+    for (const u32 flag : picked) {
+        const u32 entry = (ProgressFlag << 28) | flag;
+        if (kept.size() < 512 && std::ranges::none_of(kept, [&](const KeptProgress& item) {
+                return item.entry == entry && item.owner == owner;
+            })) {
+            kept.push_back({owner, entry, {}});
+            save();
+        }
+        SetEventFlag(static_cast<s32>(flag), true);
+        home_taken.insert(static_cast<s32>(flag));
+        LOG_INFO(Debug, "Bloodborne progress: guest picked up the item of flag {}", flag);
     }
     std::array<PlaceNote, 4> notes{};
     const int count = Libraries::Net::P2PSeamlessCollect(notes.data(), sizeof(PlaceNote),
@@ -5098,6 +5413,25 @@ static void InstallSessionHooks(u64 base) {
                               SessionHookTransition, SessionEntry)) {
         LOG_ERROR(Debug, "Bloodborne session hook failed at the stage transition request");
     }
+    if (GuestItemsEnabled() && !EnvFlagEnabled("SHADPS4_BLOODBORNE_ITEM_LOG") &&
+        !InstallGuestCodeHook(reinterpret_cast<void*>(base + MapItemRemoveOffset), Prologue,
+                              SessionHookItemRemove, SessionEntry)) {
+        LOG_ERROR(Debug, "Bloodborne session hook failed at the map item removal");
+    }
+    if (EnvFlagEnabled("SHADPS4_BLOODBORNE_ITEM_LOG")) {
+        for (const auto& [offset, tag] : {std::pair{u64{0x017D4FB0}, SessionHookItemAdd},
+                                          std::pair{u64{0x017D6780}, SessionHookItemRemove},
+                                          std::pair{u64{0x017D8570}, SessionHookItemPickup},
+                                          std::pair{u64{0x017DC300}, SessionHookItemObject},
+                                          std::pair{u64{0x017CEAF0}, SessionHookItemRoll},
+                                          std::pair{u64{0x017D57C0}, SessionHookItemClear},
+                                          std::pair{u64{0x017D5B40}, SessionHookItemClearShared}}) {
+            if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + offset), Prologue, tag,
+                                      SessionEntry)) {
+                LOG_ERROR(Debug, "Bloodborne item hook failed at {:#x}", offset);
+            }
+        }
+    }
     // SHADPS4_BLOODBORNE_FLAG_LOG=1: every event flag that changes, with the caller (test aid).
     static constexpr std::array<u8, 6> FlagSetPrologue{0x41, 0x89, 0xD0, 0x8B, 0x4F, 0x1C};
     if (EnvFlagEnabled("SHADPS4_BLOODBORNE_FLAG_LOG") &&
@@ -5177,6 +5511,40 @@ static void InstallStayInSessionPatches(u64 base) {
                     patch.replacement.size());
     }
     LOG_INFO(Debug, "Bloodborne stay-in-session patches enabled (host death, boss defeated)");
+    // Items lying in the world: an object's treasure is not set up while the player is a guest
+    // (session state 6). SHADPS4_BLOODBORNE_GUEST_ITEMS=1 removes that test (experiment).
+    static constexpr std::array<u8, 7> GuestTreasureTest{0x83, 0xB8, 0x24, 0x01, 0x00, 0x00, 0x06};
+    constexpr u64 GuestTreasureTestOffset = 0x017DC3CF;
+    if (EnvFlagEnabled("SHADPS4_BLOODBORNE_GUEST_ITEMS") &&
+        std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(
+                                                   base + GuestTreasureTestOffset),
+                                               GuestTreasureTest.size()},
+                           GuestTreasureTest)) {
+        *reinterpret_cast<u8*>(base + GuestTreasureTestOffset + 6) = 0x7F;
+        // A node's list id is numbered locally by the host only (a guest's nodes all keep the
+        // bare list type as id, and a pick-up by id takes the first of them): the same test in
+        // the three list insertions (treasure, what enemies drop, the third list).
+        for (const u64 offset : {0x017D52D2ULL, 0x017D5642ULL, 0x017D4F54ULL}) {
+            if (std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(base + offset),
+                                                       GuestTreasureTest.size()},
+                                   GuestTreasureTest)) {
+                *reinterpret_cast<u8*>(base + offset + 6) = 0x7F;
+            }
+        }
+        // The host's "forget the shared items" message empties the whole treasure list of the
+        // receiver (the list head is cleared whatever the nodes are): leave the list alone.
+        static constexpr std::array<u8, 5> NoCall5{0x0F, 0x1F, 0x44, 0x00, 0x00};
+        static constexpr std::array<std::pair<u64, std::array<u8, 5>>, 2> ClearCalls{{
+            {0x017D34A0, {0xE8, 0x9B, 0x26, 0x00, 0x00}},
+            {0x017D40AB, {0xE8, 0x90, 0x1A, 0x00, 0x00}},
+        }};
+        for (const auto& [offset, expected] : ClearCalls) {
+            if (std::memcmp(reinterpret_cast<const void*>(base + offset), expected.data(), 5) == 0) {
+                std::memcpy(reinterpret_cast<void*>(base + offset), NoCall5.data(), 5);
+            }
+        }
+        LOG_INFO(Debug, "Bloodborne guest items: treasure is set up for guests too");
+    }
 }
 
 void RequestBellUse(std::int32_t goods_id) {

@@ -26,6 +26,10 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   same boss flags and the boss's item (the game gives that to the host only), so the boss is
   dead in the guest's world too. Lanterns the host has lit and comes near are lit for the
   guest as well.
+- Experimental, off by default: with `SHADPS4_BLOODBORNE_GUEST_ITEMS=1` (needs the shared
+  progress) every player has its own items lying in the world. A guest sees the host world's
+  items, picks them up for itself and keeps them; what one player takes stays there for the
+  other. An item the guest already took in its own world is not there again.
 - Bell hotkeys, so no Insight or bell items are needed: PgUp = Beckoning Bell (host),
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
 - With `SHADPS4_BLOODBORNE_AUTO_REJOIN=1` the same bell is rung again when the players really
@@ -35,7 +39,7 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   `Mush-iii/bloodborne_pc`.
 
 Shared progress is limited to bosses and lanterns: doors, shortcuts, items lying in the world
-and NPC quests still belong to the host alone, and chalice dungeons were not tried. A boss
+(without the experimental switch above) and NPC quests still belong to the host alone, and chalice dungeons were not tried. A boss
 killed before the guest joined is not handed over. The game puts a guest's own flags back
 when it leaves a session, so the mod writes them again in the guest's own world (and keeps
 them in `user/seamless_progress.txt` until they have stayed, which also covers closing the
@@ -118,6 +122,16 @@ That file is generated from shadp2p's `src/core/bloodborne_re.cpp` by
   event's own flag; for lanterns the "lit" flag (registration flag + 10) of every lantern the
   game has registered. The entries ride in the once-a-second note, four at a time, and the
   guest sets the flags with the game's own flag setter and awards itself the item lots.
+- Items for guests (experimental): the game sets up an object's treasure only when the player
+  is not a guest, numbers the item nodes of a guest all alike (a pick-up then takes the first
+  node of the list, also for what enemies drop) and empties the guest's item list when the host
+  says "forget the shared items"; three patches undo that. A hook on the node removal notes the
+  event flag of what a guest picks up; the flag is set and kept like a boss flag. Joining
+  replaces a guest's flags with the host's, so the "taken" flags of the item lot table are read
+  at home, and in a session the nodes of those items are removed. Tested with two copies of
+  the game by debug command (item given, the other player's item untouched, still gone after a
+  death and after leaving); walking up to an item and pressing the button was only checked up
+  to the prompt.
 - Matching speed: the timing values of the game's network settings are lowered in memory, and
   the HTTP layer repeats the guest's last advertisement between the game's own repeats (the
   answer to it is what sends a guest to a host in another area).
