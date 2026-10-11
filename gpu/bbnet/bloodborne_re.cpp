@@ -1448,13 +1448,29 @@ void ApplyPreMatchCrossMapGuestWarp() {
         record.result = "no_placement";
         return;
     }
-    if (placement_consumed) {
-        record.result = "placement_consumed";
-        return;
-    }
 
     record.current_map = GetCurrentPackedMap();
     record.target_map = transported_host->packed_region;
+    // The guest has already travelled for this placement. shadNet keeps a claim after the
+    // session ended and delivers it again with the next advertisement, so the same placement
+    // can come back while the guest searches from another map: travel again then (the host
+    // would otherwise summon it across maps directly, and that join crashes). At most once a
+    // minute, in case a destination never reports the expected map.
+    static std::chrono::steady_clock::time_point last_travel{};
+    if (placement_consumed &&
+        (record.current_map == record.target_map ||
+         std::chrono::steady_clock::now() - last_travel < std::chrono::seconds{60})) {
+        record.result = "placement_consumed";
+        return;
+    }
+    // Only a guest whose Small Resonant Bell is ringing travels. The last placement stays
+    // cached after a session, and without this a guest that had left the session was pulled
+    // back to the host's map as soon as it went somewhere else.
+    if (record.current_map != record.target_map &&
+        !HasPlayerEffect(GetLocalPlayer(), SmallResonantBellEffectId)) {
+        record.result = "not_searching";
+        return;
+    }
     if (!IsUsablePackedMap(record.current_map) || !IsUsablePackedMap(record.target_map)) {
         record.result = "invalid_map";
         return;
@@ -1526,6 +1542,11 @@ void ApplyPreMatchCrossMapGuestWarp() {
     if (record.transition_result == 0) {
         record.result = "stage_transition_failed";
         return;
+    }
+    last_travel = std::chrono::steady_clock::now();
+    if (placement_consumed) {
+        LOG_INFO(Debug, "Bloodborne seamless: travelling to the host's map {:#x} again",
+                 record.target_map);
     }
     {
         std::scoped_lock lock{seamless_placement_mutex};

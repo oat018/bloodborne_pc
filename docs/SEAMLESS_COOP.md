@@ -47,6 +47,12 @@ host tries again by itself about a minute later, and a guest still waiting after
 its bell anew; most of these matches form within two to three minutes. If one does not,
 restarting both games has always cleared it.
 
+Fixed in v2.1: the second time the same two players matched from different areas the guest's
+game crashed in the join (the server keeps the earlier claim, so the host summoned the guest
+across maps directly), and a guest that had left a session was pulled back to the host's map
+when it went somewhere else. A guest now travels to the host's map only while its Small
+Resonant Bell is ringing, and does so again when the server repeats a claim.
+
 The Linux build is compiled by the workflow of this branch and has not been run by the author
 (no Linux machine); only the Windows build was tested.
 
