@@ -6,9 +6,10 @@ online play of 1.6 (the network and PSN libraries of `Wozzardman/shadp2p`) and o
 project's experimental seamless mode, and adds session rules in the spirit of the Seamless
 Co-op mods for the Souls games.
 
-It is experimental. Everything below was tested with two copies of the game running on one
-PC against a private shadNet server; a session over the internet between two machines has not
-been tested with this build yet.
+It is experimental. Most of what is below was tested with two copies of the game running on
+one PC against a private shadNet server. The first session between two machines (a Windows
+host and a Linux guest over a VPN) was played with v2.3 and showed the problems listed under
+"Fixed after v2.3".
 
 ## What it does
 
@@ -30,6 +31,11 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   progress) every player has its own items lying in the world. A guest sees the host world's
   items, picks them up for itself and keeps them; what one player takes stays there for the
   other. An item the guest already took in its own world is not there again.
+- Experimental, off by default: with `SHADPS4_BLOODBORNE_SHARE_DOORS=1` (needs the shared
+  progress) a guest also keeps what the host's world changes for good during the session:
+  doors and gates opened, shortcuts, lifts. See the limits below.
+- A guest can talk to the characters of the host's world and use its lanterns
+  (`SHADPS4_BLOODBORNE_GUEST_TALK=0` turns it off).
 - Bell hotkeys, so no Insight or bell items are needed: PgUp = Beckoning Bell (host),
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
 - With `SHADPS4_BLOODBORNE_AUTO_REJOIN=1` the same bell is rung again when the players really
@@ -38,14 +44,26 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   section at the bottom of the Insert menu). The relative-mouse plumbing comes from
   `Mush-iii/bloodborne_pc`.
 
-Shared progress is limited to bosses and lanterns: doors, shortcuts, items lying in the world
-(without the experimental switch above) and NPC quests still belong to the host alone, and chalice dungeons were not tried. A boss
-killed before the guest joined is not handed over. The game puts a guest's own flags back
+Shared progress is limited to bosses and lanterns: doors and shortcuts, items lying in the
+world (each without its experimental switch above) and NPC quests still belong to the host
+alone, and chalice dungeons were not tried. A boss killed before the guest joined is not
+handed over, nor is a door opened before that.
+
+The doors switch hands over every map event flag of the range 1AAB0xxx that the host's world
+sets during the session. That range holds doors, gates, shortcuts and lifts, but also other
+one-time events of a map (an ambush that has happened, a scene that has played), which are
+then done in the guest's world too. It was tested with a flag set by debug command, not with a
+door in the game.
+
+Talking as a guest: what a character says and sells follows the host's world (a guest's flags
+are the host's while it is in the session), and what the conversation changes is changed in
+the host's world only. Tested with one character (Gilbert) and the lanterns. A guest that uses
+a lantern to leave the area is taken back to the host a few seconds later. The game puts a guest's own flags back
 when it leaves a session, so the mod writes them again in the guest's own world (and keeps
 them in `user/seamless_progress.txt` until they have stayed, which also covers closing the
 game from inside the host's world).
 
-Known limits: guests cannot use lanterns themselves; a guest that respawned or travelled looks
+Known limits: a guest that respawned or travelled looks
 like an ordinary player on its own screen; three or more players were never tried; enemy scaling and the other extras of the
 Souls mods do not exist.
 
@@ -69,8 +87,32 @@ across maps directly), and a guest that had left a session was pulled back to th
 when it went somewhere else. A guest now travels to the host's map only while its Small
 Resonant Bell is ringing, and does so again when the server repeats a claim.
 
-The Linux build is compiled by the workflow of this branch and has not been run by the author
-(no Linux machine); only the Windows build was tested.
+Fixed after v2.3 (first session between two machines):
+
+- Linux: the mod could not read the game's thread stacks (a hook's return address, arguments
+  passed by address), so most of the session rules silently did nothing for a Linux player: no
+  following the host, the host's character not put back after the guest's own reload (enemies
+  then stand still), a guest's picked-up items not noted, and a respawned guest lost its team
+  type, which made the host's game treat that guest's leaving as its own and reload into an
+  empty grey screen. Small reads now fall back to the kernel (`process_vm_readv`).
+- A host is no longer put through the forced reload of the "OnLeave_Limit" session script,
+  whatever a guest's game reports (`SHADPS4_BLOODBORNE_HOST_LEAVE_RELOAD=1` for the game's own
+  behaviour).
+- Linux: the launch script now writes the host overrides (the Windows launcher does that by
+  itself); without them the game could not go online at all. It also keeps the game's output
+  in `last_run.log` next to the script.
+- Windows: the hooks cost several milliseconds per frame (45 instead of 68 FPS in a light
+  scene), because every memory read asked `VirtualQuery` first.
+
+Still open from that session: when one player restarts the game the other keeps the old
+signaling connection and the two do not match again until both have restarted; a guest's old
+advertisement stays on the shadNet server after its game died (restart the server); a guest
+does not follow the host to another lantern of the same area (the guest's End key joins the
+host again); one crash of the Linux renderer during a reload
+(`Vulkan::Scheduler::ReserveRecordData`, radv).
+
+The Linux build is compiled by the workflow of this branch and cannot be run by the author
+(no Linux machine); the Linux fixes above are compiled but were not run when this was written.
 
 Every player of a session needs the same build and the same switches.
 
@@ -108,8 +150,8 @@ That file is generated from shadp2p's `src/core/bloodborne_re.cpp` by
 - After a reload the game does not create the other players' characters again. Each client
   keeps the session handles of the players it has seen and asks the game's own insertion task
   manager for them again.
-- Lanterns: the lantern's talk script asks whether a multiplayer session is in progress; it is
-  told no.
+- Lanterns and talking: the talk scripts ask whether a multiplayer session is in progress
+  (talk function 52) and whether they run on a guest's side (function 19); they are told no.
 - Following the host: each client tells its session peers its map and the lantern it last
   travelled to, once a second, on a spare virtual port of the P2P transport
   (`gpu/shadps4/core/libraries/network/p2p_sockets.cpp`). A guest in another map than the host
@@ -122,6 +164,8 @@ That file is generated from shadp2p's `src/core/bloodborne_re.cpp` by
   event's own flag; for lanterns the "lit" flag (registration flag + 10) of every lantern the
   game has registered. The entries ride in the once-a-second note, four at a time, and the
   guest sets the flags with the game's own flag setter and awards itself the item lots.
+- Doors (experimental): a hook on the game's event flag setter notes, on a host with a
+  session, every flag 1AAB0xxx that goes from off to on; the entries ride in the same note.
 - Items for guests (experimental): the game sets up an object's treasure only when the player
   is not a guest, numbers the item nodes of a guest all alike (a pick-up then takes the first
   node of the list, also for what enemies drop) and empties the guest's item list when the host

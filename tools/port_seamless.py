@@ -35,6 +35,8 @@ INCLUDES_NEW = '''#include <cstdio>
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <sys/uio.h>
+#include <unistd.h>
 extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 #endif
 
@@ -81,6 +83,15 @@ bool HasMemoryAccess(u64 address, size_t size, MemoryProt required) {
         return false;
     }
 #ifdef _WIN32
+    // VirtualQuery takes about a millisecond in this process and the hooks read on every
+    // frame, so a small read is answered by letting the kernel copy it instead.
+    if (required == MemoryProt::CpuRead && size <= 256) {
+        u8 scratch[256];
+        SIZE_T copied = 0;
+        return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address),
+                                 scratch, size, &copied) &&
+               copied == size;
+    }
     for (u64 at = address; at < address + size;) {
         MEMORY_BASIC_INFORMATION region;
         if (!VirtualQuery(reinterpret_cast<void*>(at), &region, sizeof(region)) ||
@@ -102,7 +113,20 @@ bool HasMemoryAccess(u64 address, size_t size, MemoryProt required) {
         size <= MemoryPatcher::g_eboot_image_size - (address - image)) {
         return true;
     }
-    return runtime_memory_is_mapped(address, size) != 0;
+    if (runtime_memory_is_mapped(address, size) != 0) {
+        return true;
+    }
+    // The runtime knows the game's own mappings only. A hook's return address and the
+    // arguments the game passes by address are on a thread stack, which is the host's: for a
+    // small read the kernel is asked to copy it.
+    if (required == MemoryProt::CpuRead && size <= 256) {
+        u8 scratch[256];
+        const iovec local{scratch, size};
+        const iovec remote{reinterpret_cast<void*>(address), size};
+        return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) ==
+               static_cast<ssize_t>(size);
+    }
+    return false;
 #endif
 }
 '''

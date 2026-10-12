@@ -25,10 +25,29 @@ export SHADPS4_BLOODBORNE_STAY_IN_SESSION=1
 # the host world's items for itself). Every player needs the same setting; remove "# " from
 # the next line.
 # export SHADPS4_BLOODBORNE_GUEST_ITEMS=1
+# Experimental: a guest also keeps the doors, gates, shortcuts and lifts the host's world opens
+# during the session. Every player needs the same setting; remove "# " from the next line.
+# export SHADPS4_BLOODBORNE_SHARE_DOORS=1
 # export BB_MOUSE_KEYBOARD=1   # built-in mouse + keyboard controls
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
+# Where the game's own server addresses go: sign-in and messages to the community server,
+# summon signs to the shadNet server. Without this file the game cannot go online.
+community_host=${BB_COMMUNITY_SERVER#*://}
+export SHADPS4_HTTP_HOST_OVERRIDES_JSON="$here/host_overrides.json"
+cat > "$SHADPS4_HTTP_HOST_OVERRIDES_JSON" <<EOF
+{
+  "https://ss4.scej-network.jp:20443": "$BB_COMMUNITY_SERVER",
+  "https://$community_host:18671/summon_messenger": "$BB_SHADNET_WEBAPI",
+  "http://$community_host:18671/summon_messenger": "$BB_SHADNET_WEBAPI"
+}
+EOF
+# Everything the game prints is kept in last_run.log next to this script (the run before it
+# in last_run.prev.log): send both files when something goes wrong.
+log=$here/last_run.log
+[[ -f $log ]] && mv -f "$log" "$here/last_run.prev.log"
 if [[ -x $here/Bloodborne-bbport-x86_64.AppImage ]]; then
-    exec "$here/Bloodborne-bbport-x86_64.AppImage" --play "$@"
+    "$here/Bloodborne-bbport-x86_64.AppImage" --play "$@" 2>&1 | tee "$log"
+else
+    bash "$here/run.sh" "$@" 2>&1 | tee "$log"
 fi
-exec bash "$here/run.sh" "$@"

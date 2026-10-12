@@ -40,6 +40,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <sys/uio.h>
+#include <unistd.h>
 extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 #endif
 
@@ -948,6 +950,15 @@ bool HasMemoryAccess(u64 address, size_t size, MemoryProt required) {
         return false;
     }
 #ifdef _WIN32
+    // VirtualQuery takes about a millisecond in this process and the hooks read on every
+    // frame, so a small read is answered by letting the kernel copy it instead.
+    if (required == MemoryProt::CpuRead && size <= 256) {
+        u8 scratch[256];
+        SIZE_T copied = 0;
+        return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address),
+                                 scratch, size, &copied) &&
+               copied == size;
+    }
     for (u64 at = address; at < address + size;) {
         MEMORY_BASIC_INFORMATION region;
         if (!VirtualQuery(reinterpret_cast<void*>(at), &region, sizeof(region)) ||
@@ -969,7 +980,20 @@ bool HasMemoryAccess(u64 address, size_t size, MemoryProt required) {
         size <= MemoryPatcher::g_eboot_image_size - (address - image)) {
         return true;
     }
-    return runtime_memory_is_mapped(address, size) != 0;
+    if (runtime_memory_is_mapped(address, size) != 0) {
+        return true;
+    }
+    // The runtime knows the game's own mappings only. A hook's return address and the
+    // arguments the game passes by address are on a thread stack, which is the host's: for a
+    // small read the kernel is asked to copy it.
+    if (required == MemoryProt::CpuRead && size <= 256) {
+        u8 scratch[256];
+        const iovec local{scratch, size};
+        const iovec remote{reinterpret_cast<void*>(address), size};
+        return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) ==
+               static_cast<ssize_t>(size);
+    }
+    return false;
 #endif
 }
 
@@ -2018,6 +2042,9 @@ void ApplyFastMatching(u64 sos_status) {
 //   poke32 <value> <image offset> [<offset> ...]   writes a dword at the end of the chain
 // Numbers are hexadecimal except for hp and bell.
 u64 marked_character{};
+bool debug_team_type_lost{}; // debug command loseteam
+std::mutex talk_log_mutex; // SHADPS4_BLOODBORNE_TALK_LOG
+std::set<u64> talk_log_seen;
 u64 sos_status_object{}; // rdi of SosStatus.Update
 
 void ApplyDebugCommands() {
@@ -2289,6 +2316,15 @@ void ApplyDebugCommands() {
         RequestBellUse(goods_id);
     } else if (command == "stop") {
         RequestSessionStop(false);
+    } else if (command == "loseteam") {
+        // Test aid: a guest's team type is lost (0, as after a respawn without the fix in
+        // ApplyGuestReinsertAfterReload) and stays lost; when it leaves a few seconds later
+        // ("stop") the others take the leave for the host's.
+        const u64 game_data_man = ReadValue<u64>(image_base + 0x0553B130, 0); // GameDataMan
+        const u64 game_data = game_data_man >= 0x10000 ? ReadValue<u64>(game_data_man, 8) : 0;
+        debug_team_type_lost = true;
+        LOG_INFO(Debug, "Bloodborne debug: loseteam, team type written {}",
+                 game_data >= 0x10000 && WriteValue(game_data, 0x5D8, s8{0}));
     } else if (command == "regroup") {
         RequestSessionStop(true);
     } else if (command == "fscan" || command == "fdiff") {
@@ -2469,6 +2505,10 @@ void ApplyDebugCommands() {
         }
         LOG_INFO(Debug, "Bloodborne debug: find32 {:#x} in {:#x}+{:#x}:{}", value, address, length,
                  hits);
+    } else if (command == "talklog") {
+        std::scoped_lock lock{talk_log_mutex};
+        talk_log_seen.clear();
+        LOG_INFO(Debug, "Bloodborne debug: talk log starts over");
     } else if (command == "poke32") {
         u32 value = 0;
         words >> std::hex >> value;
@@ -4518,6 +4558,8 @@ enum SessionHook : u64 {
     SessionHookEventCommand, // (?, event executor in rsi): event script class 2003
     SessionHookLantern,      // (manager, flag in rsi, entity, ...): a lit lantern is registered
     SessionHookFlagSet,      // (flag manager, flag in rsi, state in rdx): test aid
+    SessionHookTalkCall,     // (result, talk, call object in rdx): a talk function is asked, test aid
+    SessionHookTalkResult,   // ... and is about to return eax
     SessionHookItemAdd,      // test aid: map item manager, a node enters the treasure list
     SessionHookItemRemove,   // test aid: (manager, &item id, picked)
     SessionHookItemPickup,   // test aid: (manager, &item id)
@@ -4587,6 +4629,8 @@ constexpr u32 ProgressItemLot = 2;
 std::mutex progress_mutex;
 std::vector<u32> progress_boss;     // of this session
 std::vector<u32> progress_lanterns; // base flags of the lanterns seen since the game started
+std::vector<u32> progress_world;    // of this session: doors, shortcuts, lifts (see below)
+std::atomic<bool> hosting_session{}; // this player is a host with a session (state 3)
 constexpr s32 LanternLitFlagOffset = 10;
 
 bool ShareProgressEnabled() {
@@ -4614,13 +4658,28 @@ bool GuestItemsEnabled() {
 }
 std::vector<u32> guest_picked_flags; // flags of the items a guest picked up, not yet kept
 
-void AddProgress(std::vector<u32>& list, u32 kind, s32 id, const char* what) {
+// The state of the world itself (SHADPS4_BLOODBORNE_SHARE_DOORS=1 with the shared progress
+// on): what the host's world changes for good during a session - a door or a gate opened, a
+// shortcut, a lift sent - is a map event flag 1AAB0xxx (map AA, block B). The other thousands
+// are bosses and characters (1xxx), hunters (4xxx), enemies that come back (5xxx) and lanterns
+// (7xxx); those are not taken here. A guest keeps them like the flags of a boss kill.
+bool ShareWorldEnabled() {
+    static const bool enabled =
+        ShareProgressEnabled() && EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARE_DOORS");
+    return enabled;
+}
+
+bool IsWorldProgressFlag(s32 flag) {
+    return flag >= 10000000 && flag < 20000000 && flag / 1000 % 10 == 0;
+}
+
+void AddProgress(std::vector<u32>& list, u32 kind, s32 id, const char* what, size_t limit = 96) {
     if (id <= 0 || id >= (1 << 28)) {
         return;
     }
     const u32 entry = kind << 28 | static_cast<u32>(id);
     std::scoped_lock lock{progress_mutex};
-    if (list.size() < 96 && !std::ranges::contains(list, entry)) {
+    if (list.size() < limit && !std::ranges::contains(list, entry)) {
         list.push_back(entry);
         LOG_INFO(Debug, "Bloodborne progress: {} {}", what, id);
     }
@@ -4672,11 +4731,48 @@ void PS4_SYSV_ABI SessionEntry(u64 tag, const GuestRegisterSnapshot* registers) 
         NoteEventCommand(registers->rsi);
         return;
     }
+    if (tag == SessionHookTalkCall || tag == SessionHookTalkResult) {
+        // SHADPS4_BLOODBORNE_TALK_LOG=1: what the talk scripts ask and are told, each pair of
+        // function and answer once (debug command "talklog" starts over). The function's
+        // number is asked for where the call comes in: later the register is used otherwise.
+        static thread_local s32 id = -1;
+        if (tag == SessionHookTalkCall) {
+            using FunctionId = s32 PS4_SYSV_ABI (*)(u64 call);
+            const u64 call = registers->rdx;
+            const u64 vtable = call >= 0x10000 ? ReadValue<u64>(call, 0) : 0;
+            const u64 get_id = vtable >= 0x10000 ? ReadValue<u64>(vtable, 0x10) : 0;
+            id = get_id >= image_base && get_id - image_base < 0x02C00000
+                     ? reinterpret_cast<FunctionId>(get_id)(call)
+                     : -1;
+            return;
+        }
+        if (id < 0) {
+            return;
+        }
+        const u64 key = static_cast<u64>(static_cast<u32>(id)) << 32 |
+                        static_cast<u32>(registers->rax);
+        std::scoped_lock lock{talk_log_mutex};
+        if (talk_log_seen.size() < 400 && talk_log_seen.insert(key).second) {
+            LOG_INFO(Debug, "Bloodborne talk: function {} -> {}", id,
+                     static_cast<s32>(registers->rax));
+        }
+        return;
+    }
     if (tag == SessionHookFlagSet) {
+        static const bool flag_log = EnvFlagEnabled("SHADPS4_BLOODBORNE_FLAG_LOG");
         const s32 flag = static_cast<s32>(registers->rsi);
-        if (GetEventFlag(flag) != (static_cast<s32>(registers->rdx) != 0)) {
+        const bool on = static_cast<s32>(registers->rdx) != 0;
+        const bool world = on && hosting_session.load() && ShareWorldEnabled() &&
+                           IsWorldProgressFlag(flag);
+        if ((!flag_log && !world) || GetEventFlag(flag) == on) {
+            return;
+        }
+        if (flag_log) {
             LOG_INFO(Debug, "Bloodborne flag: {} -> {} caller={:#x}", flag,
                      static_cast<s32>(registers->rdx), ReadValue<u64>(registers->rsp, 0) - image_base);
+        }
+        if (world) {
+            AddProgress(progress_world, ProgressFlag, flag, "host notes world flag", 400);
         }
         return;
     }
@@ -4899,22 +4995,28 @@ constexpr u32 PlaceNoteMagic = 0x32534242;
 void PublishOwnPlace(s32 session) {
     PlaceNote note{PlaceNoteMagic, session, GetCurrentPackedMap(), last_return_point.load(), {}};
     if (session == 3 && ShareProgressEnabled()) {
-        // Boss entries go out first and at least two per note; the lanterns take turns.
+        // Boss entries go out first and at least two per note; the lanterns take turns, and
+        // so do the world's flags, which have the last place of a note to themselves.
         static size_t boss_turn = 0;
         static size_t lantern_turn = 0;
+        static size_t world_turn = 0;
         std::scoped_lock lock{progress_mutex};
         size_t used = 0;
-        const size_t boss = std::min<size_t>(progress_boss.size(),
-                                             progress_lanterns.empty() ? 4 : 2);
+        const size_t boss = std::min<size_t>(
+            progress_boss.size(), progress_lanterns.empty() && progress_world.empty() ? 4 : 2);
         for (size_t index = 0; index < boss; ++index) {
             note.progress[used++] = progress_boss[boss_turn++ % progress_boss.size()];
         }
-        for (size_t index = 0; used < 4 && index < progress_lanterns.size(); ++index) {
+        const size_t lantern_places = progress_world.empty() ? 4 : 3;
+        for (size_t index = 0; used < lantern_places && index < progress_lanterns.size(); ++index) {
             const u32 lit = progress_lanterns[lantern_turn++ % progress_lanterns.size()] +
                             LanternLitFlagOffset;
             if (GetEventFlag(static_cast<s32>(lit & 0x0FFFFFFF))) {
                 note.progress[used++] = lit;
             }
+        }
+        for (size_t index = 0; used < 4 && index < progress_world.size(); ++index) {
+            note.progress[used++] = progress_world[world_turn++ % progress_world.size()];
         }
     }
     if (IsUsablePackedMap(note.map)) {
@@ -5221,9 +5323,11 @@ void ApplySharedProgressTick() {
     const u64 player = world_chr_man >= 0x10000 ? ReadValue<u64>(world_chr_man, 0x60) : 0;
     const u64 data = GetChrDataModule(player);
     const s32 session = multi_play >= 0x10000 ? ReadValue<s32>(multi_play, 0x124) : 0;
-    if (session != 3) { // a host forgets its boss entries with the session
+    hosting_session.store(session == 3);
+    if (session != 3) { // a host forgets its boss and world entries with the session
         std::scoped_lock lock{progress_mutex};
         progress_boss.clear();
+        progress_world.clear();
     }
     ApplySharedProgress(session, state >= 0x10000 && ReadValue<u8>(state, 0x08) == 0 &&
                                      ReadValue<u8>(state, 0x1520) == 0 && data != 0 &&
@@ -5277,7 +5381,7 @@ void ApplyGuestReinsertAfterReload() {
         } else if (const s8 team_type = ReadValue<s8>(game_data, 0x5D8);
                    player >= 0x10000 && ReadValue<s32>(player, 0x78) == 1 && team_type != 0) {
             guest_team_type = team_type;
-        } else if (guest_team_type > 0 && team_type != guest_team_type) {
+        } else if (guest_team_type > 0 && team_type != guest_team_type && !debug_team_type_lost) {
             WriteValue(game_data, 0x5D8, guest_team_type);
             LOG_INFO(Debug, "Bloodborne session: guest team type {} -> {} (chr type {})", team_type,
                      guest_team_type, player >= 0x10000 ? ReadValue<s32>(player, 0x78) : -1);
@@ -5432,9 +5536,18 @@ static void InstallSessionHooks(u64 base) {
             }
         }
     }
+    static constexpr std::array<u8, 9> TalkResultStore{0x41, 0xC7, 0x44, 0x24, 0x08,
+                                                       0x02, 0x00, 0x00, 0x00};
+    if (EnvFlagEnabled("SHADPS4_BLOODBORNE_TALK_LOG") &&
+        (!InstallGuestCodeHook(reinterpret_cast<void*>(base + 0x0203AD60), Prologue,
+                               SessionHookTalkCall, SessionEntry) ||
+         !InstallGuestCodeHook(reinterpret_cast<void*>(base + 0x0203EECF), TalkResultStore,
+                               SessionHookTalkResult, SessionEntry))) {
+        LOG_ERROR(Debug, "Bloodborne session hook failed at the talk function result");
+    }
     // SHADPS4_BLOODBORNE_FLAG_LOG=1: every event flag that changes, with the caller (test aid).
     static constexpr std::array<u8, 6> FlagSetPrologue{0x41, 0x89, 0xD0, 0x8B, 0x4F, 0x1C};
-    if (EnvFlagEnabled("SHADPS4_BLOODBORNE_FLAG_LOG") &&
+    if ((EnvFlagEnabled("SHADPS4_BLOODBORNE_FLAG_LOG") || ShareWorldEnabled()) &&
         !InstallGuestCodeHook(reinterpret_cast<void*>(base + EventFlagSetOffset), FlagSetPrologue,
                               SessionHookFlagSet, SessionEntry)) {
         LOG_ERROR(Debug, "Bloodborne session hook failed at the event flag setter");
@@ -5511,6 +5624,61 @@ static void InstallStayInSessionPatches(u64 base) {
                     patch.replacement.size());
     }
     LOG_INFO(Debug, "Bloodborne stay-in-session patches enabled (host death, boss defeated)");
+    // Talk scripts (lanterns, the characters of the world) also ask whether they run for a
+    // guest: talk function 19 returns the byte at +0x25 of the talk's own data, 1 on a guest's
+    // side, and the scripts then offer nothing. Answer 0, so that a guest can talk to the
+    // characters of the host's world and use its lanterns. SHADPS4_BLOODBORNE_GUEST_TALK=0
+    // leaves the game's answer.
+    static constexpr std::array<u8, 5> TalkForGuest{0x41, 0x0F, 0xB6, 0x47, 0x25};
+    static constexpr std::array<u8, 5> TalkNotForGuest{0x31, 0xC0, 0x0F, 0x1F, 0x00};
+    constexpr u64 TalkForGuestOffset = 0x0203BA78;
+    const char* guest_talk = std::getenv("SHADPS4_BLOODBORNE_GUEST_TALK");
+    if ((guest_talk == nullptr || std::string_view{guest_talk} != "0") &&
+        TalkForGuestOffset + TalkForGuest.size() <= image_size &&
+        std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(
+                                                   base + TalkForGuestOffset),
+                                               TalkForGuest.size()},
+                           TalkForGuest)) {
+        std::memcpy(reinterpret_cast<u8*>(base + TalkForGuestOffset), TalkNotForGuest.data(),
+                    TalkNotForGuest.size());
+        LOG_INFO(Debug, "Bloodborne guest talk: talk scripts take a guest for an ordinary player");
+    }
+    // The session script "OnLeave_Limit" (0x138A4A0) puts the local player through a forced reload
+    // when the session it was in runs out: a phantom's way home. On a real connection the host
+    // got it too when its guest left (the room times out: "OnRoomTimeOut", then
+    // CSMultiPlayMan::Stop from 0x1789F9E) and was left on an empty grey screen. The start of
+    // the routine is rewritten to return for a player that is not a phantom (PlayerGameData
+    // +0x5D8, the team type, is 0); the test for a living character stays, the one for a
+    // manager that always exists goes. SHADPS4_BLOODBORNE_HOST_LEAVE_RELOAD=1 leaves it alone.
+    static constexpr std::array<u8, 73> LeaveLimitStart{
+        0x48, 0x8D, 0x05, 0x1B, 0x0C, 0x1B, 0x04, 0x48, 0x83, 0x38, 0x00, 0x0F,
+        0x84, 0xCA, 0x00, 0x00, 0x00, 0x48, 0x8D, 0x1D, 0xBA, 0x43, 0x1B, 0x04,
+        0x48, 0x8B, 0x03, 0x48, 0x85, 0xC0, 0x0F, 0x84, 0xB7, 0x00, 0x00, 0x00,
+        0x48, 0x8B, 0x40, 0x60, 0x48, 0x85, 0xC0, 0x0F, 0x84, 0xAA, 0x00, 0x00,
+        0x00, 0x48, 0x8B, 0x80, 0xB0, 0x03, 0x00, 0x00, 0x48, 0x8B, 0x40, 0x20,
+        0x83, 0xB8, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x8E, 0x92, 0x00, 0x00,
+        0x00,
+    };
+    static constexpr std::array<u8, 73> LeaveLimitPhantomOnly{
+        0x48, 0x8B, 0x05, 0x83, 0x0C, 0x1B, 0x04, 0x48, 0x8B, 0x40, 0x08, 0x80,
+        0xB8, 0xD8, 0x05, 0x00, 0x00, 0x00, 0x0F, 0x84, 0xC3, 0x00, 0x00, 0x00,
+        0x48, 0x8D, 0x1D, 0xB3, 0x43, 0x1B, 0x04, 0x48, 0x8B, 0x03, 0x48, 0x8B,
+        0x40, 0x60, 0x48, 0x85, 0xC0, 0x0F, 0x84, 0xAC, 0x00, 0x00, 0x00, 0x48,
+        0x8B, 0x80, 0xB0, 0x03, 0x00, 0x00, 0x48, 0x8B, 0x40, 0x20, 0x83, 0xB8,
+        0xF8, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x8E, 0x94, 0x00, 0x00, 0x00, 0x66,
+        0x90,
+    };
+    constexpr u64 LeaveLimitStartOffset = 0x0138A4A6;
+    if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_HOST_LEAVE_RELOAD") &&
+        LeaveLimitStartOffset + LeaveLimitStart.size() <= image_size &&
+        std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(
+                                                   base + LeaveLimitStartOffset),
+                                               LeaveLimitStart.size()},
+                           LeaveLimitStart)) {
+        std::memcpy(reinterpret_cast<u8*>(base + LeaveLimitStartOffset),
+                    LeaveLimitPhantomOnly.data(), LeaveLimitPhantomOnly.size());
+        LOG_INFO(Debug, "Bloodborne session: a host is not reloaded when its session runs out");
+    }
     // Items lying in the world: an object's treasure is not set up while the player is a guest
     // (session state 6). SHADPS4_BLOODBORNE_GUEST_ITEMS=1 removes that test (experiment).
     static constexpr std::array<u8, 7> GuestTreasureTest{0x83, 0xB8, 0x24, 0x01, 0x00, 0x00, 0x06};
