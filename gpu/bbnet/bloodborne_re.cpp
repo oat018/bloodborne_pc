@@ -1943,13 +1943,11 @@ u64 GetChrTransform(u64 chr) {
                : 0;
 }
 
-float MoveToPartner(u64 world_chr_man, u64 player, float min_distance) {
-    const u64 own = GetChrTransform(player);
-    const u64 map_manager = ReadValue<u64>(image_base + MapManagerPointerOffset, 0);
-    if (own == 0 || map_manager < 0x10000 || world_chr_man < 0x10000) {
-        return -1.0f;
+// The host is the partner that is not a phantom (character type 0); else any partner.
+u64 FindHostCharacter(u64 world_chr_man, u64 player) {
+    if (world_chr_man < 0x10000) {
+        return 0;
     }
-    // The host is the partner that is not a phantom (character type 0); else any partner.
     u64 target = 0;
     const s32 count = ReadValue<s32>(world_chr_man, WorldChrManCountOffset);
     const u64 entries = ReadValue<u64>(world_chr_man, WorldChrManEntriesOffset);
@@ -1964,7 +1962,14 @@ float MoveToPartner(u64 world_chr_man, u64 player, float min_distance) {
             target = chr;
         }
     }
-    if (target == 0) {
+    return target;
+}
+
+float MoveToPartner(u64 world_chr_man, u64 player, float min_distance) {
+    const u64 own = GetChrTransform(player);
+    const u64 map_manager = ReadValue<u64>(image_base + MapManagerPointerOffset, 0);
+    const u64 target = FindHostCharacter(world_chr_man, player);
+    if (own == 0 || map_manager < 0x10000 || target == 0) {
         return -1.0f;
     }
     const u64 transform = GetChrTransform(target);
@@ -5052,6 +5057,23 @@ s32 HostPlaceToFollow() {
     return 0;
 }
 
+// The return point the host last travelled to when it is in this player's map: 0 after a
+// death respawn, -1 when no host in this map has been heard of lately.
+s32 HostReturnPointHere() {
+    std::array<PlaceNote, 4> notes{};
+    const int count = Libraries::Net::P2PSeamlessCollect(notes.data(), sizeof(PlaceNote),
+                                                         static_cast<u32>(notes.size()));
+    const u32 current = GetCurrentPackedMap() & 0xFFFF0000;
+    for (int index = 0; index < count; ++index) {
+        const PlaceNote& note = notes[index];
+        if (note.magic == PlaceNoteMagic && note.session == 3 &&
+            (note.map & 0xFFFF0000) == current) {
+            return note.return_point;
+        }
+    }
+    return -1;
+}
+
 // The guest's side of the shared progress: take what the host's notes carry. The game puts a
 // guest's own flags back when it leaves the session, so every flag is kept, also in a file
 // (the guest may quit the game from the host's world), and written again in the guest's own
@@ -5387,9 +5409,12 @@ void ApplyGuestReinsertAfterReload() {
                      guest_team_type, player >= 0x10000 ? ReadValue<s32>(player, 0x78) : -1);
         }
     }
+    // When this player's own world was last loading (or it was dead, or out of a session).
+    static clock::time_point own_reload{};
     if (!in_session || state < 0x10000 || ReadValue<u8>(state, 0x08) != 0 ||
         ReadValue<u8>(state, 0x1520) != 0 || data == 0 ||
         ReadValue<s32>(data, DataModuleHpOffset) <= 0) {
+        own_reload = now;
         return;
     }
     // Tell the others where this player is, and as a guest go where the host is.
@@ -5427,6 +5452,50 @@ void ApplyGuestReinsertAfterReload() {
         // Arrived at the host's lantern: go on to where the host stands, once the host's
         // character has been in this world for a few seconds.
         static int host_seen = 0;
+        // The host travelled to another lantern of this map: no map change to follow, but its
+        // character leaves this world and comes back, or just jumps, somewhere else, and its
+        // notes then name the lantern. Not after the host's death respawn (its notes name no lantern: a guest
+        // fighting on is left alone), nor after this player's own reload (a guest that died
+        // walks back from its lantern).
+        static bool host_present = false;
+        static clock::time_point host_back_until{};
+        static std::array<float, 3> host_spot{};
+        const u64 host_transform =
+            session == 6 ? GetChrTransform(FindHostCharacter(world_chr_man, player)) : 0;
+        const bool host_now = host_transform != 0;
+        bool host_jumped = false;
+        if (host_now) {
+            float jump_squared = 0.0f;
+            for (size_t index = 0; index < 3; ++index) {
+                const float value = ReadValue<float>(host_transform, 0x1E0 + index * sizeof(float));
+                jump_squared += (value - host_spot[index]) * (value - host_spot[index]);
+                host_spot[index] = value;
+            }
+            // 30 m between two checks (250 ms) is no walk
+            host_jumped = host_present && std::isfinite(jump_squared) && jump_squared > 900.0f;
+        }
+        // (the host showing up for the first time is the join itself, not a travel)
+        static bool host_met = false;
+        if (host_now && ((!host_present && host_met) || host_jumped) &&
+            now - own_reload >= std::chrono::seconds{30}) {
+            host_back_until = now + std::chrono::seconds{15};
+        }
+        host_present = host_now;
+        host_met = session == 6 && (host_met || host_now);
+        if (session != 6 || !host_now) {
+            host_back_until = {};
+        } else if (now < host_back_until && now >= join_spot_until) {
+            if (const s32 lantern = HostReturnPointHere(); lantern >= 0) {
+                host_back_until = {};
+                if (lantern > 0) {
+                    join_spot_until = now + std::chrono::seconds{60};
+                    LOG_INFO(Debug,
+                             "Bloodborne session: the host travelled to return point {} of "
+                             "this map {:#x}",
+                             lantern, current_map);
+                }
+            }
+        }
         if (session != 6 || now >= join_spot_until) {
             host_seen = 0;
         } else if (now - settled_since >= std::chrono::seconds{4}) {
