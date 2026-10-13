@@ -104,10 +104,39 @@ Fixed after v2.3 (first session between two machines):
 - Windows: the hooks cost several milliseconds per frame (45 instead of 68 FPS in a light
   scene), because every memory read asked `VirtualQuery` first.
 
-Still open from that session: when one player restarts the game the other keeps the old
-signaling connection and the two do not match again until both have restarted; a guest's old
-advertisement stays on the shadNet server after its game died (restart the server); one
-crash of the Linux renderer during a reload (`Vulkan::Scheduler::ReserveRecordData`, radv).
+Still open from that session: a guest's old advertisement stays on the shadNet server after
+its game died (a host that claims it gets "conflicting claim"; the guest's game rings anew by
+itself after 100 s without a session); one crash of the Linux renderer during a reload
+(`Vulkan::Scheduler::ReserveRecordData`, radv).
+
+One player restarting its game (fixed after v2.5). The player that kept running reused its
+NpSignaling connection to the other one: `ProcessPendingActivations` took the new address and
+reported ESTABLISHED and MUTUAL_ACTIVATED at once, without a handshake with the new process,
+and the game went on with its summon exchange (P2P virtual port 40) from the middle; the two
+did not meet again until both had restarted. Now a peer that comes back on another port is a
+new process: the old connection is reported DEAD (the game drops what it had going), and the
+next attempt opens a new one. Measured with two games on one PC, one of them killed during a
+session and started again: before, a restarted guest found no session within 4 minutes (2 of
+2); after, it was back in the session 78 to 93 s after its ring 5 of 6 times. A restarted
+host was back after 15 s before and after the change. Do not restart the shadNet server under a running game: the game logs in
+again by itself, but a host in that state does not learn of room joins (every join ends after
+30 s) until its game is started again.
+
+Notes from the second two-machine evening (v2.5):
+
+- The bells do nothing inside Oedon Chapel (the Cathedral Ward lantern): the bell icon shows a
+  cross and no request reaches the server. Step outside, or ring somewhere else.
+- A host uses PgUp only. PgDn is the guest's bell; End or Home right after a guest has joined
+  ends that session.
+- A guest that joins is put where the host stands (the game summons at a summon point of the
+  area, which can be far away).
+- The scripts that tell why a session or a life ended (names with Death, Leave, TimeOut,
+  Recall, BlockClear, Join) are now logged without the debug file, so a log sent in by a
+  player shows a death from a leave.
+- Not solved: twice a guest's death in the host's world ended with the guest out of the room
+  and, once, a loading screen that did not finish; in the test rig a guest's death keeps the
+  session. A community server (thehuntersdream.com) that times out is not the cause: with a
+  guest's requests to it failing for five minutes the session stayed up, also through a death.
 Since v2.5 a guest also follows the host to another lantern of the same area: it is taken to
 the host when the host's character leaves and comes back, or jumps, and the host's notes name
 a lantern (not after the host's death respawn).

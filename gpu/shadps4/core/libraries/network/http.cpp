@@ -943,6 +943,22 @@ static s32 RunRealHttpRequest(const SendRequestPlan& plan_in, HttpResponse& out_
         return std::chrono::seconds(secs);
     };
 
+    // Test aid: SHADPS4_HTTP_FAIL_FILE names a file; while it holds a piece of a host name,
+    // requests to that host time out (after the seconds given as its second word).
+    if (const char* fail_file = std::getenv("SHADPS4_HTTP_FAIL_FILE"); fail_file && *fail_file) {
+        std::ifstream file{fail_file};
+        std::string part;
+        int seconds = 0;
+        if (file >> part && plan.host.find(part) != std::string::npos) {
+            file >> seconds;
+            std::this_thread::sleep_for(std::chrono::seconds{std::clamp(seconds, 0, 120)});
+            LOG_ERROR(Lib_Http, "test: forced time-out for {} {}://{}{}",
+                      HttpMethodName(plan.method), plan.scheme, plan.host, plan.path);
+            SynthesizeTransportFailureResponse(out_res);
+            return ORBIS_HTTP_ERROR_TIMEOUT;
+        }
+    }
+
     for (int depth = 0; depth <= MaxRedirects; ++depth) {
         if (plan.scheme == "https" && !ORBIS_HTTP_HAS_HTTPS) {
             LOG_ERROR(Lib_Http, "HTTPS request but cpp-httplib lacks OpenSSL support");

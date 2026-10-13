@@ -4867,12 +4867,20 @@ void PS4_SYSV_ABI SessionEntry(u64 tag, const GuestRegisterSnapshot* registers) 
         const u64 name = tag == SessionHookTimerA   ? registers->rdx
                          : tag == SessionHookTimerB ? registers->rcx
                                                     : registers->rsi;
-        if (log_scripts && HasMemoryAccess(name, 48, MemoryProt::CpuRead)) {
+        if (HasMemoryAccess(name, 48, MemoryProt::CpuRead)) {
             const std::string_view text{reinterpret_cast<const char*>(name),
                                         strnlen(reinterpret_cast<const char*>(name), 47)};
-            LOG_INFO(Debug, "Bloodborne session: script {} '{}' caller={:#x}",
-                     tag == SessionHookCall ? "call" : "timer", text,
-                     ReadValue<u64>(registers->rsp, 0) - image_base);
+            // Without the debug file only the scripts that say why a session or a life ended
+            // (a log sent in by a player then tells a death from a leave from a time-out).
+            const bool telling = text.find("Death") != text.npos || text.find("Leave") != text.npos ||
+                                 text.find("TimeOut") != text.npos || text.find("Recall") != text.npos ||
+                                 text.find("BlockClear") != text.npos || text.find("Kick") != text.npos ||
+                                 text.find("Disconnect") != text.npos || text.find("Join") != text.npos;
+            if (log_scripts || telling) {
+                LOG_INFO(Debug, "Bloodborne session: script {} '{}' caller={:#x}",
+                         tag == SessionHookCall ? "call" : "timer", text,
+                         ReadValue<u64>(registers->rsp, 0) - image_base);
+            }
         }
         return;
     }
@@ -5411,6 +5419,11 @@ void ApplyGuestReinsertAfterReload() {
     }
     // When this player's own world was last loading (or it was dead, or out of a session).
     static clock::time_point own_reload{};
+    // Whether this guest has seen the host's character in the session it is in.
+    static bool host_met = false;
+    if (!in_session) {
+        host_met = false;
+    }
     if (!in_session || state < 0x10000 || ReadValue<u8>(state, 0x08) != 0 ||
         ReadValue<u8>(state, 0x1520) != 0 || data == 0 ||
         ReadValue<s32>(data, DataModuleHpOffset) <= 0) {
@@ -5474,10 +5487,13 @@ void ApplyGuestReinsertAfterReload() {
             // 30 m between two checks (250 ms) is no walk
             host_jumped = host_present && std::isfinite(jump_squared) && jump_squared > 900.0f;
         }
-        // (the host showing up for the first time is the join itself, not a travel)
-        static bool host_met = false;
-        if (host_now && ((!host_present && host_met) || host_jumped) &&
-            now - own_reload >= std::chrono::seconds{30}) {
+        if (host_now && !host_met) {
+            // The join itself: the game summons a guest at a summon point of the area, which
+            // can be far from the host. Go to where the host stands.
+            join_spot_until = now + std::chrono::seconds{60};
+            LOG_INFO(Debug, "Bloodborne session: joined the host in map {:#x}", current_map);
+        } else if (host_now && (!host_present || host_jumped) &&
+                   now - own_reload >= std::chrono::seconds{30}) {
             host_back_until = now + std::chrono::seconds{15};
         }
         host_present = host_now;

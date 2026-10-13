@@ -945,6 +945,27 @@ void ProcessPendingActivations() {
             continue;
         }
 
+        bool peer_restarted = false;
+        {
+            SignalingMutexGuard lock;
+            const auto it = g_connections.find(act.conn_id);
+            if (it == g_connections.end() || it->second.state == ConnState::Inactive) {
+                continue;
+            }
+            // An established connection whose peer now has another port belongs to a process
+            // that is gone (the peer's game was started again). Reusing it would report
+            // ESTABLISHED at once for a handshake that never happened, and the game would go
+            // on talking to the new process in the middle of its old exchange.
+            peer_restarted = !act.start_handshake && it->second.state == ConnState::Established &&
+                             it->second.port != 0 && it->second.port != peer_port;
+        }
+        if (peer_restarted) {
+            LOG_WARNING(Lib_NpSignaling, "connection {}: '{}' was started again (new port {}), "
+                        "the old connection is closed",
+                        act.conn_id, act.peer_online_id, sceNetNtohs(peer_port));
+            CloseConnectionAndDispatchDead(act.conn_id, ORBIS_NP_SIGNALING_ERROR_TIMEOUT);
+            continue;
+        }
         {
             SignalingMutexGuard lock;
             const auto it = g_connections.find(act.conn_id);
@@ -967,6 +988,29 @@ void ProcessPendingActivations() {
     }
 }
 
+// A peer that opens a connection from another port than the established one it has with us is
+// a new process (its game was started again): the old connection is reported DEAD, so the game
+// drops what it had going with the old process, and the packet then finds no connection.
+static void ClosePeerRestartedConnection(const std::string& from_id, u16 from_port) {
+    s32 stale_conn = 0;
+    {
+        SignalingMutexGuard lock;
+        for (auto& [cid, ci] : g_connections) {
+            if (ci.state == ConnState::Established && !ci.dead_fired && ci.port != 0 &&
+                ci.port != from_port && OnlineIdEqualsString(ci.online_id, from_id)) {
+                stale_conn = cid;
+                break;
+            }
+        }
+    }
+    if (stale_conn != 0) {
+        LOG_WARNING(Lib_NpSignaling, "connection {}: '{}' was started again (packets from port "
+                    "{}), the old connection is closed",
+                    stale_conn, from_id, sceNetNtohs(from_port));
+        CloseConnectionAndDispatchDead(stale_conn, ORBIS_NP_SIGNALING_ERROR_TIMEOUT);
+    }
+}
+
 void HandleHandshakePacket(u32 from_addr, u16 from_port, const SignalingHandshake& pkt) {
     char from_id_buf[ORBIS_NP_ONLINEID_MAX_LENGTH + 1]{};
     std::memcpy(from_id_buf, pkt.online_id_from, ORBIS_NP_ONLINEID_MAX_LENGTH);
@@ -977,6 +1021,10 @@ void HandleHandshakePacket(u32 from_addr, u16 from_port, const SignalingHandshak
     SignalingHandshake reply{};
     bool send_reply = false;
     s32 reply_conn = 0;
+
+    if (kind == HandshakeKind::Offer) {
+        ClosePeerRestartedConnection(from_id, from_port);
+    }
 
     {
         SignalingMutexGuard lock;
@@ -1208,6 +1256,10 @@ void HandleControlPacket(u32 from_addr, u16 from_port, const SignalingControl& p
     bool send_ack = false;
     u32 ack_addr = 0;
     u16 ack_port = 0;
+
+    if (kind == ControlKind::ActivationRequest) {
+        ClosePeerRestartedConnection(from_id, from_port);
+    }
 
     {
         SignalingMutexGuard lock;

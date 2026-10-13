@@ -32,13 +32,18 @@
 namespace Libraries::Net {
 
 // SHADPS4_P2P_LOG=1: the first datagrams of the game at Info level (see the TX / RX sites).
-static bool P2PLogWanted() {
-    static const bool enabled = [] {
+// SHADPS4_P2P_LOG=<virtual port, e.g. 40>: only the datagrams of that virtual port.
+static bool P2PLogWanted(unsigned local_vport, unsigned remote_vport) {
+    static const int wanted = [] {
         const char* value = std::getenv("SHADPS4_P2P_LOG");
-        return value != nullptr && value[0] == '1';
+        return value != nullptr ? std::atoi(value) : 0;
     }();
-    static std::atomic<int> budget{3000};
-    return enabled && budget.fetch_sub(1) > 0;
+    static std::atomic<int> budget{wanted == 1 ? 3000 : 30000};
+    if (wanted == 0 || (wanted != 1 && static_cast<unsigned>(wanted) != local_vport &&
+                        static_cast<unsigned>(wanted) != remote_vport)) {
+        return false;
+    }
+    return budget.fetch_sub(1) > 0;
 }
 
 static long long P2PLogNowMs() {
@@ -928,7 +933,7 @@ int P2PSocket::SendPacket(const void* msg, u32 len, int flags, const OrbisNetSoc
     LOG_TRACE(Lib_Net, "P2P TX {} bytes vport {} -> {} dst={:#x}:{}", len,
               ntohs(local_addr.sin_vport), ntohs(target.sin_vport), target.sin_addr,
               ntohs(target.sin_port));
-    if (P2PLogWanted()) {
+    if (P2PLogWanted(ntohs(local_addr.sin_vport), ntohs(target.sin_vport))) {
         LOG_INFO(Lib_Net, "P2P TX t={} {} bytes vport {} -> {} dst={:#x}:{} head={}", P2PLogNowMs(),
                  len, ntohs(local_addr.sin_vport), ntohs(target.sin_vport), target.sin_addr,
                  ntohs(target.sin_port), P2PLogHead(msg, len));
@@ -1115,7 +1120,7 @@ void P2PSocket::EnqueuePacket(P2PDatagram packet) {
     LOG_TRACE(Lib_Net, "P2P RX {} bytes vport {} <- {} src={:#x}:{}", packet.payload.size(),
               ntohs(local_addr.sin_vport), ntohs(packet.source_vport), packet.source_addr,
               ntohs(packet.source_port));
-    if (P2PLogWanted()) {
+    if (P2PLogWanted(ntohs(local_addr.sin_vport), ntohs(packet.source_vport))) {
         LOG_INFO(Lib_Net, "P2P RX t={} {} bytes vport {} <- {} src={:#x}:{} head={}",
                  P2PLogNowMs(), packet.payload.size(), ntohs(local_addr.sin_vport),
                  ntohs(packet.source_vport), packet.source_addr, ntohs(packet.source_port),
