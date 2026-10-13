@@ -28,7 +28,7 @@ export SHADPS4_BLOODBORNE_STAY_IN_SESSION=1
 # Experimental: a guest also keeps the doors, gates, shortcuts and lifts the host's world opens
 # during the session. Every player needs the same setting; remove "# " from the next line.
 # export SHADPS4_BLOODBORNE_SHARE_DOORS=1
-# export BB_MOUSE_KEYBOARD=1   # built-in mouse + keyboard controls
+# Mouse + keyboard: input.ini next to bbport.ini (docs/INPUT.md).
 
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 # Where the game's own server addresses go: sign-in and messages to the community server,

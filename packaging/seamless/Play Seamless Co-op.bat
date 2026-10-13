@@ -27,7 +27,6 @@ rem Experimental: a guest also keeps the doors, gates, shortcuts and lifts the h
 rem opens during the session. Every player needs the same setting; remove "rem " from the
 rem next line.
 rem set SHADPS4_BLOODBORNE_SHARE_DOORS=1
-rem Built-in mouse + keyboard controls: remove "rem " from the next line.
-rem set BB_MOUSE_KEYBOARD=1
+rem Mouse + keyboard: the Controls page of Bloodborne.exe, or input.ini (docs/INPUT.md).
 
 start "" "%~dp0Play Bloodborne.exe"

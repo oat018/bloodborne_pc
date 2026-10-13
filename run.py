@@ -68,6 +68,26 @@ def online_overrides(env, user_dir):
     env['SHADPS4_HTTP_HOST_OVERRIDES_JSON'] = str(path)
 
 
+# The 1.09 executable with Lance McDonald's 60 fps patch applied to it, as some dumps ship it
+# (seen on US CUSA00900): one of its edits inverts a branch in the menu code (+0xf6d90d) and the
+# gestures menu crashes the game. The port has its own 60 fps; the clean 1.09 eboot.bin is needed.
+LANCE_60FPS_IMAGE = 'bbc91f4dff6bc3118b039464289e39878a8fdfc802a07fab9d5fe84d935a676f'
+
+
+def image_sha256(game):
+    """The SHA-256 of eboot.bin's loaded image (its loadable segments at their addresses): the
+    same whatever tool dumped it, unlike the SELF around it."""
+    import hashlib
+    sys.path.insert(0, str(PORT / 'scripts'))
+    from prepare import parse_self, span
+    elf, _header, ph, _segments, _missing = parse_self((Path(game) / 'eboot.bin').read_bytes())
+    loads = [p for p in ph if p['type'] in (1, 0x61000010)]
+    image = bytearray(max(p['vaddr'] + p['memsz'] for p in loads))
+    for p in loads:
+        image[p['vaddr']:p['vaddr'] + p['filesz']] = span(elf, p['offset'], p['filesz'])
+    return hashlib.sha256(image).hexdigest()
+
+
 def fail(message):
     print(message, file=sys.stderr)
     sys.exit(1)
@@ -153,6 +173,16 @@ def main():
     if not (game / 'eboot.bin').is_file():
         fail(f'No eboot.bin in {game} (set BB_GAME_DIR).')
     original_game = game.resolve()
+    if env.get('BB_SKIP_GAME_CHECK') != '1':
+        try:
+            prepatched = image_sha256(game) == LANCE_60FPS_IMAGE
+        except (OSError, ValueError, KeyError, IndexError):
+            prepatched = False  # prepare.py reports unreadable executables itself
+        if prepatched:
+            fail("This eboot.bin has Lance McDonald's 60 fps patch applied to it, which crashes the "
+                 'game when the gestures menu opens (the port has its own 60 fps): copy eboot.bin '
+                 'from a clean dump of the 1.09 update into the game folder, replacing this one. '
+                 'BB_SKIP_GAME_CHECK=1 starts it anyway.')
     game = Path(run_script('mods.py', game, '--out', out,
                            '--mods-dir', env.get('BB_MODS_DIR', data / 'mods'),
                            '--config', env.get('BB_MODS_CONFIG', data / 'mods.json'),
@@ -162,16 +192,32 @@ def main():
         run_script('prepare.py', game, '--out', out)
         run_script('link_libc.py', game, '--out', out)
         run_script('link_modules.py', game, '--out', out)
+        # Legacy CPU profile (scripts/cpu_compat.py): the image no longer needs BMI1, LZCNT or
+        # MOVBE, and bb-probe's CPU check lets such a CPU start.
+        try:
+            compat = json.loads((out / 'link.json').read_text(encoding='utf-8')).get('cpu_compat', {})
+        except (OSError, ValueError):
+            compat = {}
+        if compat.get('enabled'):
+            env['BB_CPU_COMPAT'] = '1'
+        else:
+            env.pop('BB_CPU_COMPAT', None)
         run_script('content_profile.py', game, '--out', out, '--sku', env.get('BB_CONTENT_SKU', 'full'))
 
         # Patches exist for game version 01.09 only (patches.py applies none to others): other
         # versions keep the game's 30 FPS timing and change resolutions live.
         sys.path.insert(0, str(PORT / 'scripts'))
-        from patches import game_app_version
+        from patches import eboot_matches_patches, game_app_version
         version = game_app_version(game)
-        patched = version in (None, '01.09') or bool(env.get('BB_FORCE_PATCHES'))
+        forced = bool(env.get('BB_FORCE_PATCHES'))
+        patched = version in (None, '01.09') or forced
         if not patched:
             print(f'Game version {version}: community patches need 01.09; 30 FPS, no effect patches')
+        elif not forced and not eboot_matches_patches(out / 'eboot.elf'):
+            # param.sfo says 01.09, the code is another build's: the patches would break it.
+            patched = False
+            print('Game files: eboot.bin is not the 01.09 build the community patches were made for; '
+                  '30 FPS, no effect patches')
         # Sizes chosen below for the previous launch are recomputed after an in-game restart.
         if env.get('BB_AUTO_RENDER_RES') == '1':
             for key in ('BB_RENDER_RES', 'BB_OUTPUT_RES', 'BB_AUTO_RENDER_RES'):

@@ -1,6 +1,6 @@
 # Seamless co-op for bbport
 
-This branch adds a seamless co-op mode to the Windows version of bbport 1.6
+This branch adds a seamless co-op mode to the Windows version of bbport 1.7
 (`Supermedo/bloodborne_pc`, itself based on `deadinside28/bloodborne_pc`). It builds on the
 online play of 1.6 (the network and PSN libraries of `Wozzardman/shadp2p`) and on that
 project's experimental seamless mode, and adds session rules in the spirit of the Seamless
@@ -40,9 +40,9 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
 - With `SHADPS4_BLOODBORNE_AUTO_REJOIN=1` the same bell is rung again when the players really
   lose each other (network trouble).
-- Built-in mouse and keyboard controls (`BB_MOUSE_KEYBOARD=1`, or the "Mouse & keyboard"
-  section at the bottom of the Insert menu). The relative-mouse plumbing comes from
-  `Mush-iii/bloodborne_pc`.
+- Mouse and keyboard: bbport 1.7's own (`input.ini`, the launcher's Controls page,
+  `docs/INPUT.md`). The mouse mode this branch had before 1.7 (`BB_MOUSE_KEYBOARD`, the
+  "Mouse & keyboard" section of the Insert menu) is gone.
 
 Shared progress is limited to bosses and lanterns: doors and shortcuts, items lying in the
 world (each without its experimental switch above) and NPC quests still belong to the host
