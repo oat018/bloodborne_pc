@@ -36,7 +36,7 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   doors and gates opened, shortcuts, lifts. See the limits below.
 - A guest can talk to the characters of the host's world and use its lanterns
   (`SHADPS4_BLOODBORNE_GUEST_TALK=0` turns it off).
-- Bell hotkeys, so no Insight or bell items are needed: PgUp = Beckoning Bell (host),
+- Bell hotkeys, so no bell items are needed (a ring may still cost Insight): PgUp = Beckoning Bell (host),
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
 - With `SHADPS4_BLOODBORNE_AUTO_REJOIN=1` the same bell is rung again when the players really
   lose each other (network trouble).
@@ -106,10 +106,11 @@ Fixed after v2.3 (first session between two machines):
 
 Still open from that session: when one player restarts the game the other keeps the old
 signaling connection and the two do not match again until both have restarted; a guest's old
-advertisement stays on the shadNet server after its game died (restart the server); a guest
-does not follow the host to another lantern of the same area (the guest's End key joins the
-host again); one crash of the Linux renderer during a reload
-(`Vulkan::Scheduler::ReserveRecordData`, radv).
+advertisement stays on the shadNet server after its game died (restart the server); one
+crash of the Linux renderer during a reload (`Vulkan::Scheduler::ReserveRecordData`, radv).
+Since v2.5 a guest also follows the host to another lantern of the same area: it is taken to
+the host when the host's character leaves and comes back, or jumps, and the host's notes name
+a lantern (not after the host's death respawn).
 
 The Linux build is compiled by the workflow of this branch and cannot be run by the author
 (no Linux machine); the Linux fixes above are compiled but were not run when this was written.
