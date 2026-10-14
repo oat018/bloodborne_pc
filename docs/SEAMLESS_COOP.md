@@ -36,8 +36,11 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   doors and gates opened, shortcuts, lifts. See the limits below.
 - A guest can talk to the characters of the host's world and use its lanterns
   (`SHADPS4_BLOODBORNE_GUEST_TALK=0` turns it off).
-- Bell hotkeys, so no bell items are needed (a ring may still cost Insight): PgUp = Beckoning Bell (host),
+- Bell hotkeys, so no bell items are needed: PgUp = Beckoning Bell (host),
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
+- Ringing the Beckoning Bell costs no Insight, by hotkey or from the inventory: the game took one
+  per ring, also for the rings of the automatic re-join (`SHADPS4_BLOODBORNE_BELL_INSIGHT=1`
+  keeps the cost).
 - With `SHADPS4_BLOODBORNE_AUTO_REJOIN=1` the same bell is rung again when the players really
   lose each other (network trouble).
 - Mouse and keyboard: bbport 1.7's own (`input.ini`, the launcher's Controls page,

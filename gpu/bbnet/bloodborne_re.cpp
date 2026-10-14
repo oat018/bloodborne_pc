@@ -2510,6 +2510,36 @@ void ApplyDebugCommands() {
         }
         LOG_INFO(Debug, "Bloodborne debug: find32 {:#x} in {:#x}+{:#x}:{}", value, address, length,
                  hits);
+    } else if (command == "snap" || command == "sdiff") {
+        // snap <length> <image offset> [<offset> ...] remembers a range, sdiff lists the dwords
+        // that have changed since (and remembers the new values).
+        static std::vector<u32> snapshot;
+        static u64 snapshot_address{};
+        if (command == "snap") {
+            u64 length = 0;
+            words >> std::hex >> length;
+            snapshot_address = follow();
+            snapshot.clear();
+            if (HasMemoryAccess(snapshot_address, length, MemoryProt::CpuRead)) {
+                snapshot.resize(length / 4);
+                std::memcpy(snapshot.data(), reinterpret_cast<const void*>(snapshot_address),
+                            snapshot.size() * 4);
+            }
+            LOG_INFO(Debug, "Bloodborne debug: snap {:#x}: {} dwords", snapshot_address,
+                     snapshot.size());
+        } else if (HasMemoryAccess(snapshot_address, snapshot.size() * 4, MemoryProt::CpuRead)) {
+            std::string changes;
+            int count = 0;
+            for (size_t index = 0; index < snapshot.size(); ++index) {
+                const u32 value = ReadValue<u32>(snapshot_address, index * 4);
+                if (value != snapshot[index] && count++ < 40) {
+                    changes += fmt::format(" +{:#x}:{:#x}>{:#x}", index * 4, snapshot[index], value);
+                }
+                snapshot[index] = value;
+            }
+            LOG_INFO(Debug, "Bloodborne debug: sdiff {:#x}: {} changed:{}", snapshot_address, count,
+                     changes);
+        }
     } else if (command == "talklog") {
         std::scoped_lock lock{talk_log_mutex};
         talk_log_seen.clear();
@@ -5827,6 +5857,34 @@ void RequestSessionStop(bool keep_role) {
     }
 }
 
+// Ringing the Beckoning Bell costs one Insight (PlayerGameData +0x84). The item-use routine
+// (0x18C9160) takes the cost from the item's data (the byte at +0x38 of its goods row) and
+// hands it on negated as the Insight change. In this mode the bell is how the players find
+// each other again, by hotkey and by itself with SHADPS4_BLOODBORNE_AUTO_REJOIN, so the change
+// is made 0: no item costs Insight to use. SHADPS4_BLOODBORNE_BELL_INSIGHT=1 keeps the cost.
+static void InstallFreeBellPatch(u64 base) {
+    // movzx eax, byte [r15+0x38]; neg eax; mov [rbp-0x44], eax
+    static constexpr std::array<u8, 10> InsightCost{0x41, 0x0F, 0xB6, 0x47, 0x38,
+                                                    0xF7, 0xD8, 0x89, 0x45, 0xBC};
+    static constexpr std::array<u8, 2> NoCost{0x31, 0xC0}; // xor eax, eax
+    constexpr u64 InsightCostOffset = 0x018C92BB;
+    if (EnvFlagEnabled("SHADPS4_BLOODBORNE_BELL_INSIGHT")) {
+        return;
+    }
+    const u64 image_size = MemoryPatcher::g_eboot_image_size;
+    if (InsightCostOffset + InsightCost.size() > image_size ||
+        !std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(
+                                                    base + InsightCostOffset),
+                                                InsightCost.size()},
+                            InsightCost)) {
+        LOG_ERROR(Debug, "Bloodborne free bell patch skipped: unexpected bytes at {:#x}",
+                  InsightCostOffset);
+        return;
+    }
+    std::memcpy(reinterpret_cast<u8*>(base + InsightCostOffset + 5), NoCost.data(), NoCost.size());
+    LOG_INFO(Debug, "Bloodborne free bell: ringing the Beckoning Bell costs no Insight");
+}
+
 void InstallSeamlessCoopPatches() {
     if ((negative_area_patch_installed && area_flag_patch_installed &&
          responder_bell_area_patch_installed && responder_bell_common_patch_installed &&
@@ -6264,6 +6322,7 @@ void InstallSeamlessCoopPatches() {
     summon_build_negative_event_patch_installed = true;
     stage_transition_keep_matching_patch_installed = true;
     InstallStayInSessionPatches(base);
+    InstallFreeBellPatch(base);
     InstallSessionHooks(base);
     LOG_INFO(Debug,
              "Bloodborne seamless patches enabled Beckoning, Small Resonant, and Sinister Bell "
