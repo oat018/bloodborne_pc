@@ -55,6 +55,17 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   `SHADPS4_BLOODBORNE_GUEST_HP_CUT=1` and `SHADPS4_BLOODBORNE_GHOST_NPCS=1` keep the game's
   rules. A member that stops answering no longer ends the session after about 6 minutes of
   undelivered packets (the game's limit of 1001 is raised to 30000).
+- Enemies get stronger for every guest (new after v2.5, as in BBSC and Elden Ring Seamless
+  Co-op): per guest +40% HP for normal enemies, +100% for bosses, +15% damage, +15% / +20%
+  stagger resistance. The game's own boss buff (x1.5 HP with one guest) is replaced by it.
+  Percentages: `SHADPS4_BLOODBORNE_SCALE_ENEMY_HP`, `_SCALE_BOSS_HP`, `_SCALE_DAMAGE`,
+  `_SCALE_ENEMY_STAGGER`, `_SCALE_BOSS_STAGGER` (set the same on every player);
+  `SHADPS4_BLOODBORNE_SCALING=0` keeps the game's rule. The enemy tables are found in memory
+  about 6 s after the game starts. Hostile NPC hunters are not scaled.
+- No co-op fog walls (new after v2.5, as in BBSC): the walls the game raises around an area
+  while a session is up stay down, so the players can walk on into the next area. Boss fog
+  walls stay. A floor guard keeps a character standing on a part of the map one game has
+  already unloaded from crashing it. `SHADPS4_BLOODBORNE_FOG_WALLS=1` keeps the walls.
 - With `SHADPS4_BLOODBORNE_AUTO_REJOIN=1` the same bell is rung again when the players really
   lose each other (network trouble).
 - Mouse and keyboard: bbport 1.7's own (`input.ini`, the launcher's Controls page,

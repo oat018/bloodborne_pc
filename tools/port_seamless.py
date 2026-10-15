@@ -130,6 +130,87 @@ bool HasMemoryAccess(u64 address, size_t size, MemoryProt required) {
 #endif
 }
 '''
+SCAN_OLD = '''std::vector<u64> FindInGameMemory(std::span<const u8> needle, u64 lo, u64 hi, size_t max_hits) {
+    (void)needle, (void)lo, (void)hi, (void)max_hits;
+    return {};
+}
+'''
+SCAN_NEW = '''std::vector<u64> FindInGameMemory(std::span<const u8> needle, u64 lo, u64 hi, size_t max_hits) {
+    std::vector<u64> hits;
+    if (needle.empty() || lo >= hi) {
+        return hits;
+    }
+    // Memory is copied by the kernel a megabyte at a time, so a page that is unmapped or
+    // protected in the meantime fails the copy instead of faulting.
+    std::vector<u8> buffer(1 << 20);
+    const auto copy = [](u64 address, u8* out, size_t size) -> size_t {
+#ifdef _WIN32
+        SIZE_T copied = 0;
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), out, size,
+                          &copied);
+        return copied;
+#else
+        const iovec local{out, size};
+        const iovec remote{reinterpret_cast<void*>(address), size};
+        const ssize_t copied = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+        return copied > 0 ? static_cast<size_t>(copied) : 0;
+#endif
+    };
+    const auto search = [&](u64 start, u64 end) {
+        start = std::max(start, lo);
+        end = std::min(end, hi);
+        for (u64 at = start; at < end && hits.size() < max_hits;) {
+            const size_t size = copy(at, buffer.data(), std::min<u64>(buffer.size(), end - at));
+            if (size < needle.size()) {
+                at += buffer.size();
+                continue;
+            }
+            for (size_t i = 0; i + needle.size() <= size && hits.size() < max_hits; ++i) {
+                const void* found = std::memchr(buffer.data() + i, needle[0],
+                                                size - needle.size() + 1 - i);
+                if (found == nullptr) {
+                    break;
+                }
+                i = static_cast<size_t>(static_cast<const u8*>(found) - buffer.data());
+                if (std::memcmp(buffer.data() + i, needle.data(), needle.size()) == 0) {
+                    hits.push_back(at + i);
+                }
+            }
+            at += size > needle.size() ? size - (needle.size() - 1) : size;
+        }
+    };
+#ifdef _WIN32
+    for (u64 at = lo; at < hi && hits.size() < max_hits;) {
+        MEMORY_BASIC_INFORMATION region{};
+        if (VirtualQuery(reinterpret_cast<void*>(at), &region, sizeof(region)) == 0) {
+            break;
+        }
+        const u64 start = reinterpret_cast<u64>(region.BaseAddress);
+        const u64 end = start + region.RegionSize;
+        if (region.State == MEM_COMMIT && region.Protect == PAGE_READWRITE) {
+            search(start, end);
+        }
+        if (end <= at) {
+            break;
+        }
+        at = end;
+    }
+#else
+    std::ifstream maps{"/proc/self/maps"};
+    std::string line;
+    while (std::getline(maps, line) && hits.size() < max_hits) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        char perms[8]{};
+        if (std::sscanf(line.c_str(), "%llx-%llx %7s", &start, &end, perms) == 3 &&
+            perms[0] == 'r' && perms[1] == 'w' && end > lo && start < hi) {
+            search(start, end);
+        }
+    }
+#endif
+    return hits;
+}
+'''
 PSF_OLD = '''    const auto* param_sfo = Common::Singleton<PSF>::Instance();
     const std::string_view app_version = param_sfo->GetString("APP_VER").value_or("Unknown");
 '''
@@ -140,7 +221,7 @@ PSF_NEW = '''    const std::string_view app_version = Common::ElfInfo::Instance(
 def main():
     source = Path(sys.argv[1]).read_text(encoding='utf-8').replace('\r\n', '\n')
     for old, new, count in ((INCLUDES_OLD, INCLUDES_NEW, 1), (PSF_OLD, PSF_NEW, 2),
-                            (MEMORY_OLD, MEMORY_NEW, 1)):
+                            (MEMORY_OLD, MEMORY_NEW, 1), (SCAN_OLD, SCAN_NEW, 1)):
         if source.count(old) != count:
             sys.exit(f'expected {count} occurrence(s) of:\n{old}')
         source = source.replace(old, new)

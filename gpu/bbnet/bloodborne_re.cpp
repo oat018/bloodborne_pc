@@ -24,6 +24,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -79,6 +80,8 @@ namespace Core::Bloodborne {
 void ApplyGuestReinsertAfterReload();
 void ApplySharedProgressTick();
 void ApplyGuestHpCut();
+void ApplyEnemyScaling();
+bool ScalingEnabled();
 // The game's list of CSMultiPlayerIns tasks, known once one has been created.
 static std::uint64_t multi_player_ins_manager{};
 
@@ -1036,6 +1039,84 @@ bool WriteValue(u64 address, size_t offset, const T& value) {
 
     std::memcpy(reinterpret_cast<void*>(destination), &value, sizeof(value));
     return true;
+}
+
+// Every address in [lo, hi) of the game's writable data where `needle` sits (at most max_hits).
+// A walk of the whole address range: call it off the game thread. (bbport has its own.)
+std::vector<u64> FindInGameMemory(std::span<const u8> needle, u64 lo, u64 hi, size_t max_hits) {
+    std::vector<u64> hits;
+    if (needle.empty() || lo >= hi) {
+        return hits;
+    }
+    // Memory is copied by the kernel a megabyte at a time, so a page that is unmapped or
+    // protected in the meantime fails the copy instead of faulting.
+    std::vector<u8> buffer(1 << 20);
+    const auto copy = [](u64 address, u8* out, size_t size) -> size_t {
+#ifdef _WIN32
+        SIZE_T copied = 0;
+        ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), out, size,
+                          &copied);
+        return copied;
+#else
+        const iovec local{out, size};
+        const iovec remote{reinterpret_cast<void*>(address), size};
+        const ssize_t copied = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+        return copied > 0 ? static_cast<size_t>(copied) : 0;
+#endif
+    };
+    const auto search = [&](u64 start, u64 end) {
+        start = std::max(start, lo);
+        end = std::min(end, hi);
+        for (u64 at = start; at < end && hits.size() < max_hits;) {
+            const size_t size = copy(at, buffer.data(), std::min<u64>(buffer.size(), end - at));
+            if (size < needle.size()) {
+                at += buffer.size();
+                continue;
+            }
+            for (size_t i = 0; i + needle.size() <= size && hits.size() < max_hits; ++i) {
+                const void* found = std::memchr(buffer.data() + i, needle[0],
+                                                size - needle.size() + 1 - i);
+                if (found == nullptr) {
+                    break;
+                }
+                i = static_cast<size_t>(static_cast<const u8*>(found) - buffer.data());
+                if (std::memcmp(buffer.data() + i, needle.data(), needle.size()) == 0) {
+                    hits.push_back(at + i);
+                }
+            }
+            at += size > needle.size() ? size - (needle.size() - 1) : size;
+        }
+    };
+#ifdef _WIN32
+    for (u64 at = lo; at < hi && hits.size() < max_hits;) {
+        MEMORY_BASIC_INFORMATION region{};
+        if (VirtualQuery(reinterpret_cast<void*>(at), &region, sizeof(region)) == 0) {
+            break;
+        }
+        const u64 start = reinterpret_cast<u64>(region.BaseAddress);
+        const u64 end = start + region.RegionSize;
+        if (region.State == MEM_COMMIT && region.Protect == PAGE_READWRITE) {
+            search(start, end);
+        }
+        if (end <= at) {
+            break;
+        }
+        at = end;
+    }
+#else
+    std::ifstream maps{"/proc/self/maps"};
+    std::string line;
+    while (std::getline(maps, line) && hits.size() < max_hits) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        char perms[8]{};
+        if (std::sscanf(line.c_str(), "%llx-%llx %7s", &start, &end, perms) == 3 &&
+            perms[0] == 'r' && perms[1] == 'w' && end > lo && start < hi) {
+            search(start, end);
+        }
+    }
+#endif
+    return hits;
 }
 
 bool WriteTransportedSummonPlacement(u64 state, const SummonPlacementDescriptor& placement) {
@@ -4229,6 +4310,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         ApplyGuestReinsertAfterReload();
         ApplySharedProgressTick();
         ApplyGuestHpCut();
+        ApplyEnemyScaling();
         ApplyRequestedBellUse();
         ApplyRequestedSessionStop();
         ApplySharedDeathRule();
@@ -6297,6 +6379,12 @@ static void InstallGuestEqualPatches(u64 base) {
         // isChangeWanderGhost gets the ghost model; JZ (not a ghost NPC) becomes JMP.
         patches.push_back({"solid NPCs", 0x018E4FBF, {0x74, 0x1B}, {0xEB, 0x1B}, 0});
     }
+    if (ScalingEnabled()) {
+        // Lua_MultiDoping: CMP EAX,2 / JNZ (two guests: 7501) and CMP EAX,1 / JNZ (one: 7500);
+        // both JNZ become JMP, the boss gets the enemy scaling above instead.
+        patches.push_back({"no vanilla boss buff (2)", 0x0138BCC2, {0x75, 0x32}, {0xEB, 0x32}, 0});
+        patches.push_back({"no vanilla boss buff (1)", 0x0138BCF9, {0x75, 0x54}, {0xEB, 0x54}, 0});
+    }
     // Reliable-packet send 0x017894E0 ends the session ("OnIrregularLeaveSession") once 1001
     // packets wait for a member that does not answer, about 6 minutes; allow 30000.
     patches.push_back(
@@ -6356,6 +6444,543 @@ void ApplyGuestHpCut() {
         }
         node = ReadValue<u64>(node, 0x58);
     }
+}
+
+// ---- Enemy scaling (as BBSC does it, like Elden Ring Seamless Co-op) ----
+// Vanilla gives a boss SpEffect 7500 (HP x1.5) with one guest or 7501 (x2.0) with two, from the
+// boss scripts' Lua_MultiDoping (0x0138BC70); normal enemies get nothing. Instead, every enemy
+// is made stronger for every guest in the session:
+//  - the HP-only row 7500 is copied over SpEffect 7502 (enemies) and 7503 (bosses), which the
+//    game never uses;
+//  - 7502 / 7503 go into a free spEffectID slot (+72, 8 slots of s32, -1 = free) of every
+//    NpcParam row of an enemy (teamType +303 = 23; a boss also has isSoulGetByBoss, +329 bit 4),
+//    so every enemy carries the effect from its spawn;
+//  - the two rows (maxHpRate +16, attack power rates +72..+84) and every enemy row's
+//    superArmorDurability (+280, s16: stagger) are rewritten when the number of guests changes.
+// The param tables are found in memory by their header: the type name at +0x0C, the row count
+// (u16) at +0x0A, from +0x40 index entries of 0x18 bytes (u32 id, u64 data offset at +8).
+// The same scan clears NpcParam's isChangeWanderGhost (+0x145 bit 7), which together with the
+// constructor patch keeps the host world's NPCs solid for a guest (BBSC found the patch alone
+// was not enough). Percent per guest, the same on every player:
+//   SHADPS4_BLOODBORNE_SCALE_ENEMY_HP 40, _SCALE_BOSS_HP 100, _SCALE_DAMAGE 15,
+//   _SCALE_ENEMY_STAGGER 15, _SCALE_BOSS_STAGGER 20; SHADPS4_BLOODBORNE_SCALING=0 keeps vanilla.
+namespace {
+constexpr size_t SpEffectRowSize = 528;
+constexpr u32 ScaleTemplateEffect = 7500;
+constexpr s32 EnemyScaleEffect = 7502;
+constexpr s32 BossScaleEffect = 7503;
+
+struct ScaledNpc {
+    u64 row;
+    s16 armor;
+    bool boss;
+};
+std::mutex scaling_mutex;
+std::vector<u64> scale_rows_enemy;
+std::vector<u64> scale_rows_boss;
+std::vector<ScaledNpc> scaled_npcs;
+std::atomic<bool> scaling_ready{false};
+std::atomic<bool> scaling_started{false};
+} // namespace
+
+bool ScalingEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_BLOODBORNE_SCALING");
+        return value == nullptr || std::string_view{value} != "0";
+    }();
+    return enabled;
+}
+
+int ScalePercent(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    return value == nullptr || value[0] == '\0' ? fallback : std::clamp(std::atoi(value), 0, 1000);
+}
+
+// A param table found in memory: its header, row count and the end of its last row. A table is
+// taken only when all of it is writable, checked once (asking the system costs about a
+// millisecond per call in this process); its rows are then read and written directly.
+struct ParamTable {
+    u64 base;
+    u16 count;
+    u64 end;
+};
+
+// Row data at index entry `i`, or 0 when it lies outside the table (still being built).
+u64 ParamRowAt(const ParamTable& table, u32 i, size_t size) {
+    const u64 offset = ReadValue<u64>(table.base + 0x40 + static_cast<u64>(i) * 0x18, 8);
+    const u64 row = offset < 0x10000000 ? table.base + offset : offset;
+    const u64 index_end = table.base + 0x40 + static_cast<u64>(table.count) * 0x18;
+    return row >= index_end && row + size <= table.end ? row : 0;
+}
+
+u64 FindParamRow(const ParamTable& table, u32 id, size_t size) {
+    for (u32 i = 0; i < table.count; ++i) {
+        if (ReadValue<u32>(table.base + 0x40 + static_cast<u64>(i) * 0x18, 0) == id) {
+            return ParamRowAt(table, i, size);
+        }
+    }
+    return 0;
+}
+
+std::vector<ParamTable> FindParamTables(std::string_view type, size_t row_size) {
+    std::vector<u8> needle(type.begin(), type.end());
+    needle.push_back(0);
+    const u64 low = image_base != 0 && image_base < 0x100000000ULL ? 0x1000000ULL : 0x100000000ULL;
+    std::vector<ParamTable> tables;
+    for (const u64 hit : FindInGameMemory(needle, low, 0x10000000000ULL, 16)) {
+        const u64 base = hit - 0x0C;
+        const u16 count = ReadValue<u16>(base, 0x0A);
+        if (count <= 1000 || ReadValue<u32>(base, 0x40) != 0) {
+            continue;
+        }
+        u64 end = base + 0x40 + static_cast<u64>(count) * 0x18;
+        bool sane = true;
+        for (u32 i = 0; i < count && sane; ++i) {
+            const u64 offset = ReadValue<u64>(base + 0x40 + static_cast<u64>(i) * 0x18, 8);
+            const u64 row = offset < 0x10000000 ? base + offset : offset;
+            sane = row >= base && row - base <= 0x4000000;
+            end = std::max(end, row + row_size);
+        }
+        if (sane && HasMemoryAccess(base, end - base, MemoryProt::CpuWrite)) {
+            tables.push_back({base, count, end});
+        }
+    }
+    return tables;
+}
+
+template <typename T>
+T PeekParam(u64 address) {
+    T value;
+    std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+    return value;
+}
+
+template <typename T>
+void PokeParam(u64 address, const T& value) {
+    std::memcpy(reinterpret_cast<void*>(address), &value, sizeof(value));
+}
+
+bool PrepareScaling() {
+    const auto started = std::chrono::steady_clock::now();
+    const auto speffect_tables = FindParamTables("SP_EFFECT_PARAM_ST", SpEffectRowSize);
+    const auto npc_tables = FindParamTables("NPC_PARAM_ST", 336);
+    std::vector<u64> rows_enemy;
+    std::vector<u64> rows_boss;
+    std::vector<ScaledNpc> npcs;
+    size_t full = 0;
+    size_t ghosts = 0;
+    for (const ParamTable& table : speffect_tables) {
+        const u64 source = FindParamRow(table, ScaleTemplateEffect, SpEffectRowSize);
+        const u64 enemy = FindParamRow(table, EnemyScaleEffect, SpEffectRowSize);
+        const u64 boss = FindParamRow(table, BossScaleEffect, SpEffectRowSize);
+        if (source == 0 || enemy == 0 || boss == 0 || PeekParam<float>(source + 16) != 1.5F) {
+            continue;
+        }
+        std::array<u8, SpEffectRowSize> clean{};
+        std::memcpy(clean.data(), reinterpret_cast<const void*>(source), clean.size());
+        std::memcpy(reinterpret_cast<void*>(enemy), clean.data(), clean.size());
+        std::memcpy(reinterpret_cast<void*>(boss), clean.data(), clean.size());
+        rows_enemy.push_back(enemy);
+        rows_boss.push_back(boss);
+    }
+    const bool ghost_npcs = EnvFlagEnabled("SHADPS4_BLOODBORNE_GHOST_NPCS");
+    for (const ParamTable& table : npc_tables) {
+        for (u32 i = 0; i < table.count; ++i) {
+            const u64 row = ParamRowAt(table, i, 336);
+            if (row == 0) {
+                continue;
+            }
+            const u8 flags = PeekParam<u8>(row + 0x145);
+            if (!ghost_npcs && (flags & 0x80) != 0) {
+                PokeParam<u8>(row + 0x145, static_cast<u8>(flags & 0x7F));
+                ++ghosts;
+            }
+            // isSoulGetByBoss is also on the hostile NPC hunters (teamType 25 / 29): they stay
+            // as they are, as in vanilla.
+            const u8 team = PeekParam<u8>(row + 303);
+            const bool boss = ((PeekParam<u8>(row + 329) >> 4) & 1) != 0;
+            if (team != 23 || rows_enemy.empty()) {
+                continue;
+            }
+            const s32 effect = boss ? BossScaleEffect : EnemyScaleEffect;
+            bool placed = false;
+            for (size_t slot = 0; slot < 8 && !placed; ++slot) {
+                placed = PeekParam<s32>(row + 72 + slot * 4) == effect;
+            }
+            for (size_t slot = 0; slot < 8 && !placed; ++slot) {
+                if (PeekParam<s32>(row + 72 + slot * 4) == -1) {
+                    PokeParam<s32>(row + 72 + slot * 4, effect);
+                    placed = true;
+                }
+            }
+            if (!placed) {
+                ++full;
+                continue;
+            }
+            npcs.push_back({row, PeekParam<s16>(row + 280), boss});
+        }
+    }
+    if (rows_enemy.empty() || npcs.empty()) {
+        LOG_INFO(Debug, "Bloodborne enemy scaling: not ready ({} effect rows, {} enemy rows)",
+                 rows_enemy.size(), npcs.size());
+        return false;
+    }
+    const auto bosses = std::ranges::count_if(npcs, [](const ScaledNpc& npc) { return npc.boss; });
+    LOG_INFO(Debug,
+             "Bloodborne enemy scaling: {} SpEffect / {} NpcParam table(s) found in {} ms; {} "
+             "enemy and {} boss rows carry the effect ({} without a free slot); {} NPC rows "
+             "no longer grey ghosts",
+             speffect_tables.size(), npc_tables.size(),
+             std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - started)
+                 .count(),
+             npcs.size() - bosses, bosses, full, ghosts);
+    std::scoped_lock lock{scaling_mutex};
+    scale_rows_enemy = std::move(rows_enemy);
+    scale_rows_boss = std::move(rows_boss);
+    scaled_npcs = std::move(npcs);
+    scaling_ready = true;
+    return true;
+}
+
+// The params are loaded at boot: look for them from start-up, every 5 s for up to 3 minutes,
+// so the first map's enemies already spawn with the effect.
+void StartScaling() {
+    if (!ScalingEnabled() && EnvFlagEnabled("SHADPS4_BLOODBORNE_GHOST_NPCS")) {
+        return;
+    }
+    if (scaling_started.exchange(true)) {
+        return;
+    }
+    std::thread{[] {
+        for (int attempt = 0; attempt < 36; ++attempt) {
+            std::this_thread::sleep_for(std::chrono::seconds{5});
+            if (PrepareScaling()) {
+                return;
+            }
+        }
+        LOG_INFO(Debug, "Bloodborne enemy scaling: param tables not found after 3 minutes");
+    }}.detach();
+}
+
+// Guests in the session: none outside one (state 3 host, 6 guest); inside, the higher of the
+// game's cooperator count ([[global+0x16F8]+0x08], left behind after a session and 0 for a
+// moment while a guest reloads) and the member count ([..]+0x18, self included) minus one.
+s32 ScalingGuests() {
+    const u64 multi_play = GetMatchingState();
+    const s32 session = multi_play >= 0x10000 ? ReadValue<s32>(multi_play, 0x124) : 0;
+    if (session != 3 && session != 6) {
+        return 0;
+    }
+    const u64 global = GetGlobalState();
+    const u64 population = global >= 0x10000 ? ReadValue<u64>(global, 0x16F8) : 0;
+    if (population < 0x10000) {
+        return 1;
+    }
+    const s32 invaders = std::max(ReadValue<s32>(population, 0x0C), 0);
+    const s32 members = ReadValue<s32>(population, 0x18);
+    return std::clamp(std::max({ReadValue<s32>(population, 0x08), members - 1 - invaders, 1}), 1,
+                      4);
+}
+
+// The boss bar draws HP / max HP of [[chr+0x3B0]+0x20] (+0xF8 / +0xFC); the effect raises the
+// HP but not that max, so the bar would stay full until the extra is gone. A character other than
+// the local player with more HP than its max gets the max raised to its HP.
+void FixScaledMaxHp() {
+    const u64 world_chr = ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0);
+    if (world_chr < 0x10000) {
+        return;
+    }
+    const u64 local = ReadValue<u64>(world_chr, 0x60);
+    // Character handles: block (h >> 14) & 0x3F of [WorldChrMan+0x850 + block*8] (+0 count,
+    // +8 entries of 0x38 with the character at +0), as the boss bar decodes them.
+    const u64 blocks_info = ReadValue<u64>(world_chr, 0x08);
+    const s32 block_count =
+        blocks_info >= 0x10000 ? std::clamp(ReadValue<s32>(blocks_info, 0x18) + 2, 0, 64) : 0;
+    static auto next_count = std::chrono::steady_clock::time_point{};
+    const bool count_now = std::chrono::steady_clock::now() >= next_count;
+    s32 characters = 0;
+    s32 carrying = 0;
+    std::string sample;
+    if (count_now) {
+        next_count = std::chrono::steady_clock::now() + std::chrono::minutes{5};
+    }
+    for (s32 b = 0; b < block_count; ++b) {
+        const u64 block = ReadValue<u64>(world_chr, 0x850 + static_cast<size_t>(b) * 8);
+        const s32 count = block >= 0x10000 ? ReadValue<s32>(block, 0) : 0;
+        const u64 entries = count > 0 && count <= 0x3FFF ? ReadValue<u64>(block, 8) : 0;
+        if (entries < 0x10000) {
+            continue;
+        }
+        for (s32 i = 0; i < count; ++i) {
+            const u64 chr = ReadValue<u64>(entries, static_cast<size_t>(i) * 0x38);
+            if (chr < 0x10000 || chr == local) {
+                continue;
+            }
+            const u64 data = ReadValue<u64>(ReadValue<u64>(chr, 0x3B0), 0x20);
+            if (data < 0x10000) {
+                continue;
+            }
+            const s32 hp = ReadValue<s32>(data, 0xF8);
+            const s32 max_hp = ReadValue<s32>(data, 0xFC);
+            if (count_now) {
+                ++characters;
+                if (HasPlayerEffect(chr, EnemyScaleEffect) || HasPlayerEffect(chr, BossScaleEffect)) {
+                    ++carrying;
+                    if (sample.size() < 80) {
+                        sample += fmt::format(" {}/{}", hp, max_hp);
+                    }
+                }
+            }
+            if (max_hp > 0 && hp > max_hp && hp <= max_hp * 20) {
+                WriteValue<s32>(data, 0xFC, hp);
+                static std::atomic<int> logged{0};
+                if (logged.fetch_add(1) < 5) {
+                    LOG_INFO(Debug, "Bloodborne enemy scaling: character {:#x} HP {} over its max "
+                                    "{} - max raised so its bar starts full",
+                             chr, hp, max_hp);
+                }
+            }
+        }
+    }
+    if (count_now && characters > 0) {
+        LOG_INFO(Debug, "Bloodborne enemy scaling: {} of {} characters carry the effect (HP/max:{})",
+                 carrying, characters, sample);
+    }
+}
+
+void ApplyEnemyScaling() {
+    using clock = std::chrono::steady_clock;
+    static clock::time_point next_check{};
+    static s32 written = -1;
+    const auto now = clock::now();
+    if (!ScalingEnabled() || !scaling_ready || now < next_check) {
+        return;
+    }
+    next_check = now + std::chrono::milliseconds{500};
+    const s32 guests = ScalingGuests();
+    if (guests > 0) {
+        FixScaledMaxHp();
+    }
+    if (guests == written) {
+        return;
+    }
+    static const int enemy_hp = ScalePercent("SHADPS4_BLOODBORNE_SCALE_ENEMY_HP", 40);
+    static const int boss_hp = ScalePercent("SHADPS4_BLOODBORNE_SCALE_BOSS_HP", 100);
+    static const int damage = ScalePercent("SHADPS4_BLOODBORNE_SCALE_DAMAGE", 15);
+    static const int enemy_stagger = ScalePercent("SHADPS4_BLOODBORNE_SCALE_ENEMY_STAGGER", 15);
+    static const int boss_stagger = ScalePercent("SHADPS4_BLOODBORNE_SCALE_BOSS_STAGGER", 20);
+    const auto rate = [guests](int percent) {
+        return 1.0F + static_cast<float>(percent) * static_cast<float>(guests) / 100.0F;
+    };
+    std::scoped_lock lock{scaling_mutex};
+    const auto write_row = [&](u64 row, float hp) {
+        PokeParam(row + 16, hp);
+        for (size_t at = 72; at <= 84; at += 4) {
+            PokeParam(row + at, rate(damage));
+        }
+    };
+    for (const u64 row : scale_rows_enemy) {
+        write_row(row, rate(enemy_hp));
+    }
+    for (const u64 row : scale_rows_boss) {
+        write_row(row, rate(boss_hp));
+    }
+    for (const ScaledNpc& npc : scaled_npcs) {
+        const float armor =
+            static_cast<float>(npc.armor) * rate(npc.boss ? boss_stagger : enemy_stagger);
+        PokeParam(npc.row + 280, static_cast<s16>(std::min(armor, 32767.0F)));
+    }
+    written = guests;
+    LOG_INFO(Debug,
+             "Bloodborne enemy scaling: {} guest(s) -> enemies HP x{:.2f}, bosses HP x{:.2f}, "
+             "damage x{:.2f}, stagger resistance +{}% / +{}% (bosses)",
+             guests, rate(enemy_hp), rate(boss_hp), rate(damage), enemy_stagger * guests,
+             boss_stagger * guests);
+}
+
+// ---- No co-op fog walls (as BBSC does it) ----
+// Every co-op wall of the game is raised by one of two identical event scripts, 7600
+// (common.emevd) and 12907600 (m29.emevd, Chalice), once the session is up: object bank 2005
+// draws it and turns its collision on (0x013CABD0 / 0x013CA580 (entity, on)), SFX bank 2006
+// spawns its fog (0x01315FA0(map list, entity)). The bank handlers (0x017C46E0 / 0x017C64E0,
+// rsi = the running event instance) note the wall the script is switching; when the draw,
+// collision or fog call that follows on the same thread is for that wall, "on" becomes "off"
+// (the fog gets entity 0, which matches none). Boss walls have their own events and stay. The
+// Lua co-op wall (Lua_MultiWall 0x0138B720) jumps to Lua_InvalidMultiWall (0x0138B890), the
+// same function that hides it. SHADPS4_BLOODBORNE_FOG_WALLS=1 keeps the walls.
+namespace {
+constexpr u64 ObjectDrawOffset = 0x013CABD0;
+constexpr u64 ObjectCollisionOffset = 0x013CA580;
+constexpr u64 ObjectSfxEnableOffset = 0x01315FA0;
+constexpr u64 EventObjectBankOffset = 0x017C46E0;
+constexpr u64 EventSfxBankOffset = 0x017C64E0;
+thread_local u32 coop_wall_entity = 0;
+std::atomic<u32> coop_walls_kept_off{0};
+} // namespace
+
+// The event a running EMEVD instance belongs to: [instance+0xA8]+8 is its EMEVD file (+0x10
+// event count, +0x18 event table, +0x28 instruction table, offsets from the file start),
+// [instance+0xB0] the instruction being run; events are 0x30 bytes (id, instruction count, first
+// instruction offset), instructions 0x20 bytes.
+s64 RunningEventId(u64 instance) {
+    const u64 file = ReadValue<u64>(ReadValue<u64>(instance, 0xA8), 0x08);
+    const u64 instruction = ReadValue<u64>(instance, 0xB0);
+    if (file < 0x10000) {
+        return -1;
+    }
+    const s64 count = ReadValue<s64>(file, 0x10);
+    const u64 events = file + ReadValue<u64>(file, 0x18);
+    const u64 instructions = file + ReadValue<u64>(file, 0x28);
+    if (count <= 0 || count > 100'000 || instruction < instructions) {
+        return -1;
+    }
+    const u64 index = (instruction - instructions) / 0x20;
+    for (s64 k = 0; k < count; ++k) {
+        const u64 event = events + static_cast<u64>(k) * 0x30;
+        const u64 first = ReadValue<u64>(event, 0x10) / 0x20;
+        if (index >= first && index < first + ReadValue<u64>(event, 0x08)) {
+            return ReadValue<s64>(event, 0x00);
+        }
+    }
+    return -1;
+}
+
+void PS4_SYSV_ABI WallScriptEntry(u64, const GuestRegisterSnapshot* registers) {
+    coop_wall_entity = 0;
+    const u64 instance = registers->rsi;
+    const u64 instruction = instance >= 0x10000 ? ReadValue<u64>(instance, 0xB0) : 0;
+    if (instruction < 0x10000) {
+        return;
+    }
+    // Arguments: resolved into [instance+0xB8] when the event has parameters (the wall scripts
+    // do), otherwise read from the file, as the handlers read them.
+    u64 args = ReadValue<u64>(instance, 0xB8);
+    if (args == 0) {
+        const u64 file = ReadValue<u64>(ReadValue<u64>(instance, 0xA8), 0x08);
+        if (file < 0x10000) {
+            return;
+        }
+        args = file + ReadValue<u64>(file, 0x78) + ReadValue<u64>(instruction, 0x10);
+    }
+    s32 entity = ReadValue<s32>(args, 0);
+    if (entity == 10000) {
+        entity = ReadValue<s32>(instance, 0x60);
+    }
+    if (entity <= 0) {
+        return;
+    }
+    const s64 event = RunningEventId(instance);
+    if (event == 7600 || event == 12907600) {
+        coop_wall_entity = static_cast<u32>(entity);
+    }
+}
+
+// tag 0 draw, 1 collision: (entity, on) in rdi / esi. tag 2 fog on: (map list, entity in rsi).
+void PS4_SYSV_ABI WallToggleEntry(u64 tag, const GuestRegisterSnapshot* registers) {
+    const u32 wall = coop_wall_entity;
+    if (wall == 0) {
+        return;
+    }
+    auto* writable = const_cast<GuestRegisterSnapshot*>(registers);
+    if (tag == 2) {
+        if (static_cast<u32>(registers->rsi) == wall) {
+            writable->rsi = 0;
+        }
+        return;
+    }
+    if (static_cast<u32>(registers->rdi) == wall && static_cast<u32>(registers->rsi) != 0) {
+        writable->rsi = 0;
+        if (tag == 0 && coop_walls_kept_off.fetch_add(1) < 40) {
+            LOG_INFO(Debug, "Bloodborne fog walls: co-op wall {} kept off (map {:#x})", wall,
+                     GetCurrentPackedMap());
+        }
+    }
+}
+
+// Floor guard: with the walls gone the players may stand in different map blocks, and a
+// character can keep a floor (a collision part, chr+0x288) of a block this game has dropped
+// (BBSC's crash at 0x018CB16A). At 0x018CB14F, where the per-character floor update loads it,
+// a floor that no longer reads back as one is cleared while a session is up, so the update
+// takes its own "no floor" path.
+bool FloorReadsBack(u64 floor) {
+    const u64 part = ReadValue<u64>(floor, 0x20);
+    if (part == 0) {
+        return HasMemoryAccess(floor, 0x28, MemoryProt::CpuRead);
+    }
+    const u64 version = ReadValue<u64>(ReadValue<u64>(floor, 0x18), 0x88);
+    if (version < 0x10000 || !HasMemoryAccess(version, 4, MemoryProt::CpuRead)) {
+        return false;
+    }
+    const u32 layout = ReadValue<u32>(version, 0);
+    if (layout > 0x10) {
+        return false;
+    }
+    return layout >= 3 ? HasMemoryAccess(ReadValue<u64>(part, 0xB8), 0x0B, MemoryProt::CpuRead)
+                       : HasMemoryAccess(ReadValue<u64>(part, 0x70), 0x28, MemoryProt::CpuRead);
+}
+
+void PS4_SYSV_ABI FloorGuardEntry(u64, const GuestRegisterSnapshot* registers) {
+    // The session manager pointer is in the image's data, which is always mapped.
+    const u64 manager = *reinterpret_cast<const u64*>(image_base + MatchingStatePointerOffset);
+    if (manager < 0x10000) {
+        return;
+    }
+    const s32 state = ReadValue<s32>(manager, 0x124);
+    if (state != 3 && state != 6) {
+        return;
+    }
+    const u64 character = registers->rbx;
+    const u64 floor = ReadValue<u64>(character, 0x288);
+    if (floor == 0 || FloorReadsBack(floor)) {
+        return;
+    }
+    WriteValue<u64>(character, 0x288, 0);
+    LOG_WARNING(Debug,
+                "Bloodborne floor guard: character {:#x} stood on a floor that is gone ({:#x}, "
+                "map {:#x}) - cleared instead of a crash",
+                character, floor, GetCurrentPackedMap());
+}
+
+static void InstallNoFogWalls(u64 base) {
+    if (EnvFlagEnabled("SHADPS4_BLOODBORNE_FOG_WALLS")) {
+        return;
+    }
+    static constexpr std::array<u8, 6> Prologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57};
+    static constexpr std::array<u8, 8> SfxPrologue{0x55, 0x41, 0x57, 0x41, 0x56,
+                                                   0x41, 0x54, 0x53};
+    static constexpr std::array<u8, 8> BankPrologue{0x55, 0x48, 0x89, 0xE5,
+                                                    0x41, 0x57, 0x41, 0x56};
+    static constexpr std::array<u8, 10> FloorLoad{0x48, 0x8B, 0xB3, 0x88, 0x02,
+                                                  0x00, 0x00, 0x48, 0x85, 0xF6};
+    // The floor guard first: without it no wall comes down.
+    if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + 0x018CB14F), FloorLoad, 0,
+                              FloorGuardEntry)) {
+        LOG_ERROR(Debug, "Bloodborne fog walls: floor guard hook failed, the walls stay");
+        return;
+    }
+    const bool ok =
+        InstallGuestCodeHook(reinterpret_cast<void*>(base + EventObjectBankOffset), BankPrologue,
+                             3, WallScriptEntry) &&
+        InstallGuestCodeHook(reinterpret_cast<void*>(base + EventSfxBankOffset), BankPrologue, 4,
+                             WallScriptEntry) &&
+        InstallGuestCodeHook(reinterpret_cast<void*>(base + ObjectDrawOffset), Prologue, 0,
+                             WallToggleEntry) &&
+        InstallGuestCodeHook(reinterpret_cast<void*>(base + ObjectCollisionOffset), Prologue, 1,
+                             WallToggleEntry) &&
+        InstallGuestCodeHook(reinterpret_cast<void*>(base + ObjectSfxEnableOffset), SfxPrologue,
+                             2, WallToggleEntry);
+    if (!ok) {
+        LOG_ERROR(Debug, "Bloodborne fog walls: a wall hook failed");
+        return;
+    }
+    // Lua_MultiWall -> JMP Lua_InvalidMultiWall.
+    static constexpr std::array<u8, 5> MultiWall{0x55, 0x48, 0x89, 0xE5, 0x53};
+    static constexpr std::array<u8, 5> JumpToInvalid{0xE9, 0x6B, 0x01, 0x00, 0x00};
+    if (std::memcmp(reinterpret_cast<const void*>(base + 0x0138B720), MultiWall.data(), 5) == 0) {
+        std::memcpy(reinterpret_cast<void*>(base + 0x0138B720), JumpToInvalid.data(), 5);
+    }
+    LOG_INFO(Debug, "Bloodborne fog walls: co-op walls stay down (boss walls stay), floor guard on");
 }
 
 void InstallSeamlessCoopPatches() {
@@ -6797,6 +7422,8 @@ void InstallSeamlessCoopPatches() {
     InstallStayInSessionPatches(base);
     InstallFreeBellPatch(base);
     InstallGuestEqualPatches(base);
+    StartScaling();
+    InstallNoFogWalls(base);
     InstallSessionHooks(base);
     LOG_INFO(Debug,
              "Bloodborne seamless patches enabled Beckoning, Small Resonant, and Sinister Bell "
