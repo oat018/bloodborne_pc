@@ -78,6 +78,7 @@ int P2PSeamlessCollect(void* out, u32 entry_size, u32 max_entries);
 namespace Core::Bloodborne {
 void ApplyGuestReinsertAfterReload();
 void ApplySharedProgressTick();
+void ApplyGuestHpCut();
 // The game's list of CSMultiPlayerIns tasks, known once one has been created.
 static std::uint64_t multi_player_ins_manager{};
 
@@ -4227,6 +4228,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         ApplyFastMatching(registers->rdi);
         ApplyGuestReinsertAfterReload();
         ApplySharedProgressTick();
+        ApplyGuestHpCut();
         ApplyRequestedBellUse();
         ApplyRequestedSessionStop();
         ApplySharedDeathRule();
@@ -6162,11 +6164,17 @@ static void InstallStayInSessionPatches(u64 base) {
                 *reinterpret_cast<u8*>(base + offset + 6) = 0x7F;
             }
         }
-        // The host's "forget the shared items" message empties the whole treasure list of the
-        // receiver (the list head is cleared whatever the nodes are): leave the list alone.
+        // The host's "forget the shared items" message empties whole item lists of the receiver
+        // (the list head is cleared whatever the nodes are): leave the lists alone. All three
+        // lists (0x017D59F0 / 0x017D5B40 / 0x017D5C40), from the "all" and the "one list" paths;
+        // BBSC (github.com/Classmg22/BBSC, GuestItems.KeepOnSync*) drops the same six calls.
         static constexpr std::array<u8, 5> NoCall5{0x0F, 0x1F, 0x44, 0x00, 0x00};
-        static constexpr std::array<std::pair<u64, std::array<u8, 5>>, 2> ClearCalls{{
+        static constexpr std::array<std::pair<u64, std::array<u8, 5>>, 6> ClearCalls{{
+            {0x017D3498, {0xE8, 0x53, 0x25, 0x00, 0x00}},
             {0x017D34A0, {0xE8, 0x9B, 0x26, 0x00, 0x00}},
+            {0x017D34A8, {0xE8, 0x93, 0x27, 0x00, 0x00}},
+            {0x017D4089, {0xE8, 0x62, 0x19, 0x00, 0x00}},
+            {0x017D409A, {0xE8, 0xA1, 0x1B, 0x00, 0x00}},
             {0x017D40AB, {0xE8, 0x90, 0x1A, 0x00, 0x00}},
         }};
         for (const auto& [offset, expected] : ClearCalls) {
@@ -6231,6 +6239,123 @@ static void InstallFreeBellPatch(u64 base) {
     }
     std::memcpy(reinterpret_cast<u8*>(base + InsightCostOffset + 5), NoCost.data(), NoCost.size());
     LOG_INFO(Debug, "Bloodborne free bell: ringing the Beckoning Bell costs no Insight");
+}
+
+// A co-op guest is treated as a lesser player in several places: half the blood echoes, no
+// Insight for a boss kill, NPCs shown as grey ghosts and 30% less maximum HP. With the players
+// staying together for the whole game these are switched off. Found by BBSC
+// (github.com/Classmg22/BBSC, GPL-2.0-or-later; docs in its bbsc_patch_tables.h), checked here
+// against the bytes that must be there before anything is written.
+//  - SHADPS4_BLOODBORNE_GUEST_HALF_REWARDS=1 keeps half echoes and no boss Insight
+//  - SHADPS4_BLOODBORNE_GHOST_NPCS=1 keeps the grey NPCs
+//  - SHADPS4_BLOODBORNE_GUEST_HP_CUT=1 keeps the HP cut (see ApplyGuestHpCut)
+static void InstallGuestEqualPatches(u64 base) {
+    struct BytePatch {
+        const char* name;
+        u64 offset;
+        std::vector<u8> expected;
+        std::vector<u8> replacement;
+        size_t write_at; // first byte of `expected` that is replaced
+    };
+    const u64 image_size = MemoryPatcher::g_eboot_image_size;
+    const auto matches = [&](u64 offset, std::span<const u8> bytes) {
+        return offset <= image_size && bytes.size() <= image_size - offset &&
+               std::ranges::equal(
+                   std::span<const u8>{reinterpret_cast<const u8*>(base + offset), bytes.size()},
+                   bytes);
+    };
+    const auto float_at = [&](u64 offset) {
+        float value{};
+        if (offset + sizeof(value) <= image_size) {
+            std::memcpy(&value, reinterpret_cast<const void*>(base + offset), sizeof(value));
+        }
+        return value;
+    };
+    std::vector<BytePatch> patches;
+    if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_GUEST_HALF_REWARDS")) {
+        // Kill reward 0x018FC860: a guest's share is multiplied by the 0.5 at 0x04927EC0
+        // (VMOVSS XMM3, [RIP + disp32]); point it at the 1.0 just before it.
+        if (float_at(0x04927EC0) == 0.5f && float_at(0x04927EBC) == 1.0f) {
+            patches.push_back({"kill echoes", 0x018FC947,
+                               {0xC5, 0xFA, 0x10, 0x1D, 0x71, 0xB5, 0x02, 0x03},
+                               {0x6D, 0xB5, 0x02, 0x03}, 4});
+        }
+        // Event reward 0x01335400: a guest's reward is multiplied by the 0.5 at 0x04925B1C
+        // (VMULSS XMM0, XMM0, [RIP + disp32]); point it at the 1.0 right after it.
+        if (float_at(0x04925B1C) == 0.5f && float_at(0x04925B20) == 1.0f) {
+            patches.push_back({"event echoes", 0x01335589,
+                               {0xC5, 0xFA, 0x59, 0x05, 0x8B, 0x05, 0x5F, 0x03},
+                               {0x8F, 0x05, 0x5F, 0x03}, 4});
+        }
+        // Boss kill 0x018C5070 gives the boss's Insight only in the player's own world
+        // (CMP byte [global+0x1592], 0 / JZ skip): jump over the JZ instead.
+        patches.push_back({"boss insight", 0x018C52F9, {0x0F, 0x84, 0xA7, 0x06, 0x00, 0x00},
+                           {0xEB, 0x04}, 0});
+    }
+    if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_GHOST_NPCS")) {
+        // NPC constructor 0x018E4870: in someone else's world an NpcParam row with
+        // isChangeWanderGhost gets the ghost model; JZ (not a ghost NPC) becomes JMP.
+        patches.push_back({"solid NPCs", 0x018E4FBF, {0x74, 0x1B}, {0xEB, 0x1B}, 0});
+    }
+    // Reliable-packet send 0x017894E0 ends the session ("OnIrregularLeaveSession") once 1001
+    // packets wait for a member that does not answer, about 6 minutes; allow 30000.
+    patches.push_back(
+        {"send backlog", 0x017897AD, {0x3D, 0xE9, 0x03, 0x00, 0x00}, {0x30, 0x75, 0x00, 0x00}, 1});
+
+    std::string applied;
+    for (const auto& patch : patches) {
+        if (!matches(patch.offset, patch.expected)) {
+            LOG_ERROR(Debug, "Bloodborne {} patch skipped: unexpected bytes at {:#x}", patch.name,
+                      patch.offset);
+            continue;
+        }
+        std::memcpy(reinterpret_cast<u8*>(base + patch.offset + patch.write_at),
+                    patch.replacement.data(), patch.replacement.size());
+        applied += applied.empty() ? patch.name : std::string{", "} + patch.name;
+    }
+    LOG_INFO(Debug, "Bloodborne guest patches: {}", applied);
+}
+
+// A summoned player carries special effect 9006 (9026/9036/9046/9056 for the other phantom
+// kinds), whose maxHpRate 0.7 takes 30% off maximum HP. Layout as found by BBSC: chr+0x1C8 the
+// effect manager, +0x08 its first node; a node holds the id at +0x40, its param row at +0x48 and
+// the next node at +0x58; the rate is param+0x10. The rate is set to 1.0 (that edits the param
+// row, so it stays for the rest of the game) and the maximum HP the rate already cut is put
+// back, since the game does not recompute it.
+void ApplyGuestHpCut() {
+    using clock = std::chrono::steady_clock;
+    static const bool keep = EnvFlagEnabled("SHADPS4_BLOODBORNE_GUEST_HP_CUT");
+    static clock::time_point next_check{};
+    const auto now = clock::now();
+    if (keep || now < next_check) {
+        return;
+    }
+    next_check = now + std::chrono::seconds{1};
+    const u64 player = GetLocalPlayer();
+    const u64 manager = player >= 0x10000 ? ReadValue<u64>(player, 0x1C8) : 0;
+    u64 node = manager >= 0x10000 ? ReadValue<u64>(manager, 0x08) : 0;
+    for (int step = 0; step < 64 && node >= 0x10000; ++step) {
+        const s32 id = ReadValue<s32>(node, 0x40);
+        const u64 param = ReadValue<u64>(node, 0x48);
+        if ((id == 9006 || id == 9026 || id == 9036 || id == 9046 || id == 9056) &&
+            param >= 0x10000) {
+            const float rate = ReadValue<float>(param, 0x10);
+            if (rate > 0.05f && rate < 0.999f && WriteValue(param, 0x10, 1.0f)) {
+                // Maximum HP: [[chr+0x3B0]+0x20]+0xFC. Only a value the rate really cut is put
+                // back (scaling the result by the rate again lands on it).
+                const u64 data = ReadValue<u64>(ReadValue<u64>(player, 0x3B0), 0x20);
+                const s32 max_hp = data >= 0x10000 ? ReadValue<s32>(data, 0xFC) : 0;
+                const s32 full = static_cast<s32>(static_cast<float>(max_hp) / rate + 0.5f);
+                const s32 back = static_cast<s32>(static_cast<float>(full) * rate + 0.5f);
+                const bool restored = max_hp >= 80 && max_hp <= 4000 && full > max_hp &&
+                                      std::abs(back - max_hp) <= 1 &&
+                                      WriteValue(data, 0xFC, full);
+                LOG_INFO(Debug, "Bloodborne guest HP: effect {} rate {:.2f} -> 1.0, max HP {} -> {}",
+                         id, rate, max_hp, restored ? full : max_hp);
+            }
+        }
+        node = ReadValue<u64>(node, 0x58);
+    }
 }
 
 void InstallSeamlessCoopPatches() {
@@ -6671,6 +6796,7 @@ void InstallSeamlessCoopPatches() {
     stage_transition_keep_matching_patch_installed = true;
     InstallStayInSessionPatches(base);
     InstallFreeBellPatch(base);
+    InstallGuestEqualPatches(base);
     InstallSessionHooks(base);
     LOG_INFO(Debug,
              "Bloodborne seamless patches enabled Beckoning, Small Resonant, and Sinister Bell "

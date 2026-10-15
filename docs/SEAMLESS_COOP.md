@@ -48,6 +48,13 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
 - Ringing the Beckoning Bell costs no Insight, by hotkey or from the inventory: the game took one
   per ring, also for the rings of the automatic re-join (`SHADPS4_BLOODBORNE_BELL_INSIGHT=1`
   keeps the cost).
+- A guest is a full player (new after v2.5; found by
+  [BBSC](https://github.com/Classmg22/BBSC), GPL-2.0-or-later): full blood echoes instead of
+  half, Insight for a boss kill, no 30% cut of maximum HP, and the host world's NPCs look as
+  they do to the host instead of grey ghosts. `SHADPS4_BLOODBORNE_GUEST_HALF_REWARDS=1`,
+  `SHADPS4_BLOODBORNE_GUEST_HP_CUT=1` and `SHADPS4_BLOODBORNE_GHOST_NPCS=1` keep the game's
+  rules. A member that stops answering no longer ends the session after about 6 minutes of
+  undelivered packets (the game's limit of 1001 is raised to 30000).
 - With `SHADPS4_BLOODBORNE_AUTO_REJOIN=1` the same bell is rung again when the players really
   lose each other (network trouble).
 - Mouse and keyboard: bbport 1.7's own (`input.ini`, the launcher's Controls page,
