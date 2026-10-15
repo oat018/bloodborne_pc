@@ -38,6 +38,10 @@
 #define ORBIS_HTTP_WITH_HTTPLIB 1
 #endif
 
+namespace Libraries::Np::NpMatching2 {
+u64 BloodborneOwnedRoomId();
+}
+
 namespace Libraries::Http {
 
 enum class HttpRequestState {
@@ -1749,7 +1753,362 @@ void NoteBloodborneSummonRequest(const SendRequestPlan& plan) {
 }
 } // namespace
 
+// Bloodborne seamless lobby (SHADPS4_BLOODBORNE_LOBBY=host|join): the summon advertisements do
+// not go to the shadNet server. The host's game holds the lobby (an HTTP endpoint on
+// SHADPS4_BLOODBORNE_LOBBY_PORT, 31320), a joining game sends its advertisement there every
+// second with the lobby password (SHADPS4_BLOODBORNE_LOBBY_PASSWORD), and the game's
+// /summon_messenger/ requests are answered here: the host's search lists the guests of the
+// lobby wherever they are, its claim is passed to the guest at once with the host's placement.
+// An advertisement lives as long as its game keeps sending it, so nothing stale is left behind
+// when a game ends. The lobby address is SHADPS4_BLOODBORNE_LOBBY_ADDRESS, by default the
+// shadNet server's (the host runs the server).
+namespace {
+enum class LobbyRole { Off, Host, Join };
+
+struct LobbyConfig {
+    LobbyRole role = LobbyRole::Off;
+    std::string password;
+    std::string address;
+    u16 port = 31320;
+};
+
+const LobbyConfig& GetLobbyConfig() {
+    static const LobbyConfig config = [] {
+        LobbyConfig out;
+        const char* role = std::getenv("SHADPS4_BLOODBORNE_LOBBY");
+        const std::string_view role_name = role != nullptr ? role : "";
+        out.role = role_name == "host"   ? LobbyRole::Host
+                   : role_name == "join" ? LobbyRole::Join
+                                         : LobbyRole::Off;
+        if (out.role == LobbyRole::Off) {
+            return out;
+        }
+        if (const char* password = std::getenv("SHADPS4_BLOODBORNE_LOBBY_PASSWORD")) {
+            out.password = password;
+        }
+        if (const char* port = std::getenv("SHADPS4_BLOODBORNE_LOBBY_PORT");
+            port != nullptr && std::atoi(port) > 0 && std::atoi(port) < 65536) {
+            out.port = static_cast<u16>(std::atoi(port));
+        }
+        const char* address = std::getenv("SHADPS4_BLOODBORNE_LOBBY_ADDRESS");
+        out.address = address != nullptr && *address != '\0'
+                          ? std::string{address}
+                          : ParseHostOverrideTarget(EmulatorSettings.GetShadNetWebApiServer()).host;
+        LOG_INFO(Lib_Http, "Bloodborne lobby: {} at {}:{}{}",
+                 out.role == LobbyRole::Host ? "hosting" : "joining", out.address, out.port,
+                 out.password.empty() ? " (no password)" : "");
+        return out;
+    }();
+    return config;
+}
+
+using LobbyClock = std::chrono::steady_clock;
+constexpr auto LobbyGuestTimeout = std::chrono::seconds{5};
+// A claim's placement goes with the guest's advertisement answers this long.
+constexpr auto LobbyClaimFresh = std::chrono::seconds{15};
+
+struct LobbyGuest {
+    nlohmann::json ad;
+    bool has_ad = false;
+    LobbyClock::time_point seen{};
+    LobbyClock::time_point claimed{};
+};
+
+struct LobbyState {
+    std::mutex mutex;
+    bool started = false;
+    // host
+    std::unordered_map<s64, LobbyGuest> guests;
+    // join
+    nlohmann::json ad;
+    bool has_ad = false;
+    s64 user_id = 0;
+    LobbyClock::time_point host_seen{};
+    LobbyClock::time_point claim_at{};
+    std::string placement;
+    u64 host_room = 0;     // the room the host's game owns, for a direct join
+    std::string host_npid; // the host's online id
+};
+LobbyState g_lobby;
+
+std::string LobbyJsonText(const nlohmann::json& value) {
+    return value.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+}
+
+#ifdef ORBIS_HTTP_WITH_HTTPLIB
+void RunLobbyHost(const LobbyConfig& config) {
+    static httplib::Server server;
+    server.Post("/bloodborne-lobby", [&config](const httplib::Request& req,
+                                               httplib::Response& res) {
+        const auto body = nlohmann::json::parse(req.body, nullptr, false);
+        if (body.is_discarded() || !body.is_object()) {
+            res.status = 400;
+            return;
+        }
+        if (body.value("password", std::string{}) != config.password) {
+            res.status = 403;
+            res.set_content(R"({"error":"password"})", "application/json");
+            LOG_WARNING(Lib_Http, "Bloodborne lobby: refused a game from {} (wrong password)",
+                        req.remote_addr);
+            return;
+        }
+        const s64 user_id = body.value("user_id", s64{0});
+        const auto now = LobbyClock::now();
+        nlohmann::json answer = nlohmann::json::object();
+        {
+            std::lock_guard lock(g_lobby.mutex);
+            auto [it, added] = g_lobby.guests.try_emplace(user_id);
+            LobbyGuest& guest = it->second;
+            if (added || now - guest.seen > LobbyGuestTimeout) {
+                LOG_INFO(Lib_Http, "Bloodborne lobby: player {} is in the lobby ({})", user_id,
+                         req.remote_addr);
+            }
+            guest.seen = now;
+            const auto ad = body.find("ad");
+            guest.has_ad = ad != body.end() && ad->is_object();
+            if (guest.has_ad) {
+                guest.ad = *ad;
+            }
+            answer["claimed_ms_ago"] =
+                guest.claimed == LobbyClock::time_point{}
+                    ? s64{-1}
+                    : static_cast<s64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           now - guest.claimed)
+                                           .count());
+        }
+        if (const auto placement = Core::Bloodborne::GetSeamlessHostPlacementHeader()) {
+            answer["placement"] = *placement;
+        }
+        answer["room_id"] = Libraries::Np::NpMatching2::BloodborneOwnedRoomId();
+        if (const char* npid = std::getenv("BB_SHADNET_NPID")) {
+            answer["host_npid"] = npid;
+        }
+        res.set_content(LobbyJsonText(answer), "application/json");
+    });
+    for (;;) {
+        if (!server.listen(config.address, config.port)) {
+            LOG_ERROR(Lib_Http, "Bloodborne lobby: cannot listen on {}:{}, trying again in 10 s",
+                      config.address, config.port);
+        }
+        std::this_thread::sleep_for(std::chrono::seconds{10});
+    }
+}
+
+void RunLobbyJoin(const LobbyConfig& config) {
+    httplib::Client client(config.address, config.port);
+    client.set_connection_timeout(2, 0);
+    client.set_read_timeout(2, 0);
+    client.set_write_timeout(2, 0);
+    enum class Link { Unknown, Up, Down, Refused } link = Link::Unknown;
+    for (;;) {
+        nlohmann::json body = nlohmann::json::object();
+        body["password"] = config.password;
+        {
+            std::lock_guard lock(g_lobby.mutex);
+            body["user_id"] = g_lobby.user_id;
+            if (g_lobby.has_ad) {
+                body["ad"] = g_lobby.ad;
+            }
+        }
+        const auto result = client.Post("/bloodborne-lobby", LobbyJsonText(body), "application/json");
+        Link now_link = Link::Down;
+        if (result && result->status == 403) {
+            now_link = Link::Refused;
+        } else if (result && result->status == 200) {
+            now_link = Link::Up;
+            const auto answer = nlohmann::json::parse(result->body, nullptr, false);
+            const s64 claimed_ms_ago =
+                answer.is_object() ? answer.value("claimed_ms_ago", s64{-1}) : s64{-1};
+            const std::string placement =
+                answer.is_object() && answer.contains("placement") && answer["placement"].is_string()
+                    ? answer["placement"].get<std::string>()
+                    : std::string{};
+            const auto now = LobbyClock::now();
+            bool new_claim = false;
+            {
+                std::lock_guard lock(g_lobby.mutex);
+                g_lobby.host_seen = now;
+                g_lobby.placement = placement;
+                g_lobby.host_room =
+                    answer.is_object() ? answer.value("room_id", u64{0}) : u64{0};
+                g_lobby.host_npid =
+                    answer.is_object() ? answer.value("host_npid", std::string{}) : std::string{};
+                if (claimed_ms_ago >= 0) {
+                    const auto claim_at = now - std::chrono::milliseconds{claimed_ms_ago};
+                    if (claim_at - g_lobby.claim_at > std::chrono::seconds{2}) {
+                        g_lobby.claim_at = claim_at;
+                        new_claim = now - claim_at < LobbyClaimFresh;
+                    }
+                }
+            }
+            if (new_claim) {
+                const bool placed =
+                    !placement.empty() && Core::Bloodborne::SetSeamlessHostPlacementHeader(placement);
+                LOG_INFO(Lib_Http, "Bloodborne lobby: the host is summoning this player{}",
+                         placed ? " (host placement received)" : "");
+            }
+        }
+        if (now_link != link) {
+            link = now_link;
+            if (link == Link::Up) {
+                LOG_INFO(Lib_Http, "Bloodborne lobby: in the host's lobby at {}:{}", config.address,
+                         config.port);
+            } else if (link == Link::Refused) {
+                LOG_WARNING(Lib_Http, "Bloodborne lobby: the host refused the lobby password");
+            } else {
+                LOG_INFO(Lib_Http, "Bloodborne lobby: no host at {}:{} (waiting)", config.address,
+                         config.port);
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::seconds{1});
+    }
+}
+#endif
+
+void EnsureLobbyStarted() {
+    const LobbyConfig& config = GetLobbyConfig();
+    if (config.role == LobbyRole::Off) {
+        return;
+    }
+    {
+        std::lock_guard lock(g_lobby.mutex);
+        if (g_lobby.started) {
+            return;
+        }
+        g_lobby.started = true;
+    }
+#ifdef ORBIS_HTTP_WITH_HTTPLIB
+    std::thread([&config] {
+        if (config.role == LobbyRole::Host) {
+            RunLobbyHost(config);
+        } else {
+            RunLobbyJoin(config);
+        }
+    }).detach();
+#else
+    LOG_ERROR(Lib_Http, "Bloodborne lobby: this build has no HTTP library");
+#endif
+}
+
+void SetLobbyResponse(HttpResponse& res, const nlohmann::json& body,
+                      const std::string& placement = {}) {
+    const std::string text = LobbyJsonText(body);
+    res.status_code = 200;
+    res.body.assign(text.begin(), text.end());
+    res.content_length = text.size();
+    res.content_length_result = 0;
+    res.read_cursor = 0;
+    res.all_headers_blob = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n";
+    if (!placement.empty()) {
+        res.all_headers_blob += std::string{BloodborneHostPlacementHeader} + ": " + placement + "\r\n";
+    }
+    res.all_headers_blob += "\r\n";
+}
+
+// Answers a /summon_messenger/ request of the game from the lobby. False when the lobby is off.
+bool AnswerLobbySummon(const SendRequestPlan& plan, HttpResponse& res, u32& event_bits) {
+    const LobbyConfig& config = GetLobbyConfig();
+    if (config.role == LobbyRole::Off || !IsBloodborneSummonPath(plan.path)) {
+        return false;
+    }
+    EnsureLobbyStarted();
+    const auto request = nlohmann::json::parse(plan.body.begin(), plan.body.end(), nullptr, false);
+    const auto now = LobbyClock::now();
+    nlohmann::json answer = nlohmann::json::object();
+    answer["ResKind"] = 0;
+    std::string placement;
+    std::lock_guard lock(g_lobby.mutex);
+    if (IsBloodborneSummonSearchPath(plan.path)) {
+        nlohmann::json list = nlohmann::json::array();
+        if (config.role == LobbyRole::Host) {
+            for (const auto& [user_id, guest] : g_lobby.guests) {
+                if (guest.has_ad && now - guest.seen < LobbyGuestTimeout) {
+                    list.push_back(guest.ad);
+                }
+            }
+        }
+        answer["SummonDataList"] = std::move(list);
+        answer["MessageId"] = "SummonDataGetListResponse";
+    } else if (IsBloodborneSummonRequestPath(plan.path)) {
+        const s64 target = request.is_object() ? request.value("TargetUserId", s64{0}) : 0;
+        if (const auto it = g_lobby.guests.find(target); it != g_lobby.guests.end()) {
+            it->second.claimed = now;
+            LOG_INFO(Lib_Http, "Bloodborne lobby: summoning player {}", target);
+        } else {
+            LOG_WARNING(Lib_Http, "Bloodborne lobby: summon request for player {} not in the lobby",
+                        target);
+        }
+        answer["MessageId"] = "SummonDataSummonResponse";
+    } else if (IsBloodborneSummonCreatePath(plan.path)) {
+        if (request.is_object()) {
+            g_lobby.ad = request;
+            g_lobby.has_ad = true;
+            g_lobby.user_id = request.value("UserId", s64{0});
+        }
+        answer["MessageId"] = "SummonDataCreateResponse";
+    } else if (plan.path.find("/summon_messenger/delete") != std::string::npos) {
+        g_lobby.has_ad = false;
+        answer["MessageId"] = "SummonDataRemoveResponse";
+    }
+    // As the server did: a guest's answers carry the claiming host's placement for a while.
+    if (config.role == LobbyRole::Join && now - g_lobby.claim_at < LobbyClaimFresh) {
+        placement = g_lobby.placement;
+    }
+    SetLobbyResponse(res, answer, placement);
+    event_bits = ORBIS_HTTP_NB_EVENT_IN | ORBIS_HTTP_NB_EVENT_OUT | ORBIS_HTTP_NB_EVENT_RESOLVED;
+    return true;
+}
+} // namespace
+
+// The co-op bell the lobby rings by itself (200 Beckoning for the host, 205 Small Resonant for
+// a joining game), 0 without a lobby. Starts the lobby.
+int BloodborneLobbyBellGoods() {
+    EnsureLobbyStarted();
+    switch (GetLobbyConfig().role) {
+    case LobbyRole::Host:
+        return 200;
+    case LobbyRole::Join:
+        return 205;
+    default:
+        return 0;
+    }
+}
+
+// Whether the other side of the lobby is there: for the host, a guest that sent its
+// advertisement in the last seconds; for a guest, a host that answered.
+bool BloodborneLobbyPartnerPresent() {
+    const LobbyRole role = GetLobbyConfig().role;
+    const auto now = LobbyClock::now();
+    std::lock_guard lock(g_lobby.mutex);
+    if (role == LobbyRole::Host) {
+        return std::ranges::any_of(g_lobby.guests, [&](const auto& entry) {
+            return now - entry.second.seen < LobbyGuestTimeout;
+        });
+    }
+    return role == LobbyRole::Join && now - g_lobby.host_seen < LobbyGuestTimeout;
+}
+
+// For a joining game: the host's open room, its online id and its placement, while the host is
+// in the lobby and has a room.
+bool BloodborneLobbyHostRoom(u64& room_id, std::string& host_npid, std::string& placement) {
+    if (GetLobbyConfig().role != LobbyRole::Join) {
+        return false;
+    }
+    std::lock_guard lock(g_lobby.mutex);
+    if (LobbyClock::now() - g_lobby.host_seen >= LobbyGuestTimeout || g_lobby.host_room == 0 ||
+        g_lobby.host_npid.empty() || g_lobby.placement.empty()) {
+        return false;
+    }
+    room_id = g_lobby.host_room;
+    host_npid = g_lobby.host_npid;
+    placement = g_lobby.placement;
+    return true;
+}
+
 void ReplayBloodborneSummonCreate(u32 interval_seconds) {
+    if (GetLobbyConfig().role != LobbyRole::Off) {
+        return; // the lobby carries the advertisement
+    }
     auto& replay = g_bloodborne_create_replay;
     SendRequestPlan plan;
     {
@@ -1876,7 +2235,9 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
         s32 worker_errno = 0;
         u32 success_event_bits = 0; // 0 = no event (offline path uses failure bits)
 
-        if (!online) {
+        if (AnswerLobbySummon(plan, local_res, success_event_bits)) {
+            worker_errno = 0;
+        } else if (!online) {
             SynthesizeTransportFailureResponse(local_res);
             worker_errno = ORBIS_HTTP_ERROR_RESOLVER_ENODNS;
         } else {

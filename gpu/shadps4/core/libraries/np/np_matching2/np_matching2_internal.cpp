@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <utility>
@@ -15,6 +16,12 @@
 #include "shadnet.pb.h"
 
 namespace Libraries::Np::NpMatching2 {
+
+// Bloodborne seamless lobby: the room this game owns (0 when none), handed to the joining game.
+std::atomic<u64> g_bloodborne_owned_room{0};
+u64 BloodborneOwnedRoomId() {
+    return g_bloodborne_owned_room.load();
+}
 
 NpMatching2State g_state;
 
@@ -160,6 +167,9 @@ void BuildCreateJoinRoomPayloadCommon(ContextObject& ctx,
     ctx.room_id = room.roomId;
     ctx.my_member_id = static_cast<OrbisNpMatching2RoomMemberId>(resp.me_member_id());
     ctx.is_room_owner = rc.owner;
+    if (rc.owner) {
+        g_bloodborne_owned_room.store(room.roomId);
+    }
     for (const auto& g : p.room_groups) {
         rc.groups[g.id] = g;
     }
@@ -335,6 +345,9 @@ void* BuildLeaveRoomPayload(ContextObject& ctx, const shadnet::LeaveRoomReply& r
     if (ctx.room_id == p.leave_room_response->roomId) {
         ctx.room_cache.erase(ctx.room_id);
         ctx.peers.clear();
+        if (g_bloodborne_owned_room.load() == ctx.room_id) {
+            g_bloodborne_owned_room.store(0);
+        }
         ctx.room_id = 0;
         ctx.my_member_id = 0;
         ctx.is_room_owner = false;

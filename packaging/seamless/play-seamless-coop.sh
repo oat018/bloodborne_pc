@@ -3,8 +3,10 @@
 # Put this file next to Bloodborne-bbport-x86_64.AppImage, fill in the three values below,
 # then: chmod +x play-seamless-coop.sh Bloodborne-bbport-x86_64.AppImage && ./play-seamless-coop.sh
 # Run the AppImage once without this script first to choose the game folder in the launcher.
-# Keys in game: PgUp = Beckoning Bell (host), PgDn = Small Resonant Bell (guest),
-# Home = leave the session, End = leave and ring again, Insert = bbport menu.
+# With the lobby below the players meet by themselves, no bell needed. Keys in game:
+# Home = leave the session (for good, until the game is started again), Insert = bbport menu;
+# without a lobby: PgUp = Beckoning Bell (host), PgDn = Small Resonant Bell (guest),
+# End = leave and ring again.
 set -euo pipefail
 SERVER=CHANGE_ME_SERVER_ADDRESS          # the server PC's address (Tailscale or LAN)
 export BB_SHADNET_NPID=CHANGE_ME_ACCOUNT # your account on that server
@@ -16,7 +18,16 @@ export BB_SHADNET_WEBAPI="http://$SERVER:31315"
 export BB_COMMUNITY_SERVER=https://thehuntersdream.com
 export BB_UPNP=0
 export SHADPS4_BLOODBORNE_SEAMLESS_COOP=1
-# Rings the same bell again when the players really lose each other. Home stops it.
+# Co-op lobby: one player hosts, the others join with the same password; the game of a joining
+# player goes into the host's world by itself (it travels to the host's map first), and again
+# after a death or when either game was restarted. The host's game listens on TCP port 31320
+# (SHADPS4_BLOODBORNE_LOBBY_PORT), which the others reach at the server address unless
+# SHADPS4_BLOODBORNE_LOBBY_ADDRESS names the host's address. Put "# " in front of the two
+# lines to play with the bells instead.
+export SHADPS4_BLOODBORNE_LOBBY=join          # host | join
+export SHADPS4_BLOODBORNE_LOBBY_PASSWORD=CHANGE_ME_LOBBY_PASSWORD
+# Without a lobby: rings the same bell again when the players really lose each other. Home
+# stops it.
 export SHADPS4_BLOODBORNE_AUTO_REJOIN=1
 # Seamless rules: the session survives deaths and boss kills, lanterns work inside the session
 # and guests follow the host when it travels. Every player needs the same setting.

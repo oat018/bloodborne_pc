@@ -61,7 +61,14 @@ extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
 
 namespace Libraries::Http {
 void ReplayBloodborneSummonCreate(u32 interval_seconds);
+int BloodborneLobbyBellGoods();
+bool BloodborneLobbyPartnerPresent();
+bool BloodborneLobbyHostRoom(u64& room_id, std::string& host_npid, std::string& placement);
 } // namespace Libraries::Http
+
+namespace Libraries::Np::NpMatching2 {
+u64 BloodborneOwnedRoomId();
+} // namespace Libraries::Np::NpMatching2
 
 namespace Libraries::Net {
 int P2PSeamlessBroadcast(const void* data, u32 len);
@@ -1419,6 +1426,41 @@ void ApplySummonReloadStateAtDescriptor(const GuestRegisterSnapshot& registers) 
     record.result = "applied";
 }
 
+// Research aid, SHADPS4_BLOODBORNE_LOG_REQUESTS=1: logs every summon request a guest receives
+// (list [[FrpgNetMan 0x553B120] + 0xC50] + 0x158) once it carries the join data: the entry's
+// first 0xD0 bytes and the data itself, in hex.
+void LogSummonRequests() {
+    static const bool enabled = EnvFlagEnabled("SHADPS4_BLOODBORNE_LOG_REQUESTS");
+    if (!enabled || image_base == 0) {
+        return;
+    }
+    static std::set<std::pair<u64, u32>> seen;
+    const u64 net_man = ReadValue<u64>(image_base + 0x553B120, 0);
+    const u64 sos_man = net_man >= 0x10000 ? ReadValue<u64>(net_man, 0xC50) : 0;
+    const u64 head = sos_man >= 0x10000 ? ReadValue<u64>(sos_man, 0x158) : 0;
+    int count = 0;
+    for (u64 node = head >= 0x10000 ? ReadValue<u64>(head, 0) : 0;
+         node >= 0x10000 && node != head && count < 8; node = ReadValue<u64>(node, 0), ++count) {
+        const u64 entry = ReadValue<u64>(node, 0x10);
+        if (entry < 0x10000 || !HasMemoryAccess(entry, 0xD0, MemoryProt::CpuRead)) {
+            continue;
+        }
+        const u64 data = ReadValue<u64>(entry, 0xB8);
+        const u32 length = ReadValue<u32>(entry, 0xB0);
+        if (data < 0x10000 || length == 0 || length > 0x1000 ||
+            !HasMemoryAccess(data, length, MemoryProt::CpuRead) ||
+            !seen.insert({data, length}).second) {
+            continue;
+        }
+        const auto* entry_bytes = reinterpret_cast<const u8*>(entry);
+        const auto* data_bytes = reinterpret_cast<const u8*>(data);
+        LOG_INFO(Debug, "Bloodborne summon request entry {:#x}: {}", entry,
+                 BytesToHex(std::span<const u8>{entry_bytes, 0xD0}));
+        LOG_INFO(Debug, "Bloodborne summon request data ({} bytes): {}", length,
+                 BytesToHex(std::span<const u8>{data_bytes, length}));
+    }
+}
+
 void ApplyDeferredSummonReload() {
     deferred_summon_reload = {};
     auto& record = deferred_summon_reload;
@@ -1854,17 +1896,313 @@ void ApplySharedDeathRule() {
     }
 }
 
+// With a lobby the players meet without any bell: the host opens its room by itself and the
+// guest joins it directly (ApplyLobbyHostRoom / ApplyLobbyDirectJoin).
+// SHADPS4_BLOODBORNE_LOBBY_DIRECT=0 rings the bells by themselves instead (the first lobby).
+bool LobbyDirectJoin() {
+    const char* value = std::getenv("SHADPS4_BLOODBORNE_LOBBY_DIRECT");
+    return Libraries::Http::BloodborneLobbyBellGoods() != 0 &&
+           (value == nullptr || std::string_view{value} != "0");
+}
+
+// Co-op role (bell goods id) kept for rejoining, see ApplyAutoRejoin; 0 after the leave key.
+std::atomic<s32> auto_bell_goods{};
+
+// Lobby direct join (SHADPS4_BLOODBORNE_LOBBY=join, see LobbyDirectJoin): the
+// guest joins the host's open room without a summon. The game's own join (SosStatus.Update
+// 0x18739CB..0x1873B38, normally run for a summon request from the host) is run here with join
+// data made from the host's room id and online id: the data a host sends is the same every time
+// except for those (template from captured requests: 209 bytes for a 10-letter online id).
+constexpr std::array<u8, 0x84> JoinDataHead{
+    0xff, 0xff, 0xff, 0xff, 0x07, 0x00, 0x00, 0x00, 0x4e, 0x58, 0x52, 0x56, 0x05, 0x84, 0x0c, 0x80,
+    0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x05, 0x80, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x06, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x00, 0x00, 0x27, 0x15, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x4e,
+    0x25, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00, 0x00, 0x75, 0x35, 0x00, 0x00, 0x00, 0x03, 0x01,
+    0x00, 0x00, 0x00, 0x9c, 0x45, 0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x55, 0x00,
+    0x00, 0x00, 0x05, 0x01, 0x00, 0x00, 0x00, 0xea, 0x65, 0x00, 0x00, 0x00, 0x06, 0x01, 0x00, 0x00,
+    0x01, 0x11, 0x75, 0x00, 0x00, 0x00, 0x07, 0x01, 0x00, 0x00, 0x01, 0x38, 0x85, 0x00, 0x00, 0x00,
+    0x0a, 0x04, 0x00, 0x00,
+};
+// After the names; the room id is a big-endian u64 at +3.
+constexpr std::array<u8, 18> JoinDataTail{0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+std::vector<u8> MakeJoinData(u64 room_id, std::string_view host_npid) {
+    std::vector<u8> out(JoinDataHead.begin(), JoinDataHead.end());
+    // The byte before the names is their length (0x0a in the captured template). Only online
+    // ids of 10 letters have been seen; others are made the same way.
+    out[0x80] = static_cast<u8>(host_npid.size());
+    const auto utf16 = [&] {
+        for (const char c : host_npid) {
+            out.push_back(static_cast<u8>(c));
+            out.push_back(0);
+        }
+    };
+    utf16();
+    out.push_back(0);
+    out.push_back(0);
+    utf16();
+    out.push_back(0);
+    for (size_t i = 0; i < 16; ++i) {
+        out.push_back(i < host_npid.size() ? static_cast<u8>(host_npid[i]) : 0);
+    }
+    const size_t tail = out.size();
+    out.insert(out.end(), JoinDataTail.begin(), JoinDataTail.end());
+    for (int i = 0; i < 8; ++i) {
+        out[tail + 3 + i] = static_cast<u8>(room_id >> (56 - 8 * i));
+    }
+    return out;
+}
+
+void ApplyLobbyDirectJoin() {
+    static const bool enabled = LobbyDirectJoin();
+    if (!enabled || image_base == 0 || auto_bell_goods.load() == 0) {
+        return;
+    }
+    using clock = std::chrono::steady_clock;
+    static clock::time_point next_attempt{};
+    // A join that never completes (seen now and then in the rig after one side's game was
+    // started again: the guest is in the room, but the host's world never comes) leaves the
+    // game waiting in a joining state for good, where no new join can start. After 25 s
+    // without the host the session is stopped here, and the next join starts over.
+    static clock::time_point joined_at{};
+    if (joined_at != clock::time_point{}) {
+        const u64 world_chr_man = ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0);
+        const u64 player = world_chr_man >= 0x10000 ? ReadValue<u64>(world_chr_man, 0x60) : 0;
+        const u64 multi_play = GetMatchingState();
+        const s32 session_state = multi_play >= 0x10000 ? ReadValue<s32>(multi_play, 0x124) : 0;
+        if (GetPartnerState(world_chr_man, player).count > 0 ||
+            (session_state == 0 && clock::now() - joined_at > std::chrono::seconds{5})) {
+            joined_at = {}; // in the host's world, or the game gave the join up by itself
+        } else if (clock::now() - joined_at > std::chrono::seconds{25}) {
+            joined_at = {};
+            using MultiPlayStop = bool PS4_SYSV_ABI (*)(u64 multi_play);
+            const bool stopped = reinterpret_cast<MultiPlayStop>(
+                image_base + MultiPlayStopRequestOffset)(multi_play);
+            LOG_INFO(Debug,
+                     "Bloodborne lobby: the join did not complete in 25 s (session state {}), "
+                     "stopped={}; joining again",
+                     session_state, stopped);
+            next_attempt = clock::now() + std::chrono::seconds{5};
+            return;
+        }
+    }
+    u64 room_id = 0;
+    std::string host_npid;
+    std::string placement_text;
+    if (!Libraries::Http::BloodborneLobbyHostRoom(room_id, host_npid, placement_text)) {
+        return;
+    }
+    const auto now = clock::now();
+    if (now < next_attempt) {
+        return;
+    }
+    const u64 world_chr_man = ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0);
+    const u64 player = world_chr_man >= 0x10000 ? ReadValue<u64>(world_chr_man, 0x60) : 0;
+    const u64 data = GetChrDataModule(player);
+    const u64 state = GetGlobalState();
+    const u64 multi_play = GetMatchingState();
+    if (data == 0 || ReadValue<s32>(data, DataModuleHpOffset) <= 0 || state < 0x10000 ||
+        ReadValue<u8>(state, 0x08) != 0 || ReadValue<u8>(state, 0x1520) != 0 ||
+        multi_play < 0x10000 || GetPartnerState(world_chr_man, player).count > 0) {
+        return;
+    }
+    // The game joins from session states 0, 2 and 5 only.
+    const s32 session_state = ReadValue<s32>(multi_play, 0x124);
+    if (session_state != 0 && session_state != 2 && session_state != 5) {
+        return;
+    }
+    // placement "1,<map>,<x>,<y>,<z>,<heading>,<area>" (hex, area decimal)
+    std::array<u32, 6> values{};
+    {
+        std::istringstream fields{placement_text};
+        std::string field;
+        std::getline(fields, field, ',');
+        for (size_t i = 0; i < values.size() && std::getline(fields, field, ','); ++i) {
+            values[i] = static_cast<u32>(std::strtoul(field.c_str(), nullptr, i == 5 ? 10 : 16));
+        }
+    }
+    // The game's own cross-map join (a deferred reload into the host's map) hangs in the
+    // loading screen with the seamless rules, so a guest in another map first travels there
+    // alone, as the pre-match travel does, and joins once it has arrived.
+    if (values[0] != GetCurrentPackedMap()) {
+        if (!IsUsablePackedMap(values[0]) || !IsUsablePackedMap(GetCurrentPackedMap()) ||
+            !HasMemoryAccess(state, 0x1521, MemoryProt::CpuWrite)) {
+            return;
+        }
+        const SummonPlacementDescriptor host{
+            .packed_region = values[0],
+            .x = std::bit_cast<float>(values[1]),
+            .y = std::bit_cast<float>(values[2]),
+            .z = std::bit_cast<float>(values[3]),
+            .heading = std::bit_cast<float>(values[4]),
+            .area = static_cast<s32>(values[5]),
+        };
+        if (!WriteTransportedSummonPlacement(state, host)) {
+            return;
+        }
+        using PlacementSetter = void PS4_SYSV_ABI (*)(const void* value);
+        using FlagSetter = void PS4_SYSV_ABI (*)();
+        using PlacementSelector = bool PS4_SYSV_ABI (*)(u64 context, s32 warp_info_id);
+        using StageTransition = s32 PS4_SYSV_ABI (*)();
+        reinterpret_cast<PlacementSetter>(image_base + SetForcedSummonPositionOffset)(
+            reinterpret_cast<const void*>(state + 0x14D0));
+        reinterpret_cast<PlacementSetter>(image_base + SetForcedSummonOrientationOffset)(
+            reinterpret_cast<const void*>(state + 0x14E0));
+        reinterpret_cast<PlacementSetter>(image_base + SetForcedSummonMapOffset)(
+            reinterpret_cast<const void*>(state + 0x14C4));
+        reinterpret_cast<FlagSetter>(image_base + SetForcedSummonWarpOffset)();
+        const bool selected = reinterpret_cast<PlacementSelector>(
+            image_base + SelectSummonedPlacementOffset)(0, -1);
+        const bool travelling =
+            selected && ReadValue<u32>(state, 0x0C) == values[0] &&
+            reinterpret_cast<StageTransition>(image_base + StageTransitionOffset)() != 0;
+        LOG_INFO(Debug, "Bloodborne lobby: travelling to the host's map {:#x} first{}",
+                 values[0], travelling ? "" : " FAILED");
+        next_attempt = now + std::chrono::seconds{travelling ? 10 : 30};
+        return;
+    }
+    next_attempt = now + std::chrono::seconds{30};
+
+    const std::vector<u8> join_data = MakeJoinData(room_id, host_npid);
+    alignas(64) static std::array<u8, 0x400> session_info{};
+    session_info.fill(0);
+    struct Reader {
+        u64 vtable;
+        u64 size;
+        const u8* data;
+        u64 position;
+        u32 zero1;
+        u8 flag;
+        u8 pad[3];
+        u32 zero2;
+        u32 pad2;
+    } reader{image_base + 0x053B2BE0, join_data.size(), join_data.data(), 8, 0, 1, {}, 0, 0};
+
+    using CopySessionInfo = void PS4_SYSV_ABI (*)(void* info, u64 source);
+    using ClearSessionInfo = void PS4_SYSV_ABI (*)(void* info);
+    using ReadSessionInfo = bool PS4_SYSV_ABI (*)(void* info, void* reader);
+    using StartJoin = void PS4_SYSV_ABI (*)(u64 session_manager, void* info);
+    using AfterJoin = void PS4_SYSV_ABI (*)();
+    reinterpret_cast<CopySessionInfo>(image_base + 0x00C90270)(session_info.data(),
+                                                               multi_play + 0x38);
+    reinterpret_cast<ClearSessionInfo>(image_base + 0x00C8FBF0)(session_info.data());
+    const bool read =
+        reinterpret_cast<ReadSessionInfo>(image_base + 0x00C90DD0)(session_info.data(), &reader);
+    LOG_INFO(Debug,
+             "Bloodborne lobby: direct join of room {} of {} (join data {} bytes, read={}, "
+             "session state {})",
+             room_id, host_npid, join_data.size(), read, session_state);
+    if (read) {
+        const u64 globals = ReadValue<u64>(image_base + 0x05556678, 0);
+        if (globals >= 0x10000) {
+            WriteValue(globals, 0x16F0, s32{-1});
+            WriteValue(globals, 0x16F4, u8{7});
+        }
+        reinterpret_cast<StartJoin>(image_base + 0x01789010)(
+            ReadValue<u64>(image_base + 0x0553D6D0, 0), session_info.data());
+        if (globals >= 0x10000) {
+            // Where the guest is put: the host's map, position, heading and area, as a summon
+            // request carries them (+0x20.. and +0x38..).
+            const std::array<float, 4> position{std::bit_cast<float>(values[1]),
+                                                std::bit_cast<float>(values[2]),
+                                                std::bit_cast<float>(values[3]), 1.0f};
+            const std::array<float, 4> rotation{0.0f, std::bit_cast<float>(values[4]), 0.0f,
+                                                0.0f};
+            WriteValue(globals, 0x14C0, values[0]);
+            std::memcpy(reinterpret_cast<void*>(globals + 0x14A0), position.data(), 16);
+            std::memcpy(reinterpret_cast<void*>(globals + 0x14B0), rotation.data(), 16);
+            WriteValue(globals, 0x14C4, values[0]);
+            std::memcpy(reinterpret_cast<void*>(globals + 0x14D0), position.data(), 16);
+            std::memcpy(reinterpret_cast<void*>(globals + 0x14E0), rotation.data(), 16);
+            std::memcpy(reinterpret_cast<void*>(globals + 0x1620), position.data(), 16);
+            std::memcpy(reinterpret_cast<void*>(globals + 0x1630), rotation.data(), 16);
+            WriteValue(globals, 0x1640, values[5]);
+            WriteValue(globals, 0x1644, values[0]);
+            WriteValue(globals, 0x1648, u8{1});
+        }
+        const u64 net_man = ReadValue<u64>(image_base + 0x0553B120, 0);
+        if (net_man >= 0x10000) {
+            WriteValue(net_man, 0xA98, s32{1});
+        }
+        reinterpret_cast<AfterJoin>(image_base + 0x01FF58B0)();
+        joined_at = now;
+    }
+    using DestroySessionInfo = void PS4_SYSV_ABI (*)(void* info);
+    reinterpret_cast<DestroySessionInfo>(image_base + 0x00C90520)(session_info.data());
+}
+
+// Lobby direct mode, host side: while a guest is in the lobby, the host's game opens its room
+// with the game's own "create session" step (the one a claimed summon sign runs:
+// 0x01788ED0(summon object [0x553D6D0], keep-open seconds), which calls SprjSessionManager
+// 0x01ECFCD0). Called again while the room is open, it only extends the keep-open time. The
+// room id goes to the guest through the lobby (BloodborneOwnedRoomId), which joins it directly.
+void ApplyLobbyHostRoom() {
+    static const bool enabled = LobbyDirectJoin() &&
+                                Libraries::Http::BloodborneLobbyBellGoods() ==
+                                    BeckoningBellGoodsId;
+    if (!enabled || image_base == 0 || auto_bell_goods.load() == 0 ||
+        !Libraries::Http::BloodborneLobbyPartnerPresent()) {
+        return;
+    }
+    using clock = std::chrono::steady_clock;
+    static clock::time_point next_attempt{};
+    const auto now = clock::now();
+    if (now < next_attempt) {
+        return;
+    }
+    next_attempt = now + std::chrono::seconds{5};
+    const u64 world_chr_man = ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0);
+    const u64 player = world_chr_man >= 0x10000 ? ReadValue<u64>(world_chr_man, 0x60) : 0;
+    const u64 data = GetChrDataModule(player);
+    const u64 state = GetGlobalState();
+    const u64 multi_play = GetMatchingState();
+    const u64 summon = ReadValue<u64>(image_base + 0x0553D6D0, 0);
+    if (data == 0 || ReadValue<s32>(data, DataModuleHpOffset) <= 0 || state < 0x10000 ||
+        ReadValue<u8>(state, 0x08) != 0 || ReadValue<u8>(state, 0x1520) != 0 ||
+        multi_play < 0x10000 || summon < 0x10000) {
+        return;
+    }
+    // Not in the Hunter's Dream (area 21), where the game never hosts.
+    if ((GetCurrentPackedMap() >> 24) == 21) {
+        return;
+    }
+    // 0 = no session (creates the room), 1 / 3 = room open (extends its time).
+    const s32 session_state = ReadValue<s32>(multi_play, 0x124);
+    if (session_state != 0 && session_state != 1 && session_state != 3) {
+        return;
+    }
+    using CreateSession = bool PS4_SYSV_ABI (*)(u64 summon, float keep_open);
+    const bool created = reinterpret_cast<CreateSession>(image_base + 0x01788ED0)(summon, 55.0f);
+    static s32 last_logged_state = -1;
+    if (session_state != last_logged_state || !created) {
+        last_logged_state = session_state;
+        LOG_INFO(Debug, "Bloodborne lobby: host room {} (session state {}, room {})",
+                 created ? (session_state == 0 ? "opened" : "kept open") : "NOT opened",
+                 session_state, Libraries::Np::NpMatching2::BloodborneOwnedRoomId());
+    }
+}
+
 // Co-op role kept from the last bell hotkey, so a session that ends (death, load, network) is
 // formed again without pressing anything: while no other player is in the world, the host keeps
 // the Beckoning Bell rung and a guest keeps the Small Resonant Bell rung. Cleared by the
 // end-session hotkey. On with SHADPS4_BLOODBORNE_AUTO_REJOIN=1 (or the shared-death experiment).
-std::atomic<s32> auto_bell_goods{};
+// With a lobby (SHADPS4_BLOODBORNE_LOBBY, see http.cpp) the role comes from the lobby, no key is
+// needed, and the bell is only rung while the other side is in the lobby.
 void ExpirePlayerEffect(u64 player, s32 effect_id);
 std::atomic<bool> bell_requested_at{}; // set by every bell request, read by auto rejoin
 
 void ApplyAutoRejoin() {
+    static const s32 lobby_goods = Libraries::Http::BloodborneLobbyBellGoods();
     static const bool enabled = EnvFlagEnabled("SHADPS4_BLOODBORNE_AUTO_REJOIN") ||
-                                EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARED_DEATH");
+                                EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARED_DEATH") ||
+                                lobby_goods != 0;
+    static bool lobby_role_taken = false; // once: the leave key clears the role for good
+    if (lobby_goods != 0 && !lobby_role_taken) {
+        lobby_role_taken = true;
+        auto_bell_goods.store(lobby_goods);
+    }
     const s32 goods_id = auto_bell_goods.load();
     if (!enabled || goods_id == 0) {
         return;
@@ -1920,6 +2258,13 @@ void ApplyAutoRejoin() {
     // Still in a session (the seamless rules keep it through reloads): nothing to form again.
     if (has_partner || ringing || in_session) {
         return;
+    }
+    if (lobby_goods != 0 && !Libraries::Http::BloodborneLobbyPartnerPresent()) {
+        return; // nobody to meet yet
+    }
+    static const bool direct_join = LobbyDirectJoin();
+    if (direct_join && lobby_goods != 0) {
+        return; // no bell: ApplyLobbyHostRoom / ApplyLobbyDirectJoin
     }
     // Some places (Hunter's Dream) never accept the bell; do not keep interrupting the player.
     next_attempt = now + std::chrono::seconds{45};
@@ -3886,6 +4231,9 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         ApplyRequestedSessionStop();
         ApplySharedDeathRule();
         ApplyAutoRejoin();
+        LogSummonRequests();
+        ApplyLobbyHostRoom();
+        ApplyLobbyDirectJoin();
     }
     if (healing_fountain_host_availability_hook_installed &&
         site.offset == HealingFountainAvailabilityOffset) {

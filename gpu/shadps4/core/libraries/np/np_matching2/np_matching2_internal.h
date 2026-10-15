@@ -30,6 +30,9 @@ class SearchRoomReply;
 
 namespace Libraries::Np::NpMatching2 {
 
+// Bloodborne seamless lobby: the room this game owns (0 when none).
+u64 BloodborneOwnedRoomId();
+
 struct PeerInfo {
     u32 addr = 0;
     u16 port = 0;

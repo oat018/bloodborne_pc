@@ -44,6 +44,7 @@ static const GUID WSAID_WSARECVMSG = {
 #include <unistd.h>
 typedef int net_socket;
 #endif
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <map>
@@ -173,8 +174,22 @@ struct P2PSocket : public Socket {
 
     // Called by the shared UDP transport after it demultiplexes a virtual port.
     void EnqueuePacket(P2PDatagram packet);
+    // Hands held packets (see EnqueuePacket) to the game once they are kHoldTime old.
+    void ReleaseExpiredHeldPackets();
 
 private:
+    void DeliverLocked(P2PDatagram packet);
+    void ReleaseHeldLocked(u64 peer, bool expired_only);
+
+    // Packets from a peer this socket has not sent anything to yet, held back for a moment.
+    struct HeldDatagram {
+        std::chrono::steady_clock::time_point arrived;
+        u64 peer;
+        P2PDatagram packet;
+    };
+    std::vector<HeldDatagram> held_packets;
+    std::vector<u64> open_peers; // peers this socket has sent to (or whose packets were released)
+
     bool valid{true};
     bool bound{false};
     bool connected{false};

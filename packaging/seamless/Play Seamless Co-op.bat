@@ -1,8 +1,10 @@
 @echo off
 rem Bloodborne (bbport + seamless co-op) on a private co-op server (shadNet).
 rem Copy this file into the bbport folder (next to "Play Bloodborne.exe") and fill in the three
-rem values below. In game: PgUp = Beckoning Bell (host), PgDn = Small Resonant Bell (guest),
-rem Home = leave the session, End = leave and ring again, Insert = bbport menu.
+rem values below. With the lobby below the players meet by themselves, no bell needed. In game:
+rem Home = leave the session (for good, until the game is started again), Insert = bbport menu;
+rem without a lobby: PgUp = Beckoning Bell (host), PgDn = Small Resonant Bell (guest),
+rem End = leave and ring again.
 
 set SERVER=CHANGE_ME_SERVER_ADDRESS
 set BB_SHADNET_NPID=CHANGE_ME_ACCOUNT
@@ -14,7 +16,16 @@ set BB_SHADNET_WEBAPI=http://%SERVER%:31315
 set BB_COMMUNITY_SERVER=https://thehuntersdream.com
 set BB_UPNP=0
 set SHADPS4_BLOODBORNE_SEAMLESS_COOP=1
-rem Rings the same bell again when the players really lose each other. Home stops it.
+rem Co-op lobby: one player hosts, the others join with the same password; the game of a joining
+rem player goes into the host's world by itself (it travels to the host's map first), and again
+rem after a death or when either game was restarted. The host's game listens on TCP port 31320
+rem (SHADPS4_BLOODBORNE_LOBBY_PORT): on the host's PC allow "bb-probe.exe" when Windows asks.
+rem The others reach it at the server address unless SHADPS4_BLOODBORNE_LOBBY_ADDRESS names the
+rem host's address. Put "rem " in front of the two lines to play with the bells instead.
+set SHADPS4_BLOODBORNE_LOBBY=host
+set SHADPS4_BLOODBORNE_LOBBY_PASSWORD=CHANGE_ME_LOBBY_PASSWORD
+rem Without a lobby: rings the same bell again when the players really lose each other. Home
+rem stops it.
 set SHADPS4_BLOODBORNE_AUTO_REJOIN=1
 rem Seamless rules: the session survives deaths and boss kills, lanterns work inside the session
 rem and guests follow the host when it travels. Every player needs the same setting.

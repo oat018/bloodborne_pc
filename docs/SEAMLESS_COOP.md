@@ -36,7 +36,14 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   doors and gates opened, shortcuts, lifts. See the limits below.
 - A guest can talk to the characters of the host's world and use its lanterns
   (`SHADPS4_BLOODBORNE_GUEST_TALK=0` turns it off).
-- Bell hotkeys, so no bell items are needed: PgUp = Beckoning Bell (host),
+- A lobby with a password instead of the bells (new after v2.5): with
+  `SHADPS4_BLOODBORNE_LOBBY=host` on one player and `=join` plus the same
+  `SHADPS4_BLOODBORNE_LOBBY_PASSWORD` on the others, nobody rings anything. While a joining
+  game is in the lobby, the host's game opens its room by itself; the joining game travels
+  alone to the host's map and joins the room directly. After a death, a disconnection or a
+  restarted game they find each other again the same way. Home leaves for good (until the game
+  is started again). See "The lobby" below.
+- Bell hotkeys (without a lobby), so no bell items are needed: PgUp = Beckoning Bell (host),
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
 - Ringing the Beckoning Bell costs no Insight, by hotkey or from the inventory: the game took one
   per ring, also for the rings of the automatic re-join (`SHADPS4_BLOODBORNE_BELL_INSIGHT=1`
@@ -149,6 +156,40 @@ The Linux build is compiled by the workflow of this branch and cannot be run by 
 
 Every player of a session needs the same build and the same switches.
 
+## The lobby
+
+The host's game holds the lobby: an HTTP endpoint on TCP port 31320
+(`SHADPS4_BLOODBORNE_LOBBY_PORT`). A joining game asks it once a second with the password and
+gets the host's room id, online id and position. The joining game reaches the host at the
+shadNet server's address unless `SHADPS4_BLOODBORNE_LOBBY_ADDRESS` names the host's address, so
+the simplest setup is the host running the server. The host's PC must accept that port (on
+Windows, allow bb-probe.exe when the firewall asks).
+
+How the meeting works without a summon:
+
+- Host: the game's "create session" step that a claimed summon sign runs (0x01788ED0 with the
+  summon object, then `SprjSessionManager` 0x01ECFCD0) is called directly while a joining game
+  is in the lobby. Calling it again while the room is open only extends its keep-open time. Not
+  in the Hunter's Dream, where the game never hosts.
+- Guest: the game's join of a summon request (the part of `SosStatus.Update` that reads the
+  host's serialised session info, 0x18739CB..0x1873B38) is run with session info made from the
+  room id and the host's online id: the data a host sends is the same every time apart from
+  those. A guest in another map first travels there alone (the forced placement the summon
+  travel uses): the game's own cross-map join hangs in the loading screen. A join that has not
+  brought the host's world after 25 s is stopped and started again.
+- Both games open their session connection (P2P virtual port 30) on the same signaling event.
+  A game that received the other's opening packet before it had sent its own never answered
+  it, and that join ran into the room's time-out. The P2P transport therefore holds packets
+  from a peer until the game has sent something to that peer (at most a second), and keeps
+  packets for a virtual port the game has not opened yet for two seconds.
+
+Tested with two games on one PC: first meeting from the Hunter's Dream about 25 s after the
+host arrives; after the joining game was killed and started again, 5 of 6 met at the first
+attempt (about 18 s after the room opened) and the sixth at the second; after the host's game
+was killed and started again, 3 of 3 at the first attempt; deaths of either
+player, the host travelling to the Dream and back, and leaving with Home all behave as with the
+bells. Not yet tested between two machines.
+
 ## Using it
 
 1. One player runs a shadNet server (`Wozzardman/shadnet-p2p`) with
@@ -159,7 +200,8 @@ Every player of a session needs the same build and the same switches.
 3. Copy the launch script from `packaging/seamless/` next to the game launcher, put the
    server address and your account in it, and start the game with it:
    `Play Seamless Co-op.bat` on Windows, `play-seamless-coop.sh` on Linux.
-4. Choose "Play Online", then the host presses PgUp and the guest PgDn.
+4. Choose "Play Online". With the lobby set in the script the players meet by themselves;
+   without it the host presses PgUp and the guest PgDn.
 
 ## Building
 

@@ -46,6 +46,15 @@ static bool P2PLogWanted(unsigned local_vport, unsigned remote_vport) {
     return budget.fetch_sub(1) > 0;
 }
 
+static u64 PeerKey(u32 addr, u16 port) {
+    return (static_cast<u64>(addr) << 16) | port;
+}
+
+// How long a packet from a peer the game has not talked to yet is held (see EnqueuePacket).
+constexpr auto kHoldTime = std::chrono::milliseconds{1000};
+// How long a packet for a virtual port the game has not opened yet is kept.
+constexpr auto kUnclaimedTime = std::chrono::milliseconds{2000};
+
 static long long P2PLogNowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
@@ -328,6 +337,16 @@ public:
 
         game_sockets.emplace(vport, socket);
         *actual_vport_nbo = vport;
+        // Packets that came for this virtual port shortly before the game opened it.
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = unclaimed_packets.begin(); it != unclaimed_packets.end();) {
+            if (it->vport_nbo == vport && now - it->arrived < kUnclaimedTime) {
+                socket->EnqueuePacket(std::move(it->packet));
+                it = unclaimed_packets.erase(it);
+            } else {
+                ++it;
+            }
+        }
         return true;
     }
 
@@ -542,7 +561,20 @@ private:
     void ReceiveMain() {
 #if defined(__linux__) || defined(_WIN32)
         std::vector<u8> buffer(65536);
+        auto next_release = std::chrono::steady_clock::now();
         while (running.load(std::memory_order_acquire)) {
+            if (const auto now = std::chrono::steady_clock::now(); now >= next_release) {
+                next_release = now + std::chrono::milliseconds{50};
+                std::lock_guard lock(registry_mutex);
+                for (const auto& [vport, socket] : game_sockets) {
+                    if (socket != nullptr) {
+                        socket->ReleaseExpiredHeldPackets();
+                    }
+                }
+                std::erase_if(unclaimed_packets, [now](const UnclaimedPacket& packet) {
+                    return now - packet.arrived >= kUnclaimedTime;
+                });
+            }
             sockaddr_in from{};
             socklen_t from_len = sizeof(from);
 #ifdef _WIN32
@@ -611,17 +643,23 @@ private:
 
             std::lock_guard lock(registry_mutex);
             const auto it = game_sockets.find(dest_vport_nbo);
-            if (it == game_sockets.end() || it->second == nullptr) {
-                LOG_TRACE(Lib_Net, "P2P RX no socket for dst_vport={}", ntohs(dest_vport_nbo));
-                continue;
-            }
-
-            NotePeer(from.sin_addr.s_addr, from.sin_port, nullptr, 0); // a peer of the game
             P2PDatagram packet{};
             packet.source_addr = from.sin_addr.s_addr;
             packet.source_port = from.sin_port;
             packet.source_vport = source_vport_nbo;
             packet.payload.assign(payload, payload + payload_size);
+            if (it == game_sockets.end() || it->second == nullptr) {
+                // The other game may already talk on a port this game is about to open (both
+                // open their session connection on the same event): kept for kUnclaimedTime.
+                LOG_TRACE(Lib_Net, "P2P RX no socket for dst_vport={}", ntohs(dest_vport_nbo));
+                if (unclaimed_packets.size() < 64) {
+                    unclaimed_packets.push_back(
+                        {std::chrono::steady_clock::now(), dest_vport_nbo, std::move(packet)});
+                }
+                continue;
+            }
+
+            NotePeer(from.sin_addr.s_addr, from.sin_port, nullptr, 0); // a peer of the game
             it->second->EnqueuePacket(std::move(packet));
         }
 #endif
@@ -649,6 +687,12 @@ private:
 
     std::mutex registry_mutex;
     std::unordered_map<u16, P2PSocket*> game_sockets;
+    struct UnclaimedPacket {
+        std::chrono::steady_clock::time_point arrived;
+        u16 vport_nbo;
+        P2PDatagram packet;
+    };
+    std::vector<UnclaimedPacket> unclaimed_packets; // guarded by registry_mutex
     u16 next_ephemeral_vport{30000};
 
     std::mutex internal_mutex;
@@ -929,6 +973,15 @@ int P2PSocket::SendPacket(const void* msg, u32 len, int flags, const OrbisNetSoc
     if (rc < 0) {
         return FailWith(ORBIS_NET_EHOSTUNREACH);
     }
+    {
+        // What this peer sent before is handed over now, after this socket's own packet.
+        std::lock_guard lock(receive_mutex);
+        const u64 peer = PeerKey(target.sin_addr, target.sin_port);
+        if (!std::ranges::contains(open_peers, peer)) {
+            open_peers.push_back(peer);
+            ReleaseHeldLocked(peer, false);
+        }
+    }
 
     LOG_TRACE(Lib_Net, "P2P TX {} bytes vport {} -> {} dst={:#x}:{}", len,
               ntohs(local_addr.sin_vport), ntohs(target.sin_vport), target.sin_addr,
@@ -1116,7 +1169,6 @@ void P2PSocket::EnqueuePacket(P2PDatagram packet) {
         return;
     }
 
-    const bool was_empty = receive_queue.empty();
     LOG_TRACE(Lib_Net, "P2P RX {} bytes vport {} <- {} src={:#x}:{}", packet.payload.size(),
               ntohs(local_addr.sin_vport), ntohs(packet.source_vport), packet.source_addr,
               ntohs(packet.source_port));
@@ -1126,6 +1178,22 @@ void P2PSocket::EnqueuePacket(P2PDatagram packet) {
                  ntohs(packet.source_vport), packet.source_addr, ntohs(packet.source_port),
                  P2PLogHead(packet.payload.data(), packet.payload.size()));
     }
+    // A packet from a peer this socket has not sent anything to yet waits until it has (or for
+    // kHoldTime). Bloodborne's session connections (virtual ports 30 and 40) are opened by both
+    // games at once, each on its own signaling event; a game that received the other's opening
+    // packet before it had sent its own never answered it, and the join ran into the room's
+    // time-out (rig 2026-10-15: every such join failed, every other one worked). With this, every
+    // game sees its own opening first, as on a network where each packet takes a while.
+    const u64 peer = PeerKey(packet.source_addr, packet.source_port);
+    if (!std::ranges::contains(open_peers, peer)) {
+        held_packets.push_back({std::chrono::steady_clock::now(), peer, std::move(packet)});
+        return;
+    }
+    DeliverLocked(std::move(packet));
+}
+
+void P2PSocket::DeliverLocked(P2PDatagram packet) {
+    const bool was_empty = receive_queue.empty();
     receive_queue.push_back(std::move(packet));
 
 #ifdef _WIN32
@@ -1142,6 +1210,29 @@ void P2PSocket::EnqueuePacket(P2PDatagram packet) {
     }
 #endif
     receive_cv.notify_all();
+}
+
+void P2PSocket::ReleaseHeldLocked(u64 peer, bool expired_only) {
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = held_packets.begin(); it != held_packets.end();) {
+        const bool expired = now - it->arrived >= kHoldTime;
+        if (expired_only ? !expired : it->peer != peer) {
+            ++it;
+            continue;
+        }
+        if (!std::ranges::contains(open_peers, it->peer)) {
+            open_peers.push_back(it->peer);
+        }
+        DeliverLocked(std::move(it->packet));
+        it = held_packets.erase(it);
+    }
+}
+
+void P2PSocket::ReleaseExpiredHeldPackets() {
+    std::lock_guard lock(receive_mutex);
+    if (valid && !held_packets.empty()) {
+        ReleaseHeldLocked(0, true);
+    }
 }
 
 u16 GetP2PConfiguredPort() {
