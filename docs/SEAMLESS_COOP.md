@@ -19,6 +19,14 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
 - The session survives a death. The dead player respawns at its own last lantern; the other
   player keeps playing without a loading screen. A guest that respawned in another area is
   taken back to the host's area a few seconds later.
+- In a boss fight a death waits (new after v2.5, as in Elden Ring Seamless Co-op and BBSC):
+  a player who dies while another is still alive stays down and watches. When the boss dies
+  the player gets up beside a living partner without a loading screen; when every player is
+  down, everybody's death runs and each one respawns at their lantern. The leave key (Home)
+  also ends the wait.
+  With a lobby the games tell each other who is alive (the copy of a dead player in the other
+  games still has its HP). `SHADPS4_BLOODBORNE_SPECTATE=0` keeps the old rule,
+  `SHADPS4_BLOODBORNE_SHARED_DEATH=1` makes every death wait, not only in a boss fight.
 - The session survives a boss kill. Nobody is sent home.
 - The host can use lanterns inside the session. When the host travels, guests are taken to the
   same lantern, and from there to the spot where the host stands.

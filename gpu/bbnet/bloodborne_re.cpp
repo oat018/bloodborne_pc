@@ -64,6 +64,8 @@ namespace Libraries::Http {
 void ReplayBloodborneSummonCreate(u32 interval_seconds);
 int BloodborneLobbyBellGoods();
 bool BloodborneLobbyPartnerPresent();
+void BloodborneLobbySetLocalDead(bool dead);
+int BloodborneLobbyOthersAlive();
 bool BloodborneLobbyHostRoom(u64& room_id, std::string& host_npid, std::string& placement);
 } // namespace Libraries::Http
 
@@ -1833,16 +1835,12 @@ void ResumePreMatchCrossMapResponder() {
              record.target_map, record.target_area, record.attempts, record.native_result);
 }
 
-// Experimental shared-death rule, on with SHADPS4_BLOODBORNE_SHARED_DEATH=1.
+// Death rules of the session, see ApplyDeathRules below.
 //
-// A player who dies while another player character is still alive in the world stays dead where
-// they fell: the death script (reload at the lantern for a host, return home for a guest) is
-// held back. It is released, and the normal death flow runs, when every player is dead, when no
-// partner is left, or when the dead player presses the end-session hotkey.
-//
-// The hold uses the latch of the death handler at 0x013813D0: it returns early while the dword
-// at [[0x553B108]+0x10]+8 is positive, and sets it to 4 once it has run. The handler is polled,
-// so clearing the latch lets it proceed. Each client applies this to its own character.
+// A held death uses the death handler at 0x013813D0: it returns early while the dword at
+// [[0x553B108]+0x10]+8 (the event manager's request) is positive, and sets it to 4 (death
+// reload) once it has run. The handler is polled, so a request of 4 written before it runs
+// holds the death script back, and clearing it lets it proceed.
 constexpr u64 ChrModulesOffset = 0x3B0;
 constexpr u64 ChrDataModuleOffset = 0x20;
 constexpr u64 DataModuleHpOffset = 0xF8;
@@ -1914,14 +1912,268 @@ PartnerState GetPartnerState(u64 world_chr_man, u64 player) {
     return state;
 }
 
-void ApplySharedDeathRule() {
-    static const bool enabled = EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARED_DEATH");
-    if (!enabled) {
+// Death rules (on with the session rules; SHADPS4_BLOODBORNE_SPECTATE=0 keeps the game's):
+//  - a player who dies in a boss fight while another player is still alive stays down and
+//    watches; when the boss dies, the player gets up again beside a living partner, without a
+//    loading screen;
+//  - when every player is down (or the dead player presses the leave key), the game's death
+//    runs for everyone: each one respawns at their lantern and the session goes on as after any
+//    death;
+//  - outside a boss fight a death is the game's own (respawn at the lantern).
+// SHADPS4_BLOODBORNE_SHARED_DEATH=1 holds every death, not only those in a boss fight.
+// Who is alive comes from the lobby when there is one: the copy of a dead player in the other
+// games keeps its HP, so it would look alive (BBSC's finding). Without a lobby the copies' HP
+// is used.
+constexpr u64 BossGaugePointerOffset = 0x05562878; // MenuMan: boss bars at +0x1658 + i*0x14
+constexpr u64 BlockClear2FirstOffset = 0x01385470; // boss killed (Lua BlockClear2_1)
+constexpr u64 PlayerSlotManagerPointerOffset = 0x0553B130;
+std::atomic<s64> boss_killed_at_ms{0};
+u64 FindHostCharacter(u64 world_chr_man, u64 player);
+u64 GetChrTransform(u64 chr);
+std::atomic<bool> debug_boss_fight{false};
+
+s64 SteadyMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+bool SpectateEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_BLOODBORNE_SPECTATE");
+        return EnvFlagEnabled("SHADPS4_BLOODBORNE_STAY_IN_SESSION") &&
+               (value == nullptr || std::string_view{value} != "0");
+    }();
+    return enabled;
+}
+
+bool BossBarUp() {
+    if (debug_boss_fight) {
+        return true;
+    }
+    const u64 gauge = ReadValue<u64>(image_base + BossGaugePointerOffset, 0);
+    for (int slot = 0; gauge >= 0x10000 && slot < 3; ++slot) {
+        if (ReadValue<s32>(gauge, 0x165C + static_cast<size_t>(slot) * 0x14) != -1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void PS4_SYSV_ABI BossClearEntry(u64, const GuestRegisterSnapshot*) {
+    boss_killed_at_ms = SteadyMs();
+    LOG_INFO(Debug, "Bloodborne death rules: a boss was killed");
+}
+
+// Partners alive: from the lobby, else from the copies in this world.
+int LivingPartners(u64 world_chr_man, u64 player) {
+    const int lobby = Libraries::Http::BloodborneLobbyOthersAlive();
+    return lobby >= 0 ? lobby : GetPartnerState(world_chr_man, player).alive;
+}
+
+// The locks a death leaves behind that the skipped reload would have cleared, in this game:
+// "leaving" marks of the player slots ([0x0553B130]+0xA9+slot*2), the menu brake
+// (MenuMan+0x2DC), death pending ([0x0553B130]+0x70) and event flags 4047 / 4000. Cleared
+// for a few seconds after a player got up again, here and in the partner's game (the game
+// marks a dying partner's slot too).
+std::atomic<s64> death_locks_until_ms{0};
+
+void ClearDeathLocks() {
+    const s64 until = death_locks_until_ms;
+    const s64 now = SteadyMs();
+    if (until == 0 || now > until) {
+        return;
+    }
+    static s64 next_ms = 0;
+    if (now < next_ms) {
+        return;
+    }
+    next_ms = now + 250;
+    const u64 world_chr_man = ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0);
+    const u64 player = world_chr_man >= 0x10000 ? ReadValue<u64>(world_chr_man, 0x60) : 0;
+    const u64 data = GetChrDataModule(player);
+    const u64 state = GetGlobalState();
+    if (data == 0 || ReadValue<s32>(data, DataModuleHpOffset) <= 0 || state < 0x10000 ||
+        ReadValue<u8>(state, 0x08) != 0) {
+        return;
+    }
+    u32 leaving = 0;
+    const u64 slots = ReadValue<u64>(image_base + PlayerSlotManagerPointerOffset, 0);
+    const u64 records = slots >= 0x10000 ? ReadValue<u64>(slots, 0x10) : 0;
+    for (u32 slot = 0; records >= 0x10000 && slot < 4; ++slot) {
+        if (ReadValue<s32>(records, 0x10 + slot * 0x6A0) != -1 &&
+            ReadValue<u8>(slots, 0xA9 + slot * 2) != 0) {
+            WriteValue<u8>(slots, 0xA9 + slot * 2, 0);
+            leaving |= 1u << slot;
+        }
+    }
+    bool pending = false;
+    if (slots >= 0x10000 && ReadValue<u8>(slots, 0x70) != 0) {
+        pending = WriteValue<u8>(slots, 0x70, 0);
+    }
+    bool brake = false;
+    const u64 menu = ReadValue<u64>(image_base + BossGaugePointerOffset, 0);
+    if (menu >= 0x10000 && ReadValue<s32>(menu, 0x2DC) != 0) {
+        brake = WriteValue<s32>(menu, 0x2DC, 0);
+    }
+    static s64 flags_cleared_for = 0;
+    if (flags_cleared_for != until) {
+        flags_cleared_for = until;
+        SetEventFlag(4047, false);
+        SetEventFlag(4000, false);
+    }
+    if (leaving != 0 || pending || brake) {
+        LOG_INFO(Debug,
+                 "Bloodborne death rules: locks cleared (slots leaving {:#x}, death pending {}, "
+                 "menu brake {})",
+                 leaving, pending, brake);
+    }
+}
+
+// Gets the local player up again beside a living partner, without a load: the local-player
+// branch of the game's event revive 0x013CBAD0 without its CSMultiPlayMan::Stop (as found by
+// BBSC): opacity, warp (vtable +0x5F8), Idle_wild, state reset (vtable +0xA8), full HP
+// (0x018BCD40), death flags, drawing, and the death globals the reload would clear.
+bool ReviveInPlace(u64 world_chr_man, u64 player) {
+    const u64 state = GetGlobalState();
+    const u64 control = ReadValue<u64>(player, 0x58);
+    const u64 modules = ReadValue<u64>(player, ChrModulesOffset);
+    const u64 partner = FindHostCharacter(world_chr_man, player);
+    const u64 partner_transform = GetChrTransform(partner);
+    if (state < 0x10000 || ReadValue<u8>(state, 0x08) != 0 || control < 0x10000 ||
+        modules < 0x10000 || partner_transform == 0) {
+        return false;
+    }
+    if (ReadValue<u64>(control, 0x280) == 0 && ReadValue<u64>(control, 0x80) == 0) {
+        return false; // not physical (the event revive's own guard)
+    }
+    const u64 vtable = ReadValue<u64>(player, 0);
+    const u64 warp = ReadValue<u64>(vtable, 0x5F8);
+    const u64 reset = ReadValue<u64>(vtable, 0xA8);
+    const u64 image_end = image_base + MemoryPatcher::g_eboot_image_size;
+    if (warp <= image_base || warp >= image_end || reset <= image_base || reset >= image_end) {
+        return false;
+    }
+    alignas(16) std::array<float, 4> position{};
+    alignas(16) std::array<float, 4> rotation{};
+    for (size_t i = 0; i < 4; ++i) {
+        position[i] = ReadValue<float>(partner_transform, 0x1E0 + i * 4);
+        rotation[i] = ReadValue<float>(partner_transform, 0x1D0 + i * 4);
+        if (!std::isfinite(position[i]) || !std::isfinite(rotation[i])) {
+            return false;
+        }
+    }
+    position[0] += 1.0f;
+    position[3] = 1.0f;
+    rotation[3] = 0.0f;
+
+    WriteValue<u64>(player, 0x208, 0x3F8000003F800000ull);
+    for (size_t i = 0; i < 4; ++i) {
+        WriteValue<float>(state, 0x1450 + i * 4, position[i]);
+        WriteValue<float>(state, 0x1460 + i * 4, rotation[i]);
+    }
+    using Warp = void PS4_SYSV_ABI (*)(u64 chr, float* position, float* rotation, u32 flag);
+    reinterpret_cast<Warp>(warp)(player, position.data(), rotation.data(), 1);
+    WriteValue<u8>(player, 0x1E4, static_cast<u8>(ReadValue<u8>(player, 0x1E4) | 0x02));
+    const u64 behaviour = ReadValue<u64>(modules, 0x30);
+    if (behaviour >= 0x10000 && ReadValue<u8>(behaviour, 0x384) != 0) {
+        using PlayAnimation = void PS4_SYSV_ABI (*)(u64 behaviour, u64 name_utf16);
+        reinterpret_cast<PlayAnimation>(image_base + 0x01A19F60)(behaviour,
+                                                                 image_base + 0x04992C40);
+    }
+    reinterpret_cast<void PS4_SYSV_ABI (*)(u64)>(reset)(player);
+    const u64 data = ReadValue<u64>(modules, ChrDataModuleOffset);
+    if (data >= 0x10000) {
+        using SetHp = void PS4_SYSV_ABI (*)(u64 chr, s32 hp);
+        reinterpret_cast<SetHp>(image_base + 0x018BCD40)(player, ReadValue<s32>(data, 0xFC));
+    }
+    const u64 control_flags = ReadValue<u64>(control, 0x38);
+    if (control_flags >= 0x10000) {
+        WriteValue<u8>(control_flags, 0x48,
+                       static_cast<u8>(ReadValue<u8>(control_flags, 0x48) & 0xFC));
+    }
+    WriteValue<u8>(world_chr_man, 0x68, 0);
+    const u64 draw = ReadValue<u64>(modules, 0x58);
+    const u64 draw_state = draw >= 0x10000 ? ReadValue<u64>(draw, 0x28) : 0;
+    if (draw_state >= 0x10000) {
+        WriteValue<u8>(draw_state, 0x0C, 1);
+    }
+    WriteValue<u16>(control, 0x114, static_cast<u16>(ReadValue<u16>(control, 0x114) & 0xFFFE));
+    // The death handler of the character (0x018C49F0) set "died" / "fell"; the forced-warp and
+    // lantern bytes only matter to a reload, and a leftover +0x1520 would send a guest home.
+    for (const size_t offset : {0x1520, 0x1522, 0x1523, 0x1524}) {
+        WriteValue<u8>(state, offset, 0);
+    }
+    const u64 event_state = ReadValue<u64>(image_base + 0x0553B0D8, 0);
+    if (event_state >= 0x10000) {
+        WriteValue<s32>(event_state, 0, 0);
+    }
+    death_locks_until_ms = SteadyMs() + 15'000;
+    LOG_INFO(Debug,
+             "Bloodborne death rules: got up beside the partner at {:.1f} {:.1f} {:.1f} (HP {})",
+             position[0], position[1], position[2],
+             data >= 0x10000 ? ReadValue<s32>(data, DataModuleHpOffset) : -1);
+    return true;
+}
+
+// The copy of a partner who got up again in its own game still lies dead here (the game never
+// revives a remote player): once its HP is back and the lobby says someone is alive, the
+// non-local steps of the event revive are applied to it (physics reset 0x018BCF30, Idle_wild,
+// opacity, death flags, drawing).
+void ReviveRemoteCopies(u64 world_chr_man, u64 player) {
+    if (Libraries::Http::BloodborneLobbyOthersAlive() <= 0) {
+        return;
+    }
+    const s32 count = ReadValue<s32>(world_chr_man, WorldChrManCountOffset);
+    const u64 entries = ReadValue<u64>(world_chr_man, WorldChrManEntriesOffset);
+    for (s32 index = 0; entries >= 0x10000 && index < std::min(count, 8); ++index) {
+        const u64 chr = ReadValue<u64>(entries, index * WorldChrManEntrySize);
+        const u64 control = chr != player && chr >= 0x10000 ? ReadValue<u64>(chr, 0x58) : 0;
+        const u64 modules = control >= 0x10000 ? ReadValue<u64>(chr, ChrModulesOffset) : 0;
+        const u64 data = GetChrDataModule(chr);
+        if (modules < 0x10000 || data == 0 || ReadValue<s32>(data, DataModuleHpOffset) <= 0 ||
+            (ReadValue<u16>(control, 0x114) & 1) == 0) {
+            continue;
+        }
+        reinterpret_cast<void PS4_SYSV_ABI (*)(u64, u8)>(image_base + 0x018BCF30)(chr, 1);
+        const u64 behaviour = ReadValue<u64>(modules, 0x30);
+        if (behaviour >= 0x10000 && ReadValue<u8>(behaviour, 0x384) != 0) {
+            using PlayAnimation = void PS4_SYSV_ABI (*)(u64 behaviour, u64 name_utf16);
+            reinterpret_cast<PlayAnimation>(image_base + 0x01A19F60)(behaviour,
+                                                                     image_base + 0x04992C40);
+        }
+        WriteValue<u64>(chr, 0x208, 0x3F8000003F800000ull);
+        const u64 control_flags = ReadValue<u64>(control, 0x38);
+        if (control_flags >= 0x10000) {
+            WriteValue<u8>(control_flags, 0x48,
+                           static_cast<u8>(ReadValue<u8>(control_flags, 0x48) & 0xFC));
+        }
+        const u64 draw = ReadValue<u64>(modules, 0x58);
+        const u64 draw_state = draw >= 0x10000 ? ReadValue<u64>(draw, 0x28) : 0;
+        if (draw_state >= 0x10000) {
+            WriteValue<u8>(draw_state, 0x0C, 1);
+        }
+        WriteValue<u16>(control, 0x114, static_cast<u16>(ReadValue<u16>(control, 0x114) & 0xFFFE));
+        death_locks_until_ms = SteadyMs() + 15'000;
+        LOG_INFO(Debug, "Bloodborne death rules: the partner's copy got up again here");
+    }
+}
+
+void ApplyDeathRules() {
+    static const bool hold_always = EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARED_DEATH");
+    if (!SpectateEnabled() && !hold_always) {
         return;
     }
     enum class Phase { Alive, Holding, Released };
     static Phase phase = Phase::Alive;
-    static int last_partners = -1;
+    static s64 boss_bar_seen_ms = 0;
+    static s64 held_since_ms = 0;
+    static s64 next_remote_ms = 0;
+    const s64 now = SteadyMs();
+    if (BossBarUp()) {
+        boss_bar_seen_ms = now;
+    }
+    ClearDeathLocks();
 
     const u64 world_chr_man =
         image_base != 0 ? ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0) : 0;
@@ -1933,49 +2185,110 @@ void ApplySharedDeathRule() {
         !HasMemoryAccess(latch_owner, 0x0C, MemoryProt::CpuWrite)) {
         return;
     }
-
-    const PartnerState partners = GetPartnerState(world_chr_man, player);
-    if (partners.count != last_partners) {
-        LOG_INFO(Debug, "Bloodborne shared death: {} other player(s) in the world",
-                 partners.count);
-        last_partners = partners.count;
-    }
+    const u64 multi_play = GetMatchingState();
+    const s32 session = multi_play >= 0x10000 ? ReadValue<s32>(multi_play, 0x124) : 0;
+    const bool in_session = session == 3 || session == 6;
     const s32 hp = ReadValue<s32>(data, DataModuleHpOffset);
     const s32 latch = ReadValue<s32>(latch_owner, 8);
     const bool give_up = requested_death_release.exchange(false);
+    Libraries::Http::BloodborneLobbySetLocalDead(hp <= 0);
+    if (in_session && hp > 0 && now >= next_remote_ms) {
+        next_remote_ms = now + 250;
+        ReviveRemoteCopies(world_chr_man, player);
+    }
 
     switch (phase) {
-    case Phase::Alive:
-        if (hp <= 0 && latch <= 0 && partners.alive > 0) {
+    case Phase::Alive: {
+        if (hp > 0 || latch > 0) {
+            break;
+        }
+        const bool boss_fight = boss_bar_seen_ms != 0 && now - boss_bar_seen_ms <= 10'000 &&
+                                boss_killed_at_ms < boss_bar_seen_ms;
+        const int alive = LivingPartners(world_chr_man, player);
+        if (in_session && alive > 0 && (boss_fight || hold_always)) {
             WriteValue(latch_owner, 8, DeathLatchBusy);
             phase = Phase::Holding;
-            LOG_INFO(Debug, "Bloodborne shared death: down, waiting ({} partner(s) alive)",
-                     partners.alive);
+            held_since_ms = now;
+            LOG_INFO(Debug, "Bloodborne death rules: down{}, watching ({} partner(s) alive)",
+                     boss_fight ? " in a boss fight" : "", alive);
+        } else {
+            phase = Phase::Released;
         }
         break;
-    case Phase::Holding:
+    }
+    case Phase::Holding: {
         if (hp > 0) {
             WriteValue(latch_owner, 8, s32{0});
             phase = Phase::Alive;
             break;
         }
-        if (partners.alive == 0 || give_up) {
+        const int alive = LivingPartners(world_chr_man, player);
+        if (alive > 0 && in_session && boss_killed_at_ms > held_since_ms &&
+            now - boss_killed_at_ms >= 2'000 && ReviveInPlace(world_chr_man, player)) {
+            WriteValue(latch_owner, 8, s32{0});
+            phase = Phase::Alive;
+            break;
+        }
+        std::string_view why;
+        if (give_up) {
+            why = "leave key";
+        } else if (!in_session) {
+            why = "the session ended";
+        } else if (alive == 0) {
+            why = "every player is down";
+        } else if (now - held_since_ms > 15 * 60 * 1000) {
+            why = "15 minutes";
+        }
+        if (!why.empty()) {
             WriteValue(latch_owner, 8, s32{0});
             phase = Phase::Released;
-            LOG_INFO(Debug, "Bloodborne shared death: released ({})",
-                     give_up ? "end-session hotkey"
-                             : partners.count == 0 ? "no partner left" : "every player is down");
+            LOG_INFO(Debug, "Bloodborne death rules: the game's death runs ({})", why);
         } else if (latch <= 0) {
             WriteValue(latch_owner, 8, DeathLatchBusy);
         }
         break;
+    }
     case Phase::Released:
         if (hp > 0) {
             phase = Phase::Alive;
-            LOG_INFO(Debug, "Bloodborne shared death: respawned");
         }
         break;
     }
+}
+
+// The host's own death removes every member from the session at once (the character's death
+// handler 0x018C49F0, host branch: RemoveMember for each member task 0x01E54DB0, the second list
+// 0x01E55050, every slot marked leaving 0x014EB860); a host that is held and gets up again would
+// have lost its guests. The three calls become `xor eax, eax`; the members stay, and a host
+// whose death runs reloads as before.
+static void InstallDeathRulePatches(u64 base) {
+    if (!SpectateEnabled() && !EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARED_DEATH")) {
+        return;
+    }
+    static constexpr std::array<u8, 5> NoCall{0x31, 0xC0, 0x0F, 0x1F, 0x00};
+    static constexpr std::array<std::pair<u64, std::array<u8, 5>>, 3> HostDeathKick{{
+        {0x018C4D7D, {0xE8, 0x2E, 0x00, 0x59, 0x00}},
+        {0x018C4DAC, {0xE8, 0x9F, 0x02, 0x59, 0x00}},
+        {0x018C4DBA, {0xE8, 0xA1, 0x6A, 0xC2, 0xFF}},
+    }};
+    for (const auto& [offset, expected] : HostDeathKick) {
+        if (std::memcmp(reinterpret_cast<const void*>(base + offset), expected.data(), 5) != 0) {
+            LOG_ERROR(Debug, "Bloodborne death rules: unexpected bytes at {:#x}, not installed",
+                      offset);
+            return;
+        }
+    }
+    static constexpr std::array<u8, 6> Prologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57};
+    if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + BlockClear2FirstOffset), Prologue,
+                              0, BossClearEntry)) {
+        LOG_ERROR(Debug, "Bloodborne death rules: boss clear hook failed, not installed");
+        return;
+    }
+    for (const auto& [offset, expected] : HostDeathKick) {
+        std::memcpy(reinterpret_cast<void*>(base + offset), NoCall.data(), NoCall.size());
+    }
+    LOG_INFO(Debug, "Bloodborne death rules: on (watch in a boss fight{})",
+             EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARED_DEATH") ? ", and everywhere" : "");
 }
 
 // With a lobby the players meet without any bell: the host opens its room by itself and the
@@ -2469,6 +2782,7 @@ void ApplyFastMatching(u64 sos_status) {
 // Test aid, on with SHADPS4_BLOODBORNE_DEBUG_FILE=<file>: logs the session state when it changes
 // and runs one command line written to that file (the file is emptied once read):
 //   kill | hp <n> | bell <goods> | stop | regroup | warp <return point id> | gohost
+//   bossfight [off] | bosskill      (as the death rules see a boss fight)
 //   enemies | mark <max hp> | killmark     (the scan of enemies/mark stalls the game ~30 s)
 //   peek <image offset> [<offset> ...]             follows the pointer chain, dumps 8 qwords
 //   poke32 <value> <image offset> [<offset> ...]   writes a dword at the end of the chain
@@ -2613,6 +2927,16 @@ void ApplyDebugCommands() {
             WriteValue(data, DataModuleHpOffset, hp);
         }
         LOG_INFO(Debug, "Bloodborne debug: hp set to {} (player data {:#x})", hp, data);
+    } else if (command == "bossfight") {
+        // A boss fight as the death rules see it (on / off), and "bosskill" as if it died.
+        std::string on;
+        words >> on;
+        debug_boss_fight = on != "off";
+        LOG_INFO(Debug, "Bloodborne debug: boss fight {}", debug_boss_fight ? "on" : "off");
+    } else if (command == "bosskill") {
+        debug_boss_fight = false;
+        boss_killed_at_ms = SteadyMs();
+        LOG_INFO(Debug, "Bloodborne debug: boss killed");
     } else if (command == "warp") {
         // The headstone warp of the event scripts, by ReturnPointParam id (2412951 = Central Yharnam).
         s32 respawn_point = 0;
@@ -4313,7 +4637,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         ApplyEnemyScaling();
         ApplyRequestedBellUse();
         ApplyRequestedSessionStop();
-        ApplySharedDeathRule();
+        ApplyDeathRules();
         ApplyAutoRejoin();
         LogSummonRequests();
         ApplyLobbyHostRoom();
@@ -7422,6 +7746,7 @@ void InstallSeamlessCoopPatches() {
     InstallStayInSessionPatches(base);
     InstallFreeBellPatch(base);
     InstallGuestEqualPatches(base);
+    InstallDeathRulePatches(base);
     StartScaling();
     InstallNoFogWalls(base);
     InstallSessionHooks(base);

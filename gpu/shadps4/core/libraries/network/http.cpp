@@ -1810,6 +1810,7 @@ constexpr auto LobbyClaimFresh = std::chrono::seconds{15};
 struct LobbyGuest {
     nlohmann::json ad;
     bool has_ad = false;
+    bool dead = false; // the guest's character is down (dying or waiting for the others)
     LobbyClock::time_point seen{};
     LobbyClock::time_point claimed{};
 };
@@ -1828,8 +1829,13 @@ struct LobbyState {
     std::string placement;
     u64 host_room = 0;     // the room the host's game owns, for a direct join
     std::string host_npid; // the host's online id
+    // join: how many of the other players are alive, as the host last said (-1 unknown)
+    int others_alive = -1;
 };
 LobbyState g_lobby;
+// The local character is down: every game says so in the lobby, so that a player whose
+// copy still stands in the other games is not taken for alive (Core::Bloodborne death rules).
+std::atomic<bool> g_lobby_local_dead{false};
 
 std::string LobbyJsonText(const nlohmann::json& value) {
     return value.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
@@ -1864,6 +1870,15 @@ void RunLobbyHost(const LobbyConfig& config) {
                          req.remote_addr);
             }
             guest.seen = now;
+            guest.dead = body.value("dead", false);
+            // Alive for this guest: the host, and every other guest heard from lately.
+            int others_alive = g_lobby_local_dead ? 0 : 1;
+            for (const auto& [other_id, other] : g_lobby.guests) {
+                if (other_id != user_id && now - other.seen <= LobbyGuestTimeout && !other.dead) {
+                    ++others_alive;
+                }
+            }
+            answer["others_alive"] = others_alive;
             const auto ad = body.find("ad");
             guest.has_ad = ad != body.end() && ad->is_object();
             if (guest.has_ad) {
@@ -1906,6 +1921,7 @@ void RunLobbyJoin(const LobbyConfig& config) {
         {
             std::lock_guard lock(g_lobby.mutex);
             body["user_id"] = g_lobby.user_id;
+            body["dead"] = g_lobby_local_dead.load();
             if (g_lobby.has_ad) {
                 body["ad"] = g_lobby.ad;
             }
@@ -1933,6 +1949,8 @@ void RunLobbyJoin(const LobbyConfig& config) {
                     answer.is_object() ? answer.value("room_id", u64{0}) : u64{0};
                 g_lobby.host_npid =
                     answer.is_object() ? answer.value("host_npid", std::string{}) : std::string{};
+                g_lobby.others_alive =
+                    answer.is_object() ? answer.value("others_alive", -1) : -1;
                 if (claimed_ms_ago >= 0) {
                     const auto claim_at = now - std::chrono::milliseconds{claimed_ms_ago};
                     if (claim_at - g_lobby.claim_at > std::chrono::seconds{2}) {
@@ -2072,6 +2090,35 @@ int BloodborneLobbyBellGoods() {
     default:
         return 0;
     }
+}
+
+// The local character is down (true) or alive again (false), told to the other games.
+void BloodborneLobbySetLocalDead(bool dead) {
+    g_lobby_local_dead = dead;
+}
+
+// How many of the other players are alive, as far as the lobby knows: for the host, the guests
+// heard from in the last seconds that are not down; for a guest, what the host last answered.
+// -1 when the lobby knows nothing (no lobby, or no recent answer).
+int BloodborneLobbyOthersAlive() {
+    const LobbyRole role = GetLobbyConfig().role;
+    const auto now = LobbyClock::now();
+    std::lock_guard lock(g_lobby.mutex);
+    if (role == LobbyRole::Host) {
+        int seen = 0;
+        int alive = 0;
+        for (const auto& [id, guest] : g_lobby.guests) {
+            if (now - guest.seen <= LobbyGuestTimeout) {
+                ++seen;
+                alive += guest.dead ? 0 : 1;
+            }
+        }
+        return seen == 0 ? -1 : alive;
+    }
+    if (role == LobbyRole::Join && now - g_lobby.host_seen <= std::chrono::seconds{3}) {
+        return g_lobby.others_alive;
+    }
+    return -1;
 }
 
 // Whether the other side of the lobby is there: for the host, a guest that sent its
