@@ -6424,7 +6424,11 @@ void ApplyGuestReinsertAfterReload() {
             if (host_seen == 12) {
                 join_spot_until = std::min(join_spot_until, now + std::chrono::seconds{20});
             }
-            if (host_seen >= 12 && MoveToPartner(world_chr_man, player, 5.0f) > 0.0f) {
+            // Only while the host's notes put it in this map: a host that travelled on in the
+            // meantime has a position of another map, and the guest was moved there in mid-air
+            // (it fell through the world before its own follow loaded, first real session).
+            if (host_seen >= 12 && HostReturnPointHere() >= 0 &&
+                MoveToPartner(world_chr_man, player, 5.0f) > 0.0f) {
                 join_spot_until = {};
                 host_seen = 0;
             }
