@@ -6814,12 +6814,6 @@ static bool InstallGuestEqualPatches(u64 base) {
         // isChangeWanderGhost gets the ghost model; JZ (not a ghost NPC) becomes JMP.
         patches.push_back({"solid NPCs", 0x018E4FBF, {0x74, 0x1B}, {0xEB, 0x1B}, 0});
     }
-    if (ScalingEnabled()) {
-        // Lua_MultiDoping: CMP EAX,2 / JNZ (two guests: 7501) and CMP EAX,1 / JNZ (one: 7500);
-        // both JNZ become JMP, the boss gets the enemy scaling above instead.
-        patches.push_back({"no vanilla boss buff (2)", 0x0138BCC2, {0x75, 0x32}, {0xEB, 0x32}, 0});
-        patches.push_back({"no vanilla boss buff (1)", 0x0138BCF9, {0x75, 0x54}, {0xEB, 0x54}, 0});
-    }
     // Reliable-packet send 0x017894E0 ends the session ("OnIrregularLeaveSession") once 1001
     // packets wait for a member that does not answer, about 6 minutes; allow 30000.
     patches.push_back(
@@ -6886,16 +6880,20 @@ void ApplyGuestHpCut() {
 }
 
 // ---- Enemy scaling (as BBSC does it, like Elden Ring Seamless Co-op) ----
-// Vanilla gives a boss SpEffect 7500 (HP x1.5) with one guest or 7501 (x2.0) with two, from the
-// boss scripts' Lua_MultiDoping (0x0138BC70); normal enemies get nothing. Instead, every enemy
-// is made stronger for every guest in the session:
-//  - the HP-only row 7500 is copied over SpEffect 7502 (enemies) and 7503 (bosses), which the
-//    game never uses;
-//  - 7502 / 7503 go into a free spEffectID slot (+72, 8 slots of s32, -1 = free) of every
-//    NpcParam row of an enemy (teamType +303 = 23; a boss also has isSoulGetByBoss, +329 bit 4),
-//    so every enemy carries the effect from its spawn;
-//  - the two rows (maxHpRate +16, attack power rates +72..+84) and every enemy row's
-//    superArmorDurability (+280, s16: stagger) are rewritten when the number of guests changes.
+// Vanilla gives a boss SpEffect 7500 (HP x1.5) with one guest or 7501 (x2.0) with two when its
+// fight starts: the boss event scripts do it (SetSpEffect, 39 boss characters in all maps, e.g.
+// 12414702 for the Cleric Beast) and so does the Lua_MultiDoping of boss scripts
+// (0x0138BC70); normal enemies get nothing. Instead, every enemy is made stronger for every
+// guest in the session:
+//  - the HP-only row 7500 is copied over SpEffect 7502, which the game never uses, and 7502
+//    goes into a free spEffectID slot (+72, 8 slots of s32, -1 = free) of every NpcParam row of
+//    an enemy (teamType +303 = 23), so every enemy carries it from its spawn;
+//  - a boss is what the game itself marks with 7500 / 7501 in a co-op fight (isSoulGetByBoss,
+//    +329 bit 4, is missing on bosses such as the Cleric Beast, NpcParam 7xxxxx rows), so those
+//    two rows are rewritten to the rest of the boss's share: boss rate / enemy rate;
+//  - 7502 (maxHpRate +16, attack power rates +72..+84), 7500 / 7501 (+16) and every enemy row's
+//    superArmorDurability (+280, s16: stagger; +329 bit 4 rows take the boss share) are
+//    rewritten when the number of guests changes.
 // The param tables are found in memory by their header: the type name at +0x0C, the row count
 // (u16) at +0x0A, from +0x40 index entries of 0x18 bytes (u32 id, u64 data offset at +8).
 // The same scan clears NpcParam's isChangeWanderGhost (+0x145 bit 7), which together with the
@@ -6906,8 +6904,8 @@ void ApplyGuestHpCut() {
 namespace {
 constexpr size_t SpEffectRowSize = 528;
 constexpr u32 ScaleTemplateEffect = 7500;
+constexpr u32 VanillaBossEffectTwo = 7501;
 constexpr s32 EnemyScaleEffect = 7502;
-constexpr s32 BossScaleEffect = 7503;
 
 struct ScaledNpc {
     u64 row;
@@ -7033,20 +7031,21 @@ bool PrepareScaling() {
     size_t ghosts = 0;
     for (const ParamTable& table : speffect_tables) {
         const u64 source = FindParamRow(table, ScaleTemplateEffect, SpEffectRowSize);
+        const u64 two = FindParamRow(table, VanillaBossEffectTwo, SpEffectRowSize);
         const u64 enemy = FindParamRow(table, EnemyScaleEffect, SpEffectRowSize);
-        const u64 boss = FindParamRow(table, BossScaleEffect, SpEffectRowSize);
-        if (source == 0 || enemy == 0 || boss == 0 || PeekParam<float>(source + 16) != 1.5F) {
+        if (source == 0 || two == 0 || enemy == 0 || PeekParam<float>(source + 16) != 1.5F ||
+            PeekParam<float>(two + 16) != 2.0F) {
             continue;
         }
         std::array<u8, SpEffectRowSize> clean{};
         std::memcpy(clean.data(), reinterpret_cast<const void*>(source), clean.size());
-        if (!IsWritableParam(enemy, clean.size()) || !IsWritableParam(boss, clean.size())) {
+        if (!IsWritableParam(enemy, clean.size())) {
             continue;
         }
         std::memcpy(reinterpret_cast<void*>(enemy), clean.data(), clean.size());
-        std::memcpy(reinterpret_cast<void*>(boss), clean.data(), clean.size());
         rows_enemy.push_back(enemy);
-        rows_boss.push_back(boss);
+        rows_boss.push_back(source);
+        rows_boss.push_back(two);
     }
     const bool ghost_npcs = EnvFlagEnabled("SHADPS4_BLOODBORNE_GHOST_NPCS");
     for (const ParamTable& table : npc_tables) {
@@ -7067,7 +7066,7 @@ bool PrepareScaling() {
             if (team != 23 || rows_enemy.empty()) {
                 continue;
             }
-            const s32 effect = boss ? BossScaleEffect : EnemyScaleEffect;
+            const s32 effect = EnemyScaleEffect;
             bool placed = false;
             for (size_t slot = 0; slot < 8 && !placed; ++slot) {
                 placed = PeekParam<s32>(row + 72 + slot * 4) == effect;
@@ -7090,16 +7089,15 @@ bool PrepareScaling() {
                  rows_enemy.size(), npcs.size());
         return false;
     }
-    const auto bosses = std::ranges::count_if(npcs, [](const ScaledNpc& npc) { return npc.boss; });
     LOG_INFO(Debug,
              "Bloodborne enemy scaling: {} SpEffect / {} NpcParam table(s) found in {} ms; {} "
-             "enemy and {} boss rows carry the effect ({} without a free slot); {} NPC rows "
-             "no longer grey ghosts",
+             "enemy rows carry the effect ({} without a free slot), bosses by 7500 / 7501; {} "
+             "NPC rows no longer grey ghosts",
              speffect_tables.size(), npc_tables.size(),
              std::chrono::duration_cast<std::chrono::milliseconds>(
                  std::chrono::steady_clock::now() - started)
                  .count(),
-             npcs.size() - bosses, bosses, full, ghosts);
+             npcs.size(), full, ghosts);
     std::scoped_lock lock{scaling_mutex};
     scale_rows_enemy = std::move(rows_enemy);
     scale_rows_boss = std::move(rows_boss);
@@ -7190,7 +7188,7 @@ void FixScaledMaxHp() {
             const s32 max_hp = ReadValue<s32>(data, 0xFC);
             if (count_now) {
                 ++characters;
-                if (HasPlayerEffect(chr, EnemyScaleEffect) || HasPlayerEffect(chr, BossScaleEffect)) {
+                if (HasPlayerEffect(chr, EnemyScaleEffect)) {
                     ++carrying;
                     if (sample.size() < 80) {
                         sample += fmt::format(" {}/{}", hp, max_hp);
@@ -7248,8 +7246,9 @@ void ApplyEnemyScaling() {
     for (const u64 row : scale_rows_enemy) {
         write_row(row, rate(enemy_hp));
     }
+    // A boss carries 7502 and, from its fight's start, 7500 or 7501: the rest of its share.
     for (const u64 row : scale_rows_boss) {
-        write_row(row, rate(boss_hp));
+        PokeParam(row + 16, rate(boss_hp) / rate(enemy_hp));
     }
     for (const ScaledNpc& npc : scaled_npcs) {
         const float armor =
@@ -7913,7 +7912,7 @@ void InstallSeamlessCoopPatches() {
     }
     if (!InstallGuestEqualPatches(base)) {
         InstallFailed("the full-guest patches (SHADPS4_BLOODBORNE_GUEST_HALF_REWARDS=1, "
-                      "SHADPS4_BLOODBORNE_GHOST_NPCS=1, SHADPS4_BLOODBORNE_SCALING=0)");
+                      "SHADPS4_BLOODBORNE_GHOST_NPCS=1)");
     }
     if (!InstallDeathRulePatches(base)) {
         InstallFailed("the boss-fight death rules (SHADPS4_BLOODBORNE_SPECTATE=0 plays without "

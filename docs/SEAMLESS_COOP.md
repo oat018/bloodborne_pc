@@ -65,7 +65,12 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   undelivered packets (the game's limit of 1001 is raised to 30000).
 - Enemies get stronger for every guest (new after v2.5, as in BBSC and Elden Ring Seamless
   Co-op): per guest +40% HP for normal enemies, +100% for bosses, +15% damage, +15% / +20%
-  stagger resistance. The game's own boss buff (x1.5 HP with one guest) is replaced by it.
+  stagger resistance. A boss is what the game itself marks in a co-op fight: its fight scripts
+  give the boss the vanilla buff (SpEffect 7500 / 7501, x1.5 / x2.0 HP), whose rate is turned
+  into the rest of the boss share, so the boss ends at the boss rate (the Cleric Beast with one
+  guest: 3015 -> 6031 HP, checked in a real fight). The param flag isSoulGetByBoss is not used
+  for that: the Cleric Beast does not have it, and a flagged boss used to get the boss rate
+  times the vanilla buff (x3.0).
   Percentages: `SHADPS4_BLOODBORNE_SCALE_ENEMY_HP`, `_SCALE_BOSS_HP`, `_SCALE_DAMAGE`,
   `_SCALE_ENEMY_STAGGER`, `_SCALE_BOSS_STAGGER` (set the same on every player);
   `SHADPS4_BLOODBORNE_SCALING=0` keeps the game's rule. The enemy tables are found in memory
