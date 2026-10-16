@@ -2949,9 +2949,9 @@ void ApplyDebugCommands() {
     const PartnerState partners =
         world_chr_man >= 0x10000 ? GetPartnerState(world_chr_man, player) : PartnerState{};
     std::string status = fmt::format(
-        "map={:#x} hp={} chr_type={} partners={}/{} mp_state={} loading={}/{} death_latch={} "
-        "beckoning={} resonant={}",
-        GetCurrentPackedMap(), data != 0 ? ReadValue<s32>(data, DataModuleHpOffset) : -1,
+        "map={:#x} boss_bar={:d} hp={} chr_type={} partners={}/{} mp_state={} loading={}/{} "
+        "death_latch={} beckoning={} resonant={}",
+        GetCurrentPackedMap(), BossBarUp(), data != 0 ? ReadValue<s32>(data, DataModuleHpOffset) : -1,
         player >= 0x10000 ? ReadValue<s32>(player, 0x78) : -1, partners.alive, partners.count,
         multi_play >= 0x10000 ? ReadValue<s32>(multi_play, 0x124) : -1,
         state >= 0x10000 ? ReadValue<u8>(state, 0x08) : 0xFF,
@@ -3196,8 +3196,12 @@ void ApplyDebugCommands() {
                      highest_max_hp, killed);
         }
         if (command == "mark") {
-            LOG_INFO(Debug, "Bloodborne debug: marked the {} max hp character: {:#x}", wanted_max_hp,
-                     done ? marked_character : 0);
+            const u64 where = done ? GetChrTransform(marked_character) : 0;
+            LOG_INFO(Debug, "Bloodborne debug: marked the {} max hp character: {:#x} at {:.1f} {:.1f} {:.1f}",
+                     wanted_max_hp, done ? marked_character : 0,
+                     where != 0 ? ReadValue<float>(where, 0x1E0) : 0.0f,
+                     where != 0 ? ReadValue<float>(where, 0x1E4) : 0.0f,
+                     where != 0 ? ReadValue<float>(where, 0x1E8) : 0.0f);
         }
     } else if (command == "bell") {
         s32 goods_id = 0;
