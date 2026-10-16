@@ -258,5 +258,9 @@ int P2PMatching2RecvFrom(void* buf, u32 len, u32* from_addr, u16* from_port);
 /// the fresh notes of those peers (entries of entry_size bytes). Returns the count.
 int P2PSeamlessBroadcast(const void* data, u32 len);
 int P2PSeamlessCollect(void* out, u32 entry_size, u32 max_entries);
+/// Seamless co-op messages (up to a datagram) to the same peers, and the oldest one received
+/// (0 when none). Returns the peer count / the size.
+int P2PSeamlessSendMessage(const void* data, u32 len);
+int P2PSeamlessReceiveMessage(void* out, u32 len);
 
 } // namespace Libraries::Net

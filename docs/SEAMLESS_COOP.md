@@ -74,7 +74,14 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   Percentages: `SHADPS4_BLOODBORNE_SCALE_ENEMY_HP`, `_SCALE_BOSS_HP`, `_SCALE_DAMAGE`,
   `_SCALE_ENEMY_STAGGER`, `_SCALE_BOSS_STAGGER` (set the same on every player);
   `SHADPS4_BLOODBORNE_SCALING=0` keeps the game's rule. The enemy tables are found in memory
-  about 6 s after the game starts. Hostile NPC hunters are not scaled.
+  about 6 s after the game starts. Hostile NPC hunters are not scaled. An enemy keeps the rate it
+  spawned with, so when the guest count changes the host's enemies already spawned are rescaled.
+- Enemy sync (new after v3.1): an enemy has the same handle on both games (chr+0x08), and the host
+  sends every enemy's HP and maximum HP of its map once a second on a seamless message port of the
+  P2P transport (virtual port 0xfefe). A guest in the same map takes the maximum at once and the HP
+  after 1.5 s of disagreement, so its own hits on their way to the host are not undone. After a
+  reload in a session the guest's enemies stay in step with the host's.
+  `SHADPS4_BLOODBORNE_ENEMY_SYNC=0` turns it off. Both players need this build.
 - No co-op fog walls (new after v2.5, as in BBSC): the walls the game raises around an area
   while a session is up stay down, so the players can walk on into the next area. Boss fog
   walls stay. A floor guard keeps a character standing on a part of the map one game has

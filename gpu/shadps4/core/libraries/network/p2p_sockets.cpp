@@ -76,6 +76,7 @@ namespace {
 
 constexpr u16 kSignalingVPortNbo = 0xffff;
 constexpr u16 kSeamlessNoteVPortNbo = 0xfeff; // not a port a game binds
+constexpr u16 kSeamlessMessageVPortNbo = 0xfefe; // seamless co-op messages (enemy states)
 constexpr size_t kVPortHeaderSize = 4;
 // The shadPS4 team's shadNet server frames its UDP (STUN) packets as a PS4 P2P datagram:
 // [0xFF][0x80 | 3][src vport FFFF][dst vport FFFF][payload]. The shadp2p server takes the
@@ -455,6 +456,45 @@ public:
         return static_cast<int>(targets.size());
     }
 
+    // Seamless co-op messages: larger than a note (up to a datagram), to the same peers; every
+    // message received is kept in order until read (at most 64).
+    int BroadcastMessage(const void* data, u32 len) {
+        std::vector<std::pair<u32, u16>> targets;
+        {
+            const auto now = std::chrono::steady_clock::now();
+            std::lock_guard lock(note_mutex);
+            for (const auto& peer : peer_notes) {
+                if (now - peer.seen < std::chrono::seconds{10}) {
+                    targets.emplace_back(peer.addr, peer.port);
+                }
+            }
+        }
+        for (const auto& [addr, port] : targets) {
+            SendFrame(kSeamlessMessageVPortNbo, kSeamlessMessageVPortNbo, data, len, addr, port);
+        }
+        return static_cast<int>(targets.size());
+    }
+
+    void PushMessage(const u8* data, size_t size) {
+        std::lock_guard lock(note_mutex);
+        if (seamless_messages.size() >= 64) {
+            seamless_messages.pop_front();
+        }
+        seamless_messages.emplace_back(data, data + size);
+    }
+
+    int PopMessage(void* out, u32 len) {
+        std::lock_guard lock(note_mutex);
+        if (seamless_messages.empty()) {
+            return 0;
+        }
+        const auto& message = seamless_messages.front();
+        const u32 size = static_cast<u32>(std::min<size_t>(message.size(), len));
+        std::memcpy(out, message.data(), size);
+        seamless_messages.pop_front();
+        return static_cast<int>(size);
+    }
+
     int CollectNotes(void* out, u32 entry_size, u32 max_entries) {
         const auto now = std::chrono::steady_clock::now();
         std::lock_guard lock(note_mutex);
@@ -640,6 +680,10 @@ private:
                 NotePeer(from.sin_addr.s_addr, from.sin_port, payload, payload_size);
                 continue;
             }
+            if (dest_vport_nbo == kSeamlessMessageVPortNbo) {
+                PushMessage(payload, payload_size);
+                continue;
+            }
 
             std::lock_guard lock(registry_mutex);
             const auto it = game_sockets.find(dest_vport_nbo);
@@ -684,6 +728,7 @@ private:
     };
     std::mutex note_mutex;
     std::vector<PeerNote> peer_notes;
+    std::deque<std::vector<u8>> seamless_messages;
 
     std::mutex registry_mutex;
     std::unordered_map<u16, P2PSocket*> game_sockets;
@@ -1281,6 +1326,15 @@ int P2PSeamlessBroadcast(const void* data, u32 len) {
 
 int P2PSeamlessCollect(void* out, u32 entry_size, u32 max_entries) {
     return P2PTransport::Instance().CollectNotes(out, entry_size, max_entries);
+}
+
+int P2PSeamlessSendMessage(const void* data, u32 len) {
+    return P2PTransport::Instance().IsReady() ? P2PTransport::Instance().BroadcastMessage(data, len)
+                                              : 0;
+}
+
+int P2PSeamlessReceiveMessage(void* out, u32 len) {
+    return P2PTransport::Instance().PopMessage(out, len);
 }
 
 int P2PMatching2SendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port) {

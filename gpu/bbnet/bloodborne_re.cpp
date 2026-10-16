@@ -78,6 +78,8 @@ u64 BloodborneOwnedRoomId();
 namespace Libraries::Net {
 int P2PSeamlessBroadcast(const void* data, u32 len);
 int P2PSeamlessCollect(void* out, u32 entry_size, u32 max_entries);
+int P2PSeamlessSendMessage(const void* data, u32 len);
+int P2PSeamlessReceiveMessage(void* out, u32 len);
 } // namespace Libraries::Net
 
 namespace Core::Bloodborne {
@@ -85,6 +87,7 @@ void ApplyGuestReinsertAfterReload();
 void ApplySharedProgressTick();
 void ApplyGuestHpCut();
 void ApplyEnemyScaling();
+void ApplyEnemySync();
 bool ScalingEnabled();
 // The game's list of CSMultiPlayerIns tasks, known once one has been created.
 static std::uint64_t multi_player_ins_manager{};
@@ -3321,6 +3324,46 @@ void ApplyDebugCommands() {
     } else if (command == "gohost") {
         const float moved = MoveToPartner(world_chr_man, player, 0.0f);
         LOG_INFO(Debug, "Bloodborne debug: gohost {}", moved);
+    } else if (command == "chrs") {
+        // chrs: every character of the loaded map blocks (as FixScaledMaxHp walks them): block,
+        // index, the block's head dwords, the entry's dwords, the character's +0x08 dwords,
+        // position, HP / max HP and character type; to match the same enemy on two games.
+        const u64 blocks_info = world_chr_man >= 0x10000 ? ReadValue<u64>(world_chr_man, 0x08) : 0;
+        const s32 block_count =
+            blocks_info >= 0x10000 ? std::clamp(ReadValue<s32>(blocks_info, 0x18) + 2, 0, 64) : 0;
+        for (s32 b = 0; b < block_count; ++b) {
+            const u64 block = ReadValue<u64>(world_chr_man, 0x850 + static_cast<size_t>(b) * 8);
+            const s32 count = block >= 0x10000 ? ReadValue<s32>(block, 0) : 0;
+            const u64 entries = count > 0 && count <= 0x3FFF ? ReadValue<u64>(block, 8) : 0;
+            if (entries < 0x10000) {
+                continue;
+            }
+            LOG_INFO(Debug, "Bloodborne debug: chrs block {} at {:#x} count {} head {:#x} {:#x} {:#x} {:#x} {:#x} {:#x}",
+                     b, block, count, ReadValue<u32>(block, 0x10), ReadValue<u32>(block, 0x14),
+                     ReadValue<u32>(block, 0x18), ReadValue<u32>(block, 0x1C), ReadValue<u32>(block, 0x20),
+                     ReadValue<u32>(block, 0x24));
+            for (s32 i = 0; i < count && i < 400; ++i) {
+                const u64 entry = entries + static_cast<u64>(i) * 0x38;
+                const u64 chr = ReadValue<u64>(entry, 0);
+                const u64 data = chr >= 0x10000 ? GetChrDataModule(chr) : 0;
+                const u64 where = chr >= 0x10000 ? GetChrTransform(chr) : 0;
+                if (chr < 0x10000 || data == 0) {
+                    continue;
+                }
+                LOG_INFO(Debug,
+                         "Bloodborne debug: chrs {}:{} e {:#x} {:#x} {:#x} {:#x} c8 {:#x} {:#x} {:#x} {:#x} "
+                         "at {:.1f} {:.1f} {:.1f} hp {}/{} t{}",
+                         b, i, ReadValue<u32>(entry, 8), ReadValue<u32>(entry, 0xC),
+                         ReadValue<u32>(entry, 0x10), ReadValue<u32>(entry, 0x14),
+                         ReadValue<u32>(chr, 0x08), ReadValue<u32>(chr, 0x0C), ReadValue<u32>(chr, 0x10),
+                         ReadValue<u32>(chr, 0x14),
+                         where != 0 ? ReadValue<float>(where, 0x1E0) : 0.0f,
+                         where != 0 ? ReadValue<float>(where, 0x1E4) : 0.0f,
+                         where != 0 ? ReadValue<float>(where, 0x1E8) : 0.0f,
+                         ReadValue<s32>(data, DataModuleHpOffset), ReadValue<s32>(data, 0xFC),
+                         ReadValue<s32>(chr, 0x78));
+            }
+        }
     } else if (command == "pos" || command == "goto") {
         // pos: the player's position; goto <x> <y> <z>: placed there (same map)
         const u64 own = GetChrTransform(player);
@@ -4802,6 +4845,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         ApplySharedProgressTick();
         ApplyGuestHpCut();
         ApplyEnemyScaling();
+        ApplyEnemySync();
         ApplyRequestedBellUse();
         ApplyRequestedSessionStop();
         ApplyDeathRules();
@@ -7296,6 +7340,212 @@ void FixScaledMaxHp() {
     }
 }
 
+// Every character of the loaded map blocks but the players: block (h >> 14) & 0x3F of
+// [WorldChrMan+0x850 + block*8] (+0 count, +8 entries of 0x38 with the character at +0), as the
+// boss bar decodes the handles. visit(character, its data module).
+template <typename Visit>
+void ForEachMapEnemy(Visit&& visit) {
+    const u64 world_chr = ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0);
+    if (world_chr < 0x10000) {
+        return;
+    }
+    std::array<u64, 8> players{};
+    const s32 player_count = std::min(ReadValue<s32>(world_chr, WorldChrManCountOffset), 8);
+    const u64 player_entries = ReadValue<u64>(world_chr, WorldChrManEntriesOffset);
+    for (s32 index = 0; player_entries >= 0x10000 && index < player_count; ++index) {
+        players[index] = ReadValue<u64>(player_entries, index * WorldChrManEntrySize);
+    }
+    players[7] = ReadValue<u64>(world_chr, 0x60);
+    const u64 blocks_info = ReadValue<u64>(world_chr, 0x08);
+    const s32 block_count =
+        blocks_info >= 0x10000 ? std::clamp(ReadValue<s32>(blocks_info, 0x18) + 2, 0, 64) : 0;
+    for (s32 b = 0; b < block_count; ++b) {
+        const u64 block = ReadValue<u64>(world_chr, 0x850 + static_cast<size_t>(b) * 8);
+        const s32 count = block >= 0x10000 ? ReadValue<s32>(block, 0) : 0;
+        const u64 entries = count > 0 && count <= 0x3FFF ? ReadValue<u64>(block, 8) : 0;
+        for (s32 i = 0; entries >= 0x10000 && i < count; ++i) {
+            const u64 chr = ReadValue<u64>(entries, static_cast<size_t>(i) * 0x38);
+            if (chr < 0x10000 || std::ranges::find(players, chr) != players.end()) {
+                continue;
+            }
+            if (const u64 data = ReadValue<u64>(ReadValue<u64>(chr, ChrModulesOffset),
+                                                ChrDataModuleOffset);
+                data >= 0x10000) {
+                visit(chr, data);
+            }
+        }
+    }
+}
+
+// ---- Enemy sync ----
+// Both games build the map's enemies from the same map data, so an enemy has the same handle
+// (chr+0x08, e.g. 0x10014007) on both. The game keeps them in step while both worlds stay
+// loaded, but a guest whose world reloads in the session (a death, a lantern) gets fresh
+// enemies of its own: alive where the host killed them, full where the host's are hurt (first
+// real session). And an enemy keeps the scaling it spawned with, so the host's older enemies
+// and the guest's newer ones had different maximum HP. The host is the authority: once a
+// second it sends every enemy's HP and maximum HP of its map; a guest in the same map takes the
+// maximum at once and the HP after 1.5 s of disagreement (so that a hit of the guest's own,
+// on its way to the host, is not undone). SHADPS4_BLOODBORNE_ENEMY_SYNC=0 turns it off.
+namespace {
+constexpr u32 EnemySyncMagic = 0x434E5953; // "SYNC"
+struct EnemySyncHeader {
+    u32 magic;
+    u32 map;
+    u32 sequence;
+    u16 count;
+    u16 part;
+};
+struct EnemySyncEntry {
+    u32 handle;
+    s32 hp;
+    s32 max_hp;
+};
+constexpr size_t EnemySyncPerMessage = 90; // 12 + 90 * 12 bytes: one datagram
+struct EnemySyncTarget {
+    s32 hp;
+    s32 max_hp;
+    s64 received_ms;
+    s64 apart_since_ms;
+};
+std::unordered_map<u32, EnemySyncTarget> enemy_sync_targets; // game thread only
+} // namespace
+
+bool EnemySyncEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("SHADPS4_BLOODBORNE_ENEMY_SYNC");
+        return value == nullptr || std::string_view{value} != "0";
+    }();
+    return enabled;
+}
+
+void ApplyEnemySync() {
+    if (!EnemySyncEnabled()) {
+        return;
+    }
+    const u64 multi_play = GetMatchingState();
+    const s32 session = multi_play >= 0x10000 ? ReadValue<s32>(multi_play, 0x124) : 0;
+    const u64 state = GetGlobalState();
+    const bool loaded = state >= 0x10000 && ReadValue<u8>(state, 0x08) == 0 &&
+                        ReadValue<u8>(state, 0x1520) == 0;
+    const s64 now = SteadyMs();
+    const u32 map = GetCurrentPackedMap();
+    if (session != 6) {
+        enemy_sync_targets.clear();
+        std::array<u8, 1200> drain{};
+        while (Libraries::Net::P2PSeamlessReceiveMessage(drain.data(), drain.size()) > 0) {
+        }
+    }
+    if (session == 3 && loaded) {
+        static s64 next_send_ms = 0;
+        static u32 sequence = 0;
+        if (now < next_send_ms) {
+            return;
+        }
+        next_send_ms = now + 1000;
+        std::vector<EnemySyncEntry> entries;
+        ForEachMapEnemy([&](u64 chr, u64 data) {
+            const s32 max_hp = ReadValue<s32>(data, 0xFC);
+            if (max_hp > 0 && max_hp <= 500000) {
+                entries.push_back({ReadValue<u32>(chr, 0x08),
+                                   std::clamp(ReadValue<s32>(data, DataModuleHpOffset), 0, max_hp),
+                                   max_hp});
+            }
+        });
+        ++sequence;
+        for (size_t first = 0, part = 0; first < entries.size(); first += EnemySyncPerMessage, ++part) {
+            const size_t count = std::min(EnemySyncPerMessage, entries.size() - first);
+            std::array<u8, sizeof(EnemySyncHeader) + EnemySyncPerMessage * sizeof(EnemySyncEntry)>
+                message{};
+            const EnemySyncHeader header{EnemySyncMagic, map, sequence, static_cast<u16>(count),
+                                         static_cast<u16>(part)};
+            std::memcpy(message.data(), &header, sizeof(header));
+            std::memcpy(message.data() + sizeof(header), entries.data() + first,
+                        count * sizeof(EnemySyncEntry));
+            Libraries::Net::P2PSeamlessSendMessage(
+                message.data(), static_cast<u32>(sizeof(header) + count * sizeof(EnemySyncEntry)));
+        }
+        return;
+    }
+    if (session != 6) {
+        return;
+    }
+    // Guest: take what came (the host's map only), then put this world's enemies in step.
+    std::array<u8, 1200> message{};
+    for (int size; (size = Libraries::Net::P2PSeamlessReceiveMessage(message.data(),
+                                                                      message.size())) > 0;) {
+        EnemySyncHeader header{};
+        if (static_cast<size_t>(size) < sizeof(header)) {
+            continue;
+        }
+        std::memcpy(&header, message.data(), sizeof(header));
+        if (header.magic != EnemySyncMagic || header.count > EnemySyncPerMessage ||
+            sizeof(header) + header.count * sizeof(EnemySyncEntry) > static_cast<size_t>(size) ||
+            (header.map & 0xFFFF0000) != (map & 0xFFFF0000)) {
+            continue;
+        }
+        for (u16 index = 0; index < header.count; ++index) {
+            EnemySyncEntry entry{};
+            std::memcpy(&entry, message.data() + sizeof(header) + index * sizeof(entry),
+                        sizeof(entry));
+            if (entry.max_hp <= 0 || entry.max_hp > 500000 || entry.hp < 0 ||
+                entry.hp > entry.max_hp) {
+                continue;
+            }
+            auto& target = enemy_sync_targets[entry.handle];
+            target.hp = entry.hp;
+            target.max_hp = entry.max_hp;
+            target.received_ms = now;
+        }
+    }
+    static s64 next_apply_ms = 0;
+    if (!loaded || now < next_apply_ms) {
+        return;
+    }
+    next_apply_ms = now + 500;
+    int maxima = 0;
+    int corrected = 0;
+    int killed = 0;
+    ForEachMapEnemy([&](u64 chr, u64 data) {
+        const auto found = enemy_sync_targets.find(ReadValue<u32>(chr, 0x08));
+        if (found == enemy_sync_targets.end() || now - found->second.received_ms > 4000) {
+            return;
+        }
+        EnemySyncTarget& target = found->second;
+        const s32 hp = ReadValue<s32>(data, DataModuleHpOffset);
+        const s32 max_hp = ReadValue<s32>(data, 0xFC);
+        if (max_hp != target.max_hp && WriteValue<s32>(data, 0xFC, target.max_hp)) {
+            ++maxima;
+        }
+        const s32 tolerance = std::max(3, target.max_hp / 50);
+        const bool apart = (target.hp == 0 && hp > 0) || (target.hp > 0 && hp <= 0) ||
+                           std::abs(hp - target.hp) > tolerance;
+        if (!apart) {
+            target.apart_since_ms = 0;
+            return;
+        }
+        if (target.apart_since_ms == 0) {
+            target.apart_since_ms = now;
+            return;
+        }
+        // A character this game has already let die is not brought back.
+        if (now - target.apart_since_ms >= 1500 && hp > 0 &&
+            WriteValue<s32>(data, DataModuleHpOffset, target.hp)) {
+            target.apart_since_ms = 0;
+            ++corrected;
+            killed += target.hp == 0 ? 1 : 0;
+        }
+    });
+    static int logged = 0;
+    if ((maxima > 0 || corrected > 0) && logged < 40) {
+        ++logged;
+        LOG_INFO(Debug,
+                 "Bloodborne enemy sync: {} maximum HP and {} HP taken from the host ({} of "
+                 "them dead there)",
+                 maxima, corrected, killed);
+    }
+}
+
 void ApplyEnemyScaling() {
     using clock = std::chrono::steady_clock;
     static clock::time_point next_check{};
@@ -7339,6 +7589,33 @@ void ApplyEnemyScaling() {
             static_cast<float>(npc.armor) * rate(npc.boss ? boss_stagger : enemy_stagger);
         PokeParam(npc.row + 280, static_cast<s16>(std::min(armor, 32767.0F)));
     }
+    // An enemy keeps the rate it spawned with: the host's enemies that were there before the
+    // guest count changed get the new rate here (the guest's, spawned anew, already have it,
+    // and the enemy sync gives the guest the host's values).
+    static float written_rate = 1.0F;
+    const float new_rate = rate(enemy_hp);
+    const u64 session_man = GetMatchingState();
+    if (written >= 0 && new_rate != written_rate && session_man >= 0x10000 &&
+        ReadValue<s32>(session_man, 0x124) != 6) {
+        const float ratio = new_rate / written_rate;
+        int rescaled = 0;
+        ForEachMapEnemy([&](u64 chr, u64 data) {
+            const s32 max_hp = ReadValue<s32>(data, 0xFC);
+            const s32 hp = ReadValue<s32>(data, DataModuleHpOffset);
+            if (max_hp <= 0 || !HasPlayerEffect(chr, EnemyScaleEffect)) {
+                return;
+            }
+            WriteValue<s32>(data, 0xFC, static_cast<s32>(std::lround(max_hp * ratio)));
+            if (hp > 0) {
+                WriteValue<s32>(data, DataModuleHpOffset,
+                                std::max(1, static_cast<s32>(std::lround(hp * ratio))));
+            }
+            ++rescaled;
+        });
+        LOG_INFO(Debug, "Bloodborne enemy scaling: {} enemies already spawned rescaled x{:.2f}",
+                 rescaled, ratio);
+    }
+    written_rate = new_rate;
     written = guests;
     LOG_INFO(Debug,
              "Bloodborne enemy scaling: {} guest(s) -> enemies HP x{:.2f}, bosses HP x{:.2f}, "
