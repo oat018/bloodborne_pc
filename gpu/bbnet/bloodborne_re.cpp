@@ -1950,6 +1950,33 @@ void AwardItemLot(s32 lot) {
 }
 constexpr s32 DeathLatchBusy = 4;
 std::atomic<bool> requested_death_release{};
+// This game ended its own session (its leave key, or a death that runs): the guest's "session
+// ended under me, go home" step is not for that.
+std::atomic<bool> own_session_end{};
+
+// A death that runs (not held, or released) ends the session, so that every guest goes home and
+// comes back through the lobby: the game's join sends the host's world to the guest (enemies
+// alive or dead, their HP). Kept through a reload the two worlds drift apart: after a death the
+// guest had its own fresh enemies (first real session). Off unless
+// SHADPS4_BLOODBORNE_DEATH_REJOIN=1: the user chose to keep the session through deaths and to sync
+// the enemies instead (2026-10-16).
+bool DeathRejoinEnabled() {
+    static const bool enabled = EnvFlagEnabled("SHADPS4_BLOODBORNE_DEATH_REJOIN");
+    return enabled;
+}
+
+void EndSessionForDeath(u64 multi_play, s32 session) {
+    if (!DeathRejoinEnabled() || multi_play < 0x10000 || (session != 3 && session != 6)) {
+        return;
+    }
+    using MultiPlayStop = bool PS4_SYSV_ABI (*)(u64 multi_play);
+    own_session_end.store(true);
+    const bool stopped =
+        reinterpret_cast<MultiPlayStop>(image_base + MultiPlayStopRequestOffset)(multi_play);
+    LOG_INFO(Debug, "Bloodborne death rules: the session ends with this death ({}); the guest "
+                    "comes back through the lobby",
+             stopped ? "stopped" : "stop refused");
+}
 
 u64 GetChrDataModule(u64 chr) {
     const u64 modules = chr >= 0x10000 ? ReadValue<u64>(chr, ChrModulesOffset) : 0;
@@ -2284,6 +2311,7 @@ void ApplyDeathRules() {
                      boss_fight ? " in a boss fight" : "", alive);
         } else {
             phase = Phase::Released;
+            EndSessionForDeath(multi_play, session);
         }
         break;
     }
@@ -2314,6 +2342,7 @@ void ApplyDeathRules() {
             WriteValue(latch_owner, 8, s32{0});
             phase = Phase::Released;
             LOG_INFO(Debug, "Bloodborne death rules: the game's death runs ({})", why);
+            EndSessionForDeath(multi_play, session);
         } else if (latch <= 0) {
             WriteValue(latch_owner, 8, DeathLatchBusy);
         }
@@ -3304,14 +3333,20 @@ void ApplyDebugCommands() {
         const u64 map_manager = ReadValue<u64>(image_base + MapManagerPointerOffset, 0);
         if (command == "goto" && own != 0 && map_manager >= 0x10000) {
             words >> std::dec >> position[0] >> position[1] >> position[2];
+            // goto <x> <y> <z> <yaw degrees>: also turned (the transform keeps the yaw in
+            // radians at +0x1D4)
+            if (float yaw = 0.0f; words >> yaw) {
+                orientation = {0.0f, yaw * 3.14159265f / 180.0f, 0.0f, 0.0f};
+            }
             s32 block = ReadValue<s32>(player, 0x3F8);
             using Place = void PS4_SYSV_ABI (*)(u64 map_manager, s32* block, float* position,
                                                 float* orientation);
             reinterpret_cast<Place>(image_base + SameMapPlacementOffset)(
                 map_manager, &block, position.data(), orientation.data());
         }
-        LOG_INFO(Debug, "Bloodborne debug: {} {:.1f} {:.1f} {:.1f}", command, position[0],
-                 position[1], position[2]);
+        LOG_INFO(Debug, "Bloodborne debug: {} {:.1f} {:.1f} {:.1f} orientation {:.3f} {:.3f} {:.3f} {:.3f}",
+                 command, position[0], position[1], position[2], orientation[0], orientation[1],
+                 orientation[2], orientation[3]);
     } else if (command == "pickup") {
         // pickup <item id hex>: the pick-up of an item lying in the world, by its list id
         u32 id = 0;
@@ -3477,6 +3512,7 @@ void ApplyRequestedSessionStop() {
     using MultiPlayStop = bool PS4_SYSV_ABI (*)(u64 multi_play);
     const s32 state = ReadValue<s32>(multi_play, 0x124);
     const auto stop = reinterpret_cast<MultiPlayStop>(image_base + MultiPlayStopRequestOffset);
+    own_session_end.store(true);
     const bool result = stop(multi_play);
     LOG_INFO(Debug, "Bloodborne session stop hotkey: multiplayer state {} result={}", state,
              result);
@@ -6305,6 +6341,33 @@ void ApplyGuestReinsertAfterReload() {
             WriteValue(game_data, 0x5D8, guest_team_type);
             LOG_INFO(Debug, "Bloodborne session: guest team type {} -> {} (chr type {})", team_type,
                      guest_team_type, player >= 0x10000 ? ReadValue<s32>(player, 0x78) : -1);
+        }
+    }
+    // The session ended under this guest (the host left, died or lost the connection): go home
+    // as the game's own "HostDead_1" does, instead of staying in a copy of the host's world (the
+    // host's character was left standing in the Hunter's Dream). The lobby brings it back.
+    {
+        static s32 last_session = 0;
+        static bool going_home = false;
+        if (last_session == 6 && session != 6 && !own_session_end.load()) {
+            going_home = true;
+        }
+        if (session == 6 || session == 3) {
+            own_session_end.store(false);
+            going_home = false;
+        }
+        if (session == 0 && last_session != 0) {
+            own_session_end.store(false);
+        }
+        last_session = session;
+        if (going_home && state >= 0x10000 && ReadValue<u8>(state, 0x08) == 0 &&
+            ReadValue<u8>(state, 0x1520) == 0 && data != 0 &&
+            ReadValue<s32>(data, DataModuleHpOffset) > 0) {
+            going_home = false;
+            LOG_INFO(Debug, "Bloodborne session: the session ended under this guest, going home");
+            using ReturnHome = void PS4_SYSV_ABI (*)(u64 context);
+            reinterpret_cast<ReturnHome>(image_base + GuestReturnHomeOffset)(0);
+            return;
         }
     }
     // When this player's own world was last loading (or it was dead, or out of a session).
