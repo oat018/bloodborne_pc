@@ -6052,6 +6052,34 @@ s32 HostReturnPointHere() {
     return -1;
 }
 
+// A lantern of the host's map for a dead guest to respawn at: the one the host travelled to, else
+// the first one of that map (the guest then goes on to where the host stands). 0 when no host
+// has been heard of lately.
+s32 HostMapLantern() {
+    std::array<PlaceNote, 4> notes{};
+    const int count = Libraries::Net::P2PSeamlessCollect(notes.data(), sizeof(PlaceNote),
+                                                         static_cast<u32>(notes.size()));
+    for (int index = 0; index < count; ++index) {
+        const PlaceNote& note = notes[index];
+        if (note.magic != PlaceNoteMagic || note.session != 3 || !IsUsablePackedMap(note.map)) {
+            continue;
+        }
+        const u8 area = static_cast<u8>(note.map >> 24);
+        const u8 block = static_cast<u8>(note.map >> 16);
+        s32 any_lantern = 0;
+        for (const auto& point : ReturnPoints) {
+            if (point.area == area && point.block == block) {
+                if (point.id == note.return_point) {
+                    return point.id;
+                }
+                any_lantern = any_lantern != 0 ? any_lantern : point.id;
+            }
+        }
+        return any_lantern;
+    }
+    return 0;
+}
+
 // The guest's side of the shared progress: take what the host's notes carry. The game puts a
 // guest's own flags back when it leaves the session, so every flag is kept, also in a file
 // (the guest may quit the game from the host's world), and written again in the guest's own
@@ -6421,9 +6449,34 @@ void ApplyGuestReinsertAfterReload() {
     if (!in_session) {
         host_met = false;
     }
-    if (!in_session || state < 0x10000 || ReadValue<u8>(state, 0x08) != 0 ||
-        ReadValue<u8>(state, 0x1520) != 0 || data == 0 ||
-        ReadValue<s32>(data, DataModuleHpOffset) <= 0) {
+    // A guest's death respawn: the game reloads the world at the player's last lantern
+    // (GlobalState+0x1528), the guest's own one (often the Hunter's Dream), and the guest then
+    // followed the host with a second load. Point it at a lantern of the host's map instead: one
+    // load, as BBSC does, then on to where the host stands. The guest's own lantern is put back
+    // once it is up again, so that its own world keeps its own respawn point.
+    static s32 own_lantern = -1;
+    static bool respawn_at_host = false;
+    const bool dead = data != 0 && ReadValue<s32>(data, DataModuleHpOffset) <= 0;
+    const bool in_world_now = state >= 0x10000 && ReadValue<u8>(state, 0x08) == 0 &&
+                              ReadValue<u8>(state, 0x1520) == 0;
+    if (session == 6 && dead && in_world_now && own_lantern < 0 &&
+        HasMemoryAccess(state, 0x152C, MemoryProt::CpuWrite)) {
+        if (const s32 lantern = HostMapLantern(); lantern > 0) {
+            const s32 own = ReadValue<s32>(state, 0x1528);
+            if (lantern == own || WriteValue<s32>(state, 0x1528, lantern)) {
+                own_lantern = own;
+                respawn_at_host = true;
+                LOG_INFO(Debug, "Bloodborne session: dead guest respawns at the host's lantern {} "
+                         "(its own {})", lantern, own);
+            }
+        }
+    } else if (own_lantern >= 0 && !dead && in_world_now && data != 0) {
+        if (ReadValue<s32>(state, 0x1528) != own_lantern) {
+            WriteValue<s32>(state, 0x1528, own_lantern);
+        }
+        own_lantern = -1;
+    }
+    if (!in_session || !in_world_now || data == 0 || dead) {
         own_reload = now;
         return;
     }
@@ -6496,6 +6549,11 @@ void ApplyGuestReinsertAfterReload() {
             }
             // 30 m between two checks (250 ms) is no walk
             host_jumped = host_present && std::isfinite(jump_squared) && jump_squared > 900.0f;
+        }
+        if (respawn_at_host) {
+            // back from the death respawn at the host's lantern: on to where the host stands
+            respawn_at_host = false;
+            join_spot_until = now + std::chrono::seconds{60};
         }
         if (host_now && !host_met) {
             // The join itself: the game summons a guest at a summon point of the area, which
