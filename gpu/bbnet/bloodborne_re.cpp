@@ -5924,7 +5924,10 @@ void PublishOwnPlace(s32 session) {
 }
 
 // The lantern to go to for joining the host, or 0 when the host is in this map or unknown.
-s32 HostPlaceToFollow() {
+// walked: the host is in that map without having travelled to one of its lanterns (it walked
+// across a map border, or respawned there).
+s32 HostPlaceToFollow(bool& walked) {
+    walked = false;
     std::array<PlaceNote, 4> notes{};
     const int count = Libraries::Net::P2PSeamlessCollect(notes.data(), sizeof(PlaceNote),
                                                          static_cast<u32>(notes.size()));
@@ -5946,7 +5949,8 @@ s32 HostPlaceToFollow() {
                 any_lantern = any_lantern != 0 ? any_lantern : point.id;
             }
         }
-        return any_lantern; // the host respawned there: any lantern of that map
+        walked = true;
+        return any_lantern; // the host walked or respawned there: any lantern of that map
     }
     return 0;
 }
@@ -6334,9 +6338,22 @@ void ApplyGuestReinsertAfterReload() {
             settled_map = current_map;
             settled_since = now;
         }
+        // A host that walked over a map border (no co-op fog walls) is given 30 s for the guest to
+        // walk after it before the guest is taken there.
+        static clock::time_point apart_since{};
+        static bool apart = false;
+        bool walked = false;
+        const s32 host_lantern = session == 6 ? HostPlaceToFollow(walked) : 0;
+        if (host_lantern == 0) {
+            apart = false;
+        } else if (!apart) {
+            apart = true;
+            apart_since = now;
+        }
         if (session == 6 && now >= next_follow &&
-            now - settled_since >= std::chrono::seconds{8}) {
-            if (const s32 lantern = HostPlaceToFollow(); lantern != 0) {
+            now - settled_since >= std::chrono::seconds{8} &&
+            (!walked || now - apart_since >= std::chrono::seconds{30})) {
+            if (const s32 lantern = host_lantern; lantern != 0) {
                 next_follow = now + std::chrono::seconds{30};
                 join_spot_until = now + std::chrono::seconds{120};
                 LOG_INFO(Debug,
@@ -7419,13 +7436,22 @@ static bool InstallNoFogWalls(u64 base) {
                                                   0x00, 0x00, 0x48, 0x85, 0xF6};
     static constexpr std::array<u8, 5> MultiWall{0x55, 0x48, 0x89, 0xE5, 0x53};
     static constexpr std::array<u8, 5> JumpToInvalid{0xE9, 0x6B, 0x01, 0x00, 0x00};
+    // The walls kept the host inside its map block. When the host's character enters another
+    // block (0x0193AC10 notes it at chr+0x3F8), a host (session state 3, or 1) ends the session:
+    // CALL CSMultiPlayMan::Stop at 0x0193C657 -> XOR EAX,EAX (not stopped). Seen on the first
+    // real session of v3.1: Hemwick (0x17000000) -> Cathedral Ward (0x18000000) sent the guest
+    // home. A guest crossing a block never stopped it.
+    static constexpr u64 BlockChangeStopOffset = 0x0193C657;
+    static constexpr std::array<u8, 5> BlockChangeStop{0xE8, 0x44, 0x41, 0x59, 0x00};
+    static constexpr std::array<u8, 5> NotStopped{0x31, 0xC0, 0x0F, 0x1F, 0x00};
     // Every site is checked before the first hook goes in, so that a mismatch leaves none.
     if (!ImageBytesAre(0x018CB14F, FloorLoad) ||
         !ImageBytesAre(EventObjectBankOffset, BankPrologue) ||
         !ImageBytesAre(EventSfxBankOffset, BankPrologue) ||
         !ImageBytesAre(ObjectDrawOffset, Prologue) ||
         !ImageBytesAre(ObjectCollisionOffset, Prologue) ||
-        !ImageBytesAre(ObjectSfxEnableOffset, SfxPrologue) || !ImageBytesAre(0x0138B720, MultiWall)) {
+        !ImageBytesAre(ObjectSfxEnableOffset, SfxPrologue) || !ImageBytesAre(0x0138B720, MultiWall) ||
+        !ImageBytesAre(BlockChangeStopOffset, BlockChangeStop)) {
         LOG_ERROR(Debug, "Bloodborne fog walls: unexpected bytes at a wall site");
         return false;
     }
@@ -7447,11 +7473,13 @@ static bool InstallNoFogWalls(u64 base) {
         InstallGuestCodeHook(reinterpret_cast<void*>(base + ObjectSfxEnableOffset), SfxPrologue,
                              2, WallToggleEntry);
     // Lua_MultiWall -> JMP Lua_InvalidMultiWall.
-    if (!ok || !PatchImage(0x0138B720, MultiWall, JumpToInvalid)) {
+    if (!ok || !PatchImage(0x0138B720, MultiWall, JumpToInvalid) ||
+        !PatchImage(BlockChangeStopOffset, BlockChangeStop, NotStopped)) {
         LOG_ERROR(Debug, "Bloodborne fog walls: a wall hook failed");
         return false;
     }
-    LOG_INFO(Debug, "Bloodborne fog walls: co-op walls stay down (boss walls stay), floor guard on");
+    LOG_INFO(Debug, "Bloodborne fog walls: co-op walls stay down (boss walls stay), floor guard "
+                    "on, a host may cross into another map block");
     return true;
 }
 
