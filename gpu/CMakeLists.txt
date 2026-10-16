@@ -13,7 +13,7 @@ add_compile_options(-fno-omit-frame-pointer)
 if (MINGW)
     # Headers newer libc++ no longer includes transitively (see the file).
     add_compile_options(
-        "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include ${CMAKE_CURRENT_SOURCE_DIR}/mingw_libcxx_compat.h>")
+        "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include \"${CMAKE_CURRENT_SOURCE_DIR}/mingw_libcxx_compat.h\">")
 endif()
 
 # bbport: link-time optimization (BB_LTO, default on) and profile-guided optimization
@@ -185,6 +185,11 @@ target_link_libraries(bbnet PRIVATE nlohmann_json::nlohmann_json)
 find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 target_compile_definitions(bbnet PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT CPPHTTPLIB_ZLIB_SUPPORT)
+# OpenSSL verifies the server's chain (with the Windows ROOT and CA stores) and the host name.
+# cpp-httplib's second check on Windows rebuilt the chain from the leaf alone and could pick an
+# expired cross-signed "ISRG Root X2" from the user's intermediate store: "SSL server
+# verification failed" (error 10) for The Hunter's Dream on some PCs.
+target_compile_definitions(bbnet PRIVATE CPPHTTPLIB_DISABLE_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE)
 target_link_libraries(bbnet PRIVATE OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB)
 if (WIN32)
     target_sources(bbnet PRIVATE third_party/wepoll/wepoll.c)

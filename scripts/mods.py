@@ -28,13 +28,15 @@ def child(folder, name):
 def content_root(folder):
     """(root, prefix): where a mod's files are and the game path they go to, or None.
 
-    Accepted layouts: <mod>/dvdroot_ps4, <mod>/app0/dvdroot_ps4, <mod>/CUSA03173/dvdroot_ps4,
+    Accepted layouts: <mod>/dvdroot_ps4, <mod>/app0/dvdroot_ps4, <mod>/<serial>/dvdroot_ps4,
     one wrapper folder around any of these (an archive extracted into a folder of its name), and
     the game's folders without dvdroot_ps4 (<mod>/chr, <mod>/parts, ...)."""
     folder = Path(folder)
     if not folder.is_dir():
         return None
-    for wrapper in ('', 'app0', 'CUSA03173'):
+    # Every retail release (patches.BLOODBORNE_IDS).
+    for wrapper in ('', 'app0', 'CUSA03173', 'CUSA00900', 'CUSA00207', 'CUSA00208', 'CUSA00299',
+                    'CUSA01363', 'CUSA03179', 'CUSA03014', 'CUSA03023'):
         base = child(folder, wrapper) if wrapper else folder
         dvdroot = child(base, 'dvdroot_ps4')
         if dvdroot.is_dir():
@@ -105,8 +107,13 @@ def mod_files(folder):
 # UCRT _stat64 and FindFirstFileA report a file symlink's own size (0), not its target's, and
 # the game panics loading it (FileTransferTask.cpp(865)). Directories are symlinks, or
 # junctions without the symlink privilege (Developer Mode off). Hard links and junctions are
-# not symlinks, so the overlay remembers what it linked and where to.
+# not symlinks, so the overlay remembers what it linked and where to. Keys are normalized:
+# MSYS2's Python spells joined paths with '/' and listed ones with '\'.
 LINKED = {}
+
+
+def key(path):
+    return os.path.normcase(os.path.normpath(str(path)))
 
 
 def make_link(link, target):
@@ -125,15 +132,15 @@ def make_link(link, target):
             os.link(target, link)
         except OSError:
             shutil.copy2(target, link)
-    LINKED[str(link)] = target
+    LINKED[key(link)] = target
 
 
 def is_link(path):
-    return path.is_symlink() or str(path) in LINKED or (hasattr(path, 'is_junction') and path.is_junction())
+    return path.is_symlink() or key(path) in LINKED or (hasattr(path, 'is_junction') and path.is_junction())
 
 
 def link_target(path):
-    return LINKED.get(str(path)) or path.resolve(strict=True)
+    return LINKED.get(key(path)) or path.resolve(strict=True)
 
 
 def remove_link(path):
@@ -141,7 +148,7 @@ def remove_link(path):
         os.rmdir(path)
     else:
         path.unlink()
-    LINKED.pop(str(path), None)
+    LINKED.pop(key(path), None)
 
 
 def expand(directory):
@@ -215,8 +222,11 @@ def main():
     parser.add_argument('--mods-dir', required=True, type=Path)
     parser.add_argument('--config', type=Path)
     parser.add_argument('--enabled', choices=('0', '1'), default='1')
+    parser.add_argument('--layer', type=Path, action='append', default=[],
+                        help="the port's own generated files (a dvdroot_ps4 inside), below the "
+                             'mods and applied without them too (hud_layout.py)')
     args = parser.parse_args()
-    layers = []
+    layers = [(layer.name, layer) for layer in args.layer if layer.is_dir()]
     if args.enabled == '1':
         # shadPS4's loose overlay convention, beside the original game.
         legacy = Path(str(args.game.resolve()) + '-mods')

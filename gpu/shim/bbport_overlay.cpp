@@ -163,6 +163,11 @@ void Menu() {
                                    viewport->WorkPos.y + 40.0f * base_scale),
                             ImGuiCond_Appearing);
     ImGui::SetNextWindowSize(ImVec2(620.0f * base_scale, 0.0f), ImGuiCond_Appearing);
+    // A menu taller than the screen would leave its last row (Close) off screen: the window
+    // stays within the screen (below its 40 px offset) and scrolls instead.
+    ImGui::SetNextWindowSizeConstraints(
+        ImVec2(0.0f, 0.0f),
+        ImVec2(FLT_MAX, std::max(viewport->WorkSize.y - 60.0f * base_scale, 200.0f * base_scale)));
     bool keep_open = true;
     if (!ImGui::Begin("Bloodborne - Settings (Insert / L3+R3)", &keep_open,
                       ImGuiWindowFlags_NoCollapse)) {
@@ -293,7 +298,11 @@ void Menu() {
     ImGui::EndDisabled(); // upscaler off
 
     ImGui::SeparatorText("Output resolution");
-    static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160"};
+    static const char* outputs[] = {"1280 x 720", "1920 x 1080", "2560 x 1440", "3840 x 2160",
+                                    "2560 x 1080 (21:9)", "3440 x 1440 (21:9)",
+                                    "3840 x 1600 (21:9)", "5120 x 2160 (21:9)",
+                                    "3840 x 1080 (32:9)", "5120 x 1440 (32:9)"};
+    static_assert(sizeof(outputs) / sizeof(*outputs) == BbSettings::OutputCount);
     int output = s.output_res;
     if (ImGui::BeginCombo("Output resolution", outputs[output])) {
         for (int i = 0; i < BbSettings::OutputCount; ++i) {
@@ -302,6 +311,13 @@ void Menu() {
             }
         }
         ImGui::EndCombo();
+    }
+    if (BbSettings::Ultrawide(s.output_res)) {
+        int hud = s.hud_position;
+        Store(s.hud_position, hud,
+              ImGui::SliderInt("HUD position", &hud, 0, 100, hud == 0 ? "Centred (16:9)" :
+                                                         hud == 100 ? "Screen edges" : "%d%%"));
+        Hint("Ultrawide (21:9, 32:9): moves the health, items and Blood Echoes from the centred 16:9 area toward the screen edges. Changes require a restart.");
     }
     if (BbSettings::FixedRenderSession()) {
         Hint("Final image and HUD resolution. The preset controls scene resolution relative to the output. 4K Performance is approximately 1920x1080. Changes require a restart.");
@@ -362,6 +378,24 @@ void Menu() {
     ImGui::Spacing();
     if (ImGui::Button("Close")) {
         keep_open = false;
+    }
+    // Issues #74, #116: leaving the game from the pad (this menu opens with L3+R3). A second
+    // press confirms; the window thread then closes like the window's own close button.
+    // (From bbport 0.51.)
+    static bool quit_armed;
+    ImGui::SameLine();
+    // One ID for both labels ("###bb_quit"): with a new ID the button lost the pad's or keyboard's
+    // focus at the first press, which disarmed it at once.
+    if (ImGui::Button(quit_armed ? "Press again to quit###bb_quit" : "Quit game###bb_quit")) {
+        if (quit_armed) {
+            SDL_Event quit{};
+            quit.type = SDL_EVENT_QUIT;
+            SDL_PushEvent(&quit);
+        }
+        quit_armed = !quit_armed;
+    }
+    if (quit_armed && !ImGui::IsItemFocused() && !ImGui::IsItemHovered()) {
+        quit_armed = false;
     }
     ImGui::SameLine();
     ImGui::TextDisabled("Settings are saved to bbport.ini");
