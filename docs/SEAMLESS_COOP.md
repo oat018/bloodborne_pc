@@ -246,6 +246,23 @@ against the expected bytes of version 1.09) and code hooks, in `gpu/bbnet/bloodb
 That file is generated from shadp2p's `src/core/bloodborne_re.cpp` by
 `tools/port_seamless.py`; `gpu/bbnet/guest_hook.cpp` provides the code hooks.
 
+Safety rules of the installation and of every write into the game:
+
+- All or nothing. Every part that is switched on checks all of its sites before it changes the
+  first one. If a part cannot be installed the loader stops with `Co-op: NOT STARTED: <part>`
+  (and an `ERROR:` line) instead of starting a game that plays by other rules than the
+  partner's. The message names the switch that plays without that part.
+- The game's code is written only while the loader still has the image writable, and only over
+  bytes that were checked (`PatchImage` / `WriteImageAt`). Game data is written only where
+  `HasMemoryAccess` says it is writable (`WriteValue` / `WriteGuestBytes`); on Linux that asks
+  the loader for the image (`bbport_image_access`, by segment protection) and the runtime for
+  the game's mappings (`runtime_memory_has_access`), on Windows `VirtualQuery`. Param rows
+  (enemy scaling) are written only inside tables that were found writable as a whole.
+- A host placement from the other game (lobby or summon header) is used only when it parses
+  whole: all seven fields, a map the game has, finite coordinates within 100 km.
+  `SHADPS4_BLOODBORNE_TEST_INSTALL_FAILURE=<text>` makes the installation fail on purpose
+  (test aid).
+
 - Death and boss kill: the session scripts that send a guest home ("HostDead", "BlockClear",
   "PartyGhostDeath") are not scheduled, and a stage transition no longer stops the session.
 - After a reload the game does not create the other players' characters again. Each client

@@ -440,15 +440,24 @@ std::string g_game_serial;
 // Called by the loader once the image is relocated and patched, while it is still writable:
 // the seamless co-op code (bbnet/bloodborne_re.cpp) checks every site byte for byte and then
 // changes the game code. Off unless SHADPS4_BLOODBORNE_SEAMLESS_COOP=1 (same switch as shadp2p).
-extern "C" void bbnet_install_coop(void* image, uint64_t size) {
+// Nonzero when co-op is on but a part of it was not installed: the loader then stops, since a
+// half-installed mode would play by other rules than the partner's game.
+extern "C" int bbnet_install_coop(void* image, uint64_t size) {
     if (!EmulatorSettings.IsShadNetEnabled()) {
-        return;
+        return 0;
     }
     MemoryPatcher::g_eboot_address = reinterpret_cast<uintptr_t>(image);
     MemoryPatcher::g_eboot_image_size = size;
     MemoryPatcher::g_game_serial = Common::ElfInfo::Instance().GameSerial();
     Core::Bloodborne::InstallSeamlessCoopPatches();
+    const std::string failure = Core::Bloodborne::SeamlessCoopInstallFailure();
+    if (!failure.empty()) {
+        std::printf("Co-op: NOT STARTED: %s\n", failure.c_str());
+        std::fflush(stdout);
+        return 1;
+    }
     Core::Bloodborne::InstallReverseEngineeringTrace();
+    return 0;
 }
 
 // ---- Registration ------------------------------------------------------------------------------

@@ -26,6 +26,10 @@ void runtime_mutex_report(void);
 uintptr_t runtime_memory_resolve(const char *name);
 void runtime_memory_report(void);
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+/* 1 when the runtime maps all of [address, address + size) readable (write: writable). */
+int runtime_memory_has_access(uintptr_t address, uint64_t size, int write);
+/* The same for the game image (probe.c): all writable until the loader protects it. */
+int bbport_image_access(uintptr_t address, uint64_t size, int write);
 const char *runtime_import_name(const char *name);
 uintptr_t runtime_rwlock_resolve(const char *name);
 void runtime_rwlock_report(void);

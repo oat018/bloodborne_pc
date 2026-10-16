@@ -357,6 +357,22 @@ static int sfo_value(const char *path, const char *key, char *text, size_t text_
     }
     return 0;
 }
+/* The game image for the co-op code's memory checks (bbport_image_access): all writable while
+   the loader still patches it, then each segment as protected. */
+static const Segment *image_segments; static uint64_t image_segment_count;
+static uintptr_t image_start; static uint64_t image_bytes; static int image_sealed;
+int bbport_image_access(uintptr_t address, uint64_t bytes, int write) {
+    if (!image_start || !bytes || address < image_start || bytes > image_bytes ||
+        address - image_start > image_bytes - bytes) return 0;
+    if (!image_sealed) return 1;
+    const uint64_t offset = address - image_start;
+    for (uint64_t i = 0; i < image_segment_count; ++i) {
+        const Segment *s = &image_segments[i];
+        if (offset >= s->address && bytes <= s->size && offset - s->address <= s->size - bytes)
+            return write ? (s->flags & 2) != 0 : (s->flags & 7) != 0;
+    }
+    return 0;
+}
 static int mapped(Segment *segments, uint64_t count, uint64_t address, uint64_t bytes) {
     for (uint64_t i = 0; i < count; ++i)
         if (address >= segments[i].address && bytes <= segments[i].size &&
@@ -661,7 +677,11 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
     printf("Guest TCB loads redirected to the TEB TLS slot: %" PRIu64 "\n", patch_tcb_loads(segments, ns));
 #endif
-    if (!cpu_only && app0) bbnet_install_coop(image, size);
+    image_segments = segments; image_segment_count = ns;
+    image_start = (uintptr_t)image; image_bytes = size;
+    if (!cpu_only && app0 && bbnet_install_coop(image, size) != 0)
+        fail("seamless co-op is switched on but could not be installed completely (see the Co-op: "
+             "lines above), so the game was not started");
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
@@ -670,6 +690,7 @@ int main(int argc, char **argv) {
         if ((segments[i].flags & 1) && entry >= segments[i].address && entry - segments[i].address < segments[i].size)
             executable_entry = 1;
     }
+    image_sealed = 1;
     if (!executable_entry) fail("entry is not executable");
     printf("Mapped %" PRIu64 " bytes, %" PRIu64 " segments; applied %" PRIu64 " relocations\n", size, ns, nr);
     if (native_libc) {

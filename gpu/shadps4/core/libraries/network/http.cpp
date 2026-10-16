@@ -1935,10 +1935,15 @@ void RunLobbyJoin(const LobbyConfig& config) {
             const auto answer = nlohmann::json::parse(result->body, nullptr, false);
             const s64 claimed_ms_ago =
                 answer.is_object() ? answer.value("claimed_ms_ago", s64{-1}) : s64{-1};
-            const std::string placement =
+            // The placement comes from the other game: kept only when it is whole and usable.
+            std::string placement =
                 answer.is_object() && answer.contains("placement") && answer["placement"].is_string()
                     ? answer["placement"].get<std::string>()
                     : std::string{};
+            if (!placement.empty() && !Core::Bloodborne::IsValidHostPlacement(placement)) {
+                LOG_WARNING(Lib_Http, "Bloodborne lobby: ignoring an invalid host placement");
+                placement.clear();
+            }
             const auto now = LobbyClock::now();
             bool new_claim = false;
             {

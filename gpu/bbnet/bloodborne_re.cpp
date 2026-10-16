@@ -44,6 +44,8 @@
 #include <sys/uio.h>
 #include <unistd.h>
 extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+extern "C" int runtime_memory_has_access(uintptr_t address, uint64_t size, int write);
+extern "C" int bbport_image_access(uintptr_t address, uint64_t size, int write);
 #endif
 
 // bbport: the port's log shows warnings and errors only; co-op messages always go to the
@@ -988,12 +990,17 @@ bool HasMemoryAccess(u64 address, size_t size, MemoryProt required) {
     }
     return true;
 #else
+    // The loader and the runtime answer for the memory they made, with its protection: the
+    // image as the loader protected each segment (all writable while the co-op code installs),
+    // the game's own mappings as the game asked for them (a read takes the runtime's cached
+    // lookup: the hooks read on every frame).
+    const bool write = required == MemoryProt::CpuWrite;
     const u64 image = MemoryPatcher::g_eboot_address;
-    if (address >= image && address - image < MemoryPatcher::g_eboot_image_size &&
-        size <= MemoryPatcher::g_eboot_image_size - (address - image)) {
-        return true;
+    if (address >= image && address - image < MemoryPatcher::g_eboot_image_size) {
+        return bbport_image_access(address, size, write ? 1 : 0) != 0;
     }
-    if (runtime_memory_is_mapped(address, size) != 0) {
+    if ((write ? runtime_memory_has_access(address, size, 1)
+               : runtime_memory_is_mapped(address, size)) != 0) {
         return true;
     }
     // The runtime knows the game's own mappings only. A hook's return address and the
@@ -1041,6 +1048,70 @@ bool WriteValue(u64 address, size_t offset, const T& value) {
 
     std::memcpy(reinterpret_cast<void*>(destination), &value, sizeof(value));
     return true;
+}
+
+// Every write of the co-op code into the game goes through WriteValue, WriteGuestBytes,
+// PatchImage / WriteImageAt or PokeParam: game data only where HasMemoryAccess says it is
+// writable, the game's code only while the loader still has the image writable (during
+// InstallSeamlessCoopPatches) and only over the bytes that were checked to be there.
+bool WriteGuestBytes(u64 address, const void* data, size_t size) {
+    if (size == 0 || !HasMemoryAccess(address, size, MemoryProt::CpuWrite)) {
+        return false;
+    }
+    std::memcpy(reinterpret_cast<void*>(address), data, size);
+    return true;
+}
+
+bool image_patching_open = false;
+std::string seamless_install_failure;
+
+// A part of the mode that is switched on but could not be installed. The loader asks
+// SeamlessCoopInstallFailure() afterwards and does not start the game: a half-installed mode
+// would play by other rules than the partner's game.
+void InstallFailed(std::string_view part) {
+    LOG_ERROR(Debug, "Bloodborne seamless co-op: {} could not be installed", part);
+    if (!seamless_install_failure.empty()) {
+        seamless_install_failure += "; ";
+    }
+    seamless_install_failure += part;
+}
+
+bool ImageBytesAre(u64 offset, std::span<const u8> expected) {
+    const u64 image_size = MemoryPatcher::g_eboot_image_size;
+    return MemoryPatcher::g_eboot_address != 0 && offset <= image_size &&
+           expected.size() <= image_size - offset &&
+           std::ranges::equal(
+               std::span<const u8>{
+                   reinterpret_cast<const u8*>(MemoryPatcher::g_eboot_address + offset),
+                   expected.size()},
+               expected);
+}
+
+// Writes `bytes` over the image at `at`, which must lie in the image, while it is writable.
+bool WriteImageAt(void* at, const void* bytes, size_t size) {
+    const u64 address = reinterpret_cast<u64>(at);
+    const u64 image = MemoryPatcher::g_eboot_address;
+    const u64 image_size = MemoryPatcher::g_eboot_image_size;
+    if (!image_patching_open || address < image || size > image_size ||
+        address - image > image_size - size) {
+        LOG_ERROR(Debug, "Bloodborne code write at {:#x} refused: {}", address,
+                  image_patching_open ? "outside the game image" : "the image is not writable now");
+        return false;
+    }
+    std::memcpy(at, bytes, size);
+    return true;
+}
+
+// Writes `bytes` at image offset `offset + write_at` when `expected` is at `offset`.
+bool PatchImage(u64 offset, std::span<const u8> expected, std::span<const u8> bytes,
+                size_t write_at = 0) {
+    if (write_at > expected.size() || bytes.size() > expected.size() - write_at ||
+        !ImageBytesAre(offset, expected)) {
+        LOG_ERROR(Debug, "Bloodborne code patch at {:#x} refused: unexpected bytes", offset);
+        return false;
+    }
+    return WriteImageAt(reinterpret_cast<void*>(MemoryPatcher::g_eboot_address + offset + write_at),
+                        bytes.data(), bytes.size());
 }
 
 // Every address in [lo, hi) of the game's writable data where `needle` sits (at most max_hits).
@@ -2261,9 +2332,9 @@ void ApplyDeathRules() {
 // 0x01E55050, every slot marked leaving 0x014EB860); a host that is held and gets up again would
 // have lost its guests. The three calls become `xor eax, eax`; the members stay, and a host
 // whose death runs reloads as before.
-static void InstallDeathRulePatches(u64 base) {
+static bool InstallDeathRulePatches(u64 base) {
     if (!SpectateEnabled() && !EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARED_DEATH")) {
-        return;
+        return true;
     }
     static constexpr std::array<u8, 5> NoCall{0x31, 0xC0, 0x0F, 0x1F, 0x00};
     static constexpr std::array<std::pair<u64, std::array<u8, 5>>, 3> HostDeathKick{{
@@ -2271,24 +2342,27 @@ static void InstallDeathRulePatches(u64 base) {
         {0x018C4DAC, {0xE8, 0x9F, 0x02, 0x59, 0x00}},
         {0x018C4DBA, {0xE8, 0xA1, 0x6A, 0xC2, 0xFF}},
     }};
+    static constexpr std::array<u8, 6> Prologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57};
     for (const auto& [offset, expected] : HostDeathKick) {
-        if (std::memcmp(reinterpret_cast<const void*>(base + offset), expected.data(), 5) != 0) {
-            LOG_ERROR(Debug, "Bloodborne death rules: unexpected bytes at {:#x}, not installed",
-                      offset);
-            return;
+        if (!ImageBytesAre(offset, expected)) {
+            LOG_ERROR(Debug, "Bloodborne death rules: unexpected bytes at {:#x}", offset);
+            return false;
         }
     }
-    static constexpr std::array<u8, 6> Prologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57};
-    if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + BlockClear2FirstOffset), Prologue,
+    if (!ImageBytesAre(BlockClear2FirstOffset, Prologue) ||
+        !InstallGuestCodeHook(reinterpret_cast<void*>(base + BlockClear2FirstOffset), Prologue,
                               0, BossClearEntry)) {
-        LOG_ERROR(Debug, "Bloodborne death rules: boss clear hook failed, not installed");
-        return;
+        LOG_ERROR(Debug, "Bloodborne death rules: boss clear hook failed");
+        return false;
     }
     for (const auto& [offset, expected] : HostDeathKick) {
-        std::memcpy(reinterpret_cast<void*>(base + offset), NoCall.data(), NoCall.size());
+        if (!PatchImage(offset, expected, NoCall)) {
+            return false;
+        }
     }
     LOG_INFO(Debug, "Bloodborne death rules: on (watch in a boss fight{})",
              EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARED_DEATH") ? ", and everywhere" : "");
+    return true;
 }
 
 // With a lobby the players meet without any bell: the host opens its room by itself and the
@@ -2350,6 +2424,58 @@ std::vector<u8> MakeJoinData(u64 room_id, std::string_view host_npid) {
     return out;
 }
 
+// A host placement "1,<map>,<x>,<y>,<z>,<heading>,<area>" (hex, the area decimal), as the
+// summon header and the lobby carry it from the other game: every field present and whole, a
+// map the game has, finite coordinates within a map's reach. Anything else is not used.
+std::optional<SummonPlacementDescriptor> ParseHostPlacement(std::string_view value) {
+    std::array<std::string_view, 7> fields{};
+    size_t begin = 0;
+    for (size_t field_index = 0; field_index < fields.size(); ++field_index) {
+        const size_t end = value.find(',', begin);
+        const bool final_field = field_index + 1 == fields.size();
+        if ((final_field && end != std::string_view::npos) ||
+            (!final_field && end == std::string_view::npos)) {
+            return std::nullopt;
+        }
+        fields[field_index] =
+            value.substr(begin, end == std::string_view::npos ? value.size() - begin : end - begin);
+        begin = end == std::string_view::npos ? value.size() : end + 1;
+    }
+    if (fields[0] != "1") {
+        return std::nullopt;
+    }
+
+    auto parse_u32 = [](std::string_view field, int base, u32& output) {
+        const auto [end, error] =
+            std::from_chars(field.data(), field.data() + field.size(), output, base);
+        return error == std::errc{} && end == field.data() + field.size();
+    };
+    SummonPlacementDescriptor placement{};
+    std::array<u32, 4> float_bits{};
+    if (!parse_u32(fields[1], 16, placement.packed_region) ||
+        !parse_u32(fields[2], 16, float_bits[0]) || !parse_u32(fields[3], 16, float_bits[1]) ||
+        !parse_u32(fields[4], 16, float_bits[2]) || !parse_u32(fields[5], 16, float_bits[3])) {
+        return std::nullopt;
+    }
+    const auto [area_end, area_error] =
+        std::from_chars(fields[6].data(), fields[6].data() + fields[6].size(), placement.area, 10);
+    if (area_error != std::errc{} || area_end != fields[6].data() + fields[6].size()) {
+        return std::nullopt;
+    }
+    placement.x = std::bit_cast<float>(float_bits[0]);
+    placement.y = std::bit_cast<float>(float_bits[1]);
+    placement.z = std::bit_cast<float>(float_bits[2]);
+    placement.heading = std::bit_cast<float>(float_bits[3]);
+    if (!IsUsablePackedMap(placement.packed_region) || !std::isfinite(placement.x) ||
+        !std::isfinite(placement.y) || !std::isfinite(placement.z) ||
+        !std::isfinite(placement.heading) || std::fabs(placement.x) > 100000.0f ||
+        std::fabs(placement.y) > 100000.0f || std::fabs(placement.z) > 100000.0f ||
+        std::fabs(placement.heading) > 1000.0f) {
+        return std::nullopt;
+    }
+    return placement;
+}
+
 void ApplyLobbyDirectJoin() {
     static const bool enabled = LobbyDirectJoin();
     if (!enabled || image_base == 0 || auto_bell_goods.load() == 0) {
@@ -2408,16 +2534,23 @@ void ApplyLobbyDirectJoin() {
     if (session_state != 0 && session_state != 2 && session_state != 5) {
         return;
     }
-    // placement "1,<map>,<x>,<y>,<z>,<heading>,<area>" (hex, area decimal)
-    std::array<u32, 6> values{};
-    {
-        std::istringstream fields{placement_text};
-        std::string field;
-        std::getline(fields, field, ',');
-        for (size_t i = 0; i < values.size() && std::getline(fields, field, ','); ++i) {
-            values[i] = static_cast<u32>(std::strtoul(field.c_str(), nullptr, i == 5 ? 10 : 16));
+    // The host's placement comes from the other game: used only when it parses whole.
+    const auto host_placement = ParseHostPlacement(placement_text);
+    if (!host_placement.has_value()) {
+        static std::string refused;
+        if (refused != placement_text) {
+            refused = placement_text;
+            LOG_ERROR(Debug, "Bloodborne lobby: the host's placement \"{}\" is not valid, not "
+                             "joining with it", placement_text);
         }
+        return;
     }
+    const std::array<u32, 6> values{host_placement->packed_region,
+                                    std::bit_cast<u32>(host_placement->x),
+                                    std::bit_cast<u32>(host_placement->y),
+                                    std::bit_cast<u32>(host_placement->z),
+                                    std::bit_cast<u32>(host_placement->heading),
+                                    static_cast<u32>(host_placement->area)};
     // The game's own cross-map join (a deferred reload into the host's map) hangs in the
     // loading screen with the seamless rules, so a guest in another map first travels there
     // alone, as the pre-match travel does, and joins once it has arrived.
@@ -2506,13 +2639,13 @@ void ApplyLobbyDirectJoin() {
             const std::array<float, 4> rotation{0.0f, std::bit_cast<float>(values[4]), 0.0f,
                                                 0.0f};
             WriteValue(globals, 0x14C0, values[0]);
-            std::memcpy(reinterpret_cast<void*>(globals + 0x14A0), position.data(), 16);
-            std::memcpy(reinterpret_cast<void*>(globals + 0x14B0), rotation.data(), 16);
+            WriteGuestBytes(globals + 0x14A0, position.data(), 16);
+            WriteGuestBytes(globals + 0x14B0, rotation.data(), 16);
             WriteValue(globals, 0x14C4, values[0]);
-            std::memcpy(reinterpret_cast<void*>(globals + 0x14D0), position.data(), 16);
-            std::memcpy(reinterpret_cast<void*>(globals + 0x14E0), rotation.data(), 16);
-            std::memcpy(reinterpret_cast<void*>(globals + 0x1620), position.data(), 16);
-            std::memcpy(reinterpret_cast<void*>(globals + 0x1630), rotation.data(), 16);
+            WriteGuestBytes(globals + 0x14D0, position.data(), 16);
+            WriteGuestBytes(globals + 0x14E0, rotation.data(), 16);
+            WriteGuestBytes(globals + 0x1620, position.data(), 16);
+            WriteGuestBytes(globals + 0x1630, rotation.data(), 16);
             WriteValue(globals, 0x1640, values[5]);
             WriteValue(globals, 0x1644, values[0]);
             WriteValue(globals, 0x1648, u8{1});
@@ -3299,14 +3432,8 @@ void ApplyDebugCommands() {
         u32 value = 0;
         words >> std::hex >> value;
         const u64 address = follow();
-        // The image's code is writable in this process (the patches above write it), although
-        // the guest's protection flags say otherwise.
-        const bool ok = HasMemoryAccess(address, sizeof(u32), MemoryProt::CpuWrite) ||
-                        (address >= image_base &&
-                         address - image_base < MemoryPatcher::g_eboot_image_size);
-        if (ok) {
-            std::memcpy(reinterpret_cast<void*>(address), &value, sizeof(value));
-        }
+        // Writable data only: the game's code is protected once the game runs.
+        const bool ok = WriteGuestBytes(address, &value, sizeof(value));
         LOG_INFO(Debug, "Bloodborne debug: poke32 {:#x} = {:#x} {}", address, value,
                  ok ? "done" : "not writable");
     } else {
@@ -5215,51 +5342,20 @@ std::optional<std::string> GetSeamlessHostPlacementHeader() {
     return out.str();
 }
 
+std::string SeamlessCoopInstallFailure() {
+    return seamless_install_failure;
+}
+
+bool IsValidHostPlacement(std::string_view value) {
+    return ParseHostPlacement(value).has_value();
+}
+
 bool SetSeamlessHostPlacementHeader(std::string_view value) {
-    std::array<std::string_view, 7> fields{};
-    size_t begin = 0;
-    for (size_t field_index = 0; field_index < fields.size(); ++field_index) {
-        const size_t end = value.find(',', begin);
-        const bool final_field = field_index + 1 == fields.size();
-        if ((final_field && end != std::string_view::npos) ||
-            (!final_field && end == std::string_view::npos)) {
-            return false;
-        }
-        fields[field_index] =
-            value.substr(begin, end == std::string_view::npos ? value.size() - begin : end - begin);
-        begin = end == std::string_view::npos ? value.size() : end + 1;
-    }
-    if (fields[0] != "1") {
+    const auto parsed = ParseHostPlacement(value);
+    if (!parsed.has_value()) {
         return false;
     }
-
-    auto parse_u32 = [](std::string_view field, int base, u32& output) {
-        const auto [end, error] =
-            std::from_chars(field.data(), field.data() + field.size(), output, base);
-        return error == std::errc{} && end == field.data() + field.size();
-    };
-    SummonPlacementDescriptor placement{};
-    std::array<u32, 4> float_bits{};
-    if (!parse_u32(fields[1], 16, placement.packed_region) ||
-        !parse_u32(fields[2], 16, float_bits[0]) || !parse_u32(fields[3], 16, float_bits[1]) ||
-        !parse_u32(fields[4], 16, float_bits[2]) || !parse_u32(fields[5], 16, float_bits[3])) {
-        return false;
-    }
-    const auto [area_end, area_error] =
-        std::from_chars(fields[6].data(), fields[6].data() + fields[6].size(), placement.area, 10);
-    if (area_error != std::errc{} || area_end != fields[6].data() + fields[6].size()) {
-        return false;
-    }
-    placement.x = std::bit_cast<float>(float_bits[0]);
-    placement.y = std::bit_cast<float>(float_bits[1]);
-    placement.z = std::bit_cast<float>(float_bits[2]);
-    placement.heading = std::bit_cast<float>(float_bits[3]);
-    if (!IsUsablePackedMap(placement.packed_region) || !std::isfinite(placement.x) ||
-        !std::isfinite(placement.y) || !std::isfinite(placement.z) ||
-        !std::isfinite(placement.heading)) {
-        return false;
-    }
-
+    const SummonPlacementDescriptor& placement = *parsed;
     std::scoped_lock lock{seamless_placement_mutex};
     if (!seamless_received_host_placement.has_value() ||
         !IsSameSummonPlacement(*seamless_received_host_placement, placement)) {
@@ -6362,18 +6458,21 @@ void ApplyGuestReinsertAfterReload() {
     }
 }
 
-static void InstallSessionHooks(u64 base) {
+static bool InstallSessionHooks(u64 base) {
     static constexpr std::array<u8, 6> Prologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57};
     if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_STAY_IN_SESSION")) {
-        return;
+        return true;
     }
+    bool complete = true;
     if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + MultiPlayerInsConstructorOffset),
                               Prologue, SessionHookInsConstruct, SessionEntry)) {
+        complete = false;
         LOG_ERROR(Debug, "Bloodborne session hook failed at CSMultiPlayerIns constructor");
     }
     if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_RE_TRACE") &&
         !InstallGuestCodeHook(reinterpret_cast<void*>(base + MultiPlayStopRequestOffset), Prologue,
                               SessionHookStop, SessionEntry)) {
+        complete = false;
         LOG_ERROR(Debug, "Bloodborne session hook failed at CSMultiPlayMan::Stop");
     }
     for (const auto& [offset, tag] : {std::pair{u64{0x0132B1C0}, SessionHookTimerA},
@@ -6381,16 +6480,19 @@ static void InstallSessionHooks(u64 base) {
                                       std::pair{u64{0x01339870}, SessionHookCall}}) {
         if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + offset), Prologue, tag,
                                   SessionEntry)) {
-            LOG_ERROR(Debug, "Bloodborne session hook failed at {:#x}", offset);
+            complete = false;
+        LOG_ERROR(Debug, "Bloodborne session hook failed at {:#x}", offset);
         }
     }
     if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + StageTransitionOffset), Prologue,
                               SessionHookTransition, SessionEntry)) {
+        complete = false;
         LOG_ERROR(Debug, "Bloodborne session hook failed at the stage transition request");
     }
     if (GuestItemsEnabled() && !EnvFlagEnabled("SHADPS4_BLOODBORNE_ITEM_LOG") &&
         !InstallGuestCodeHook(reinterpret_cast<void*>(base + MapItemRemoveOffset), Prologue,
                               SessionHookItemRemove, SessionEntry)) {
+        complete = false;
         LOG_ERROR(Debug, "Bloodborne session hook failed at the map item removal");
     }
     if (EnvFlagEnabled("SHADPS4_BLOODBORNE_ITEM_LOG")) {
@@ -6403,6 +6505,7 @@ static void InstallSessionHooks(u64 base) {
                                           std::pair{u64{0x017D5B40}, SessionHookItemClearShared}}) {
             if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + offset), Prologue, tag,
                                       SessionEntry)) {
+                complete = false;
                 LOG_ERROR(Debug, "Bloodborne item hook failed at {:#x}", offset);
             }
         }
@@ -6414,6 +6517,7 @@ static void InstallSessionHooks(u64 base) {
                                SessionHookTalkCall, SessionEntry) ||
          !InstallGuestCodeHook(reinterpret_cast<void*>(base + 0x0203EECF), TalkResultStore,
                                SessionHookTalkResult, SessionEntry))) {
+        complete = false;
         LOG_ERROR(Debug, "Bloodborne session hook failed at the talk function result");
     }
     // SHADPS4_BLOODBORNE_FLAG_LOG=1: every event flag that changes, with the caller (test aid).
@@ -6421,19 +6525,23 @@ static void InstallSessionHooks(u64 base) {
     if ((EnvFlagEnabled("SHADPS4_BLOODBORNE_FLAG_LOG") || ShareWorldEnabled()) &&
         !InstallGuestCodeHook(reinterpret_cast<void*>(base + EventFlagSetOffset), FlagSetPrologue,
                               SessionHookFlagSet, SessionEntry)) {
+        complete = false;
         LOG_ERROR(Debug, "Bloodborne session hook failed at the event flag setter");
     }
     if (ShareProgressEnabled()) {
         if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + EventCommandHandlerOffset),
                                   Prologue, SessionHookEventCommand, SessionEntry)) {
-            LOG_ERROR(Debug, "Bloodborne session hook failed at the event command handler");
+            complete = false;
+        LOG_ERROR(Debug, "Bloodborne session hook failed at the event command handler");
         }
         if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_RE_TRACE") &&
             !InstallGuestCodeHook(reinterpret_cast<void*>(base + LanternRegisterOffset), Prologue,
                                   SessionHookLantern, SessionEntry)) {
-            LOG_ERROR(Debug, "Bloodborne session hook failed at the lantern registration");
+            complete = false;
+        LOG_ERROR(Debug, "Bloodborne session hook failed at the lantern registration");
         }
     }
+    return complete;
 }
 
 // Experimental: keep a co-op guest in the host's world when the session script would send them
@@ -6442,9 +6550,9 @@ static void InstallSessionHooks(u64 base) {
 //  - host died: the "HostDead_1" timer (forced warp home) is not scheduled
 //  - area boss defeated: the "BlockClear2_3Leave" timer (CSMultiPlayMan::Stop) is not scheduled
 //    and "BlockClear2_3" no longer takes its white-phantom branch (forced warp home)
-static void InstallStayInSessionPatches(u64 base) {
+static bool InstallStayInSessionPatches(u64 base) {
     if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_STAY_IN_SESSION")) {
-        return;
+        return true;
     }
 
     struct BytePatch {
@@ -6478,21 +6586,17 @@ static void InstallStayInSessionPatches(u64 base) {
         {0x0203C566, TalkMultiplayerResult, TalkNoMultiplayer},
     }};
 
-    const u64 image_size = MemoryPatcher::g_eboot_image_size;
     for (const auto& patch : patches) {
-        if (patch.offset > image_size || patch.expected.size() > image_size - patch.offset ||
-            !std::ranges::equal(
-                std::span<const u8>{reinterpret_cast<const u8*>(base + patch.offset),
-                                    patch.expected.size()},
-                patch.expected)) {
-            LOG_ERROR(Debug, "Bloodborne stay-in-session patch skipped: unexpected bytes at {:#x}",
+        if (!ImageBytesAre(patch.offset, patch.expected)) {
+            LOG_ERROR(Debug, "Bloodborne stay-in-session patch: unexpected bytes at {:#x}",
                       patch.offset);
-            return;
+            return false;
         }
     }
     for (const auto& patch : patches) {
-        std::memcpy(reinterpret_cast<u8*>(base + patch.offset), patch.replacement.data(),
-                    patch.replacement.size());
+        if (!PatchImage(patch.offset, patch.expected, patch.replacement)) {
+            return false;
+        }
     }
     LOG_INFO(Debug, "Bloodborne stay-in-session patches enabled (host death, boss defeated)");
     // Talk scripts (lanterns, the characters of the world) also ask whether they run for a
@@ -6504,14 +6608,12 @@ static void InstallStayInSessionPatches(u64 base) {
     static constexpr std::array<u8, 5> TalkNotForGuest{0x31, 0xC0, 0x0F, 0x1F, 0x00};
     constexpr u64 TalkForGuestOffset = 0x0203BA78;
     const char* guest_talk = std::getenv("SHADPS4_BLOODBORNE_GUEST_TALK");
-    if ((guest_talk == nullptr || std::string_view{guest_talk} != "0") &&
-        TalkForGuestOffset + TalkForGuest.size() <= image_size &&
-        std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(
-                                                   base + TalkForGuestOffset),
-                                               TalkForGuest.size()},
-                           TalkForGuest)) {
-        std::memcpy(reinterpret_cast<u8*>(base + TalkForGuestOffset), TalkNotForGuest.data(),
-                    TalkNotForGuest.size());
+    if (guest_talk == nullptr || std::string_view{guest_talk} != "0") {
+        if (!PatchImage(TalkForGuestOffset, TalkForGuest, TalkNotForGuest)) {
+            LOG_ERROR(Debug, "Bloodborne guest talk: not installed (SHADPS4_BLOODBORNE_GUEST_TALK=0 "
+                             "plays without it)");
+            return false;
+        }
         LOG_INFO(Debug, "Bloodborne guest talk: talk scripts take a guest for an ordinary player");
     }
     // The session script "OnLeave_Limit" (0x138A4A0) puts the local player through a forced reload
@@ -6540,36 +6642,25 @@ static void InstallStayInSessionPatches(u64 base) {
         0x90,
     };
     constexpr u64 LeaveLimitStartOffset = 0x0138A4A6;
-    if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_HOST_LEAVE_RELOAD") &&
-        LeaveLimitStartOffset + LeaveLimitStart.size() <= image_size &&
-        std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(
-                                                   base + LeaveLimitStartOffset),
-                                               LeaveLimitStart.size()},
-                           LeaveLimitStart)) {
-        std::memcpy(reinterpret_cast<u8*>(base + LeaveLimitStartOffset),
-                    LeaveLimitPhantomOnly.data(), LeaveLimitPhantomOnly.size());
+    if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_HOST_LEAVE_RELOAD")) {
+        if (!PatchImage(LeaveLimitStartOffset, LeaveLimitStart, LeaveLimitPhantomOnly)) {
+            LOG_ERROR(Debug, "Bloodborne session: host leave guard not installed "
+                             "(SHADPS4_BLOODBORNE_HOST_LEAVE_RELOAD=1 plays without it)");
+            return false;
+        }
         LOG_INFO(Debug, "Bloodborne session: a host is not reloaded when its session runs out");
     }
     // Items lying in the world: an object's treasure is not set up while the player is a guest
     // (session state 6). SHADPS4_BLOODBORNE_GUEST_ITEMS=1 removes that test (experiment).
     static constexpr std::array<u8, 7> GuestTreasureTest{0x83, 0xB8, 0x24, 0x01, 0x00, 0x00, 0x06};
     constexpr u64 GuestTreasureTestOffset = 0x017DC3CF;
-    if (EnvFlagEnabled("SHADPS4_BLOODBORNE_GUEST_ITEMS") &&
-        std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(
-                                                   base + GuestTreasureTestOffset),
-                                               GuestTreasureTest.size()},
-                           GuestTreasureTest)) {
-        *reinterpret_cast<u8*>(base + GuestTreasureTestOffset + 6) = 0x7F;
-        // A node's list id is numbered locally by the host only (a guest's nodes all keep the
-        // bare list type as id, and a pick-up by id takes the first of them): the same test in
-        // the three list insertions (treasure, what enemies drop, the third list).
-        for (const u64 offset : {0x017D52D2ULL, 0x017D5642ULL, 0x017D4F54ULL}) {
-            if (std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(base + offset),
-                                                       GuestTreasureTest.size()},
-                                   GuestTreasureTest)) {
-                *reinterpret_cast<u8*>(base + offset + 6) = 0x7F;
-            }
-        }
+    if (EnvFlagEnabled("SHADPS4_BLOODBORNE_GUEST_ITEMS")) {
+        // The treasure set-up, and (a node's list id is numbered locally by the host only: a
+        // guest's nodes all keep the bare list type as id, and a pick-up by id takes the first
+        // of them) the same test in the three list insertions (treasure, what enemies drop, the
+        // third list).
+        static constexpr std::array<u64, 4> TreasureTests{GuestTreasureTestOffset, 0x017D52D2ULL,
+                                                          0x017D5642ULL, 0x017D4F54ULL};
         // The host's "forget the shared items" message empties whole item lists of the receiver
         // (the list head is cleared whatever the nodes are): leave the lists alone. All three
         // lists (0x017D59F0 / 0x017D5B40 / 0x017D5C40), from the "all" and the "one list" paths;
@@ -6583,13 +6674,31 @@ static void InstallStayInSessionPatches(u64 base) {
             {0x017D409A, {0xE8, 0xA1, 0x1B, 0x00, 0x00}},
             {0x017D40AB, {0xE8, 0x90, 0x1A, 0x00, 0x00}},
         }};
+        static constexpr std::array<u8, 1> NotGuestState{0x7F};
+        const bool present =
+            std::ranges::all_of(TreasureTests,
+                                [](u64 offset) { return ImageBytesAre(offset, GuestTreasureTest); }) &&
+            std::ranges::all_of(ClearCalls, [](const auto& call) {
+                return ImageBytesAre(call.first, call.second);
+            });
+        if (!present) {
+            LOG_ERROR(Debug, "Bloodborne guest items: unexpected bytes, not installed "
+                             "(remove SHADPS4_BLOODBORNE_GUEST_ITEMS=1 to play without them)");
+            return false;
+        }
+        for (const u64 offset : TreasureTests) {
+            if (!PatchImage(offset, GuestTreasureTest, NotGuestState, 6)) {
+                return false;
+            }
+        }
         for (const auto& [offset, expected] : ClearCalls) {
-            if (std::memcmp(reinterpret_cast<const void*>(base + offset), expected.data(), 5) == 0) {
-                std::memcpy(reinterpret_cast<void*>(base + offset), NoCall5.data(), 5);
+            if (!PatchImage(offset, expected, NoCall5)) {
+                return false;
             }
         }
         LOG_INFO(Debug, "Bloodborne guest items: treasure is set up for guests too");
     }
+    return true;
 }
 
 void RequestBellUse(std::int32_t goods_id) {
@@ -6624,27 +6733,21 @@ void RequestSessionStop(bool keep_role) {
 // hands it on negated as the Insight change. In this mode the bell is how the players find
 // each other again, by hotkey and by itself with SHADPS4_BLOODBORNE_AUTO_REJOIN, so the change
 // is made 0: no item costs Insight to use. SHADPS4_BLOODBORNE_BELL_INSIGHT=1 keeps the cost.
-static void InstallFreeBellPatch(u64 base) {
+static bool InstallFreeBellPatch(u64 base) {
     // movzx eax, byte [r15+0x38]; neg eax; mov [rbp-0x44], eax
     static constexpr std::array<u8, 10> InsightCost{0x41, 0x0F, 0xB6, 0x47, 0x38,
                                                     0xF7, 0xD8, 0x89, 0x45, 0xBC};
     static constexpr std::array<u8, 2> NoCost{0x31, 0xC0}; // xor eax, eax
     constexpr u64 InsightCostOffset = 0x018C92BB;
+    (void)base;
     if (EnvFlagEnabled("SHADPS4_BLOODBORNE_BELL_INSIGHT")) {
-        return;
+        return true;
     }
-    const u64 image_size = MemoryPatcher::g_eboot_image_size;
-    if (InsightCostOffset + InsightCost.size() > image_size ||
-        !std::ranges::equal(std::span<const u8>{reinterpret_cast<const u8*>(
-                                                    base + InsightCostOffset),
-                                                InsightCost.size()},
-                            InsightCost)) {
-        LOG_ERROR(Debug, "Bloodborne free bell patch skipped: unexpected bytes at {:#x}",
-                  InsightCostOffset);
-        return;
+    if (!PatchImage(InsightCostOffset, InsightCost, NoCost, 5)) {
+        return false;
     }
-    std::memcpy(reinterpret_cast<u8*>(base + InsightCostOffset + 5), NoCost.data(), NoCost.size());
     LOG_INFO(Debug, "Bloodborne free bell: ringing the Beckoning Bell costs no Insight");
+    return true;
 }
 
 // A co-op guest is treated as a lesser player in several places: half the blood echoes, no
@@ -6655,7 +6758,7 @@ static void InstallFreeBellPatch(u64 base) {
 //  - SHADPS4_BLOODBORNE_GUEST_HALF_REWARDS=1 keeps half echoes and no boss Insight
 //  - SHADPS4_BLOODBORNE_GHOST_NPCS=1 keeps the grey NPCs
 //  - SHADPS4_BLOODBORNE_GUEST_HP_CUT=1 keeps the HP cut (see ApplyGuestHpCut)
-static void InstallGuestEqualPatches(u64 base) {
+static bool InstallGuestEqualPatches(u64 base) {
     struct BytePatch {
         const char* name;
         u64 offset;
@@ -6681,18 +6784,22 @@ static void InstallGuestEqualPatches(u64 base) {
     if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_GUEST_HALF_REWARDS")) {
         // Kill reward 0x018FC860: a guest's share is multiplied by the 0.5 at 0x04927EC0
         // (VMOVSS XMM3, [RIP + disp32]); point it at the 1.0 just before it.
-        if (float_at(0x04927EC0) == 0.5f && float_at(0x04927EBC) == 1.0f) {
-            patches.push_back({"kill echoes", 0x018FC947,
-                               {0xC5, 0xFA, 0x10, 0x1D, 0x71, 0xB5, 0x02, 0x03},
-                               {0x6D, 0xB5, 0x02, 0x03}, 4});
+        if (float_at(0x04927EC0) != 0.5f || float_at(0x04927EBC) != 1.0f) {
+            LOG_ERROR(Debug, "Bloodborne kill echoes: unexpected constants at 0x4927EBC");
+            return false;
         }
+        patches.push_back({"kill echoes", 0x018FC947,
+                           {0xC5, 0xFA, 0x10, 0x1D, 0x71, 0xB5, 0x02, 0x03},
+                           {0x6D, 0xB5, 0x02, 0x03}, 4});
         // Event reward 0x01335400: a guest's reward is multiplied by the 0.5 at 0x04925B1C
         // (VMULSS XMM0, XMM0, [RIP + disp32]); point it at the 1.0 right after it.
-        if (float_at(0x04925B1C) == 0.5f && float_at(0x04925B20) == 1.0f) {
-            patches.push_back({"event echoes", 0x01335589,
-                               {0xC5, 0xFA, 0x59, 0x05, 0x8B, 0x05, 0x5F, 0x03},
-                               {0x8F, 0x05, 0x5F, 0x03}, 4});
+        if (float_at(0x04925B1C) != 0.5f || float_at(0x04925B20) != 1.0f) {
+            LOG_ERROR(Debug, "Bloodborne event echoes: unexpected constants at 0x4925B1C");
+            return false;
         }
+        patches.push_back({"event echoes", 0x01335589,
+                           {0xC5, 0xFA, 0x59, 0x05, 0x8B, 0x05, 0x5F, 0x03},
+                           {0x8F, 0x05, 0x5F, 0x03}, 4});
         // Boss kill 0x018C5070 gives the boss's Insight only in the player's own world
         // (CMP byte [global+0x1592], 0 / JZ skip): jump over the JZ instead.
         patches.push_back({"boss insight", 0x018C52F9, {0x0F, 0x84, 0xA7, 0x06, 0x00, 0x00},
@@ -6714,18 +6821,22 @@ static void InstallGuestEqualPatches(u64 base) {
     patches.push_back(
         {"send backlog", 0x017897AD, {0x3D, 0xE9, 0x03, 0x00, 0x00}, {0x30, 0x75, 0x00, 0x00}, 1});
 
-    std::string applied;
     for (const auto& patch : patches) {
         if (!matches(patch.offset, patch.expected)) {
-            LOG_ERROR(Debug, "Bloodborne {} patch skipped: unexpected bytes at {:#x}", patch.name,
+            LOG_ERROR(Debug, "Bloodborne {} patch: unexpected bytes at {:#x}", patch.name,
                       patch.offset);
-            continue;
+            return false;
         }
-        std::memcpy(reinterpret_cast<u8*>(base + patch.offset + patch.write_at),
-                    patch.replacement.data(), patch.replacement.size());
+    }
+    std::string applied;
+    for (const auto& patch : patches) {
+        if (!PatchImage(patch.offset, patch.expected, patch.replacement, patch.write_at)) {
+            return false;
+        }
         applied += applied.empty() ? patch.name : std::string{", "} + patch.name;
     }
     LOG_INFO(Debug, "Bloodborne guest patches: {}", applied);
+    return true;
 }
 
 // A summoned player carries special effect 9006 (9026/9036/9046/9056 for the other phantom
@@ -6829,6 +6940,24 @@ struct ParamTable {
     u64 end;
 };
 
+// Param tables FindParamTables checked writable as a whole (HasMemoryAccess is too slow on
+// Windows to ask for each of the thousands of rows): PokeParam writes only inside them.
+std::mutex writable_param_mutex;
+std::vector<std::pair<u64, u64>> writable_param_ranges;
+
+void AddWritableParamRange(u64 begin, u64 end) {
+    std::scoped_lock lock{writable_param_mutex};
+    writable_param_ranges.emplace_back(begin, end);
+}
+
+bool IsWritableParam(u64 address, size_t size) {
+    std::scoped_lock lock{writable_param_mutex};
+    return std::ranges::any_of(writable_param_ranges, [&](const auto& range) {
+        return address >= range.first && size <= range.second - range.first &&
+               address - range.first <= range.second - range.first - size;
+    });
+}
+
 // Row data at index entry `i`, or 0 when it lies outside the table (still being built).
 u64 ParamRowAt(const ParamTable& table, u32 i, size_t size) {
     const u64 offset = ReadValue<u64>(table.base + 0x40 + static_cast<u64>(i) * 0x18, 8);
@@ -6867,6 +6996,7 @@ std::vector<ParamTable> FindParamTables(std::string_view type, size_t row_size) 
         }
         if (sane && HasMemoryAccess(base, end - base, MemoryProt::CpuWrite)) {
             tables.push_back({base, count, end});
+            AddWritableParamRange(base, end);
         }
     }
     return tables;
@@ -6880,8 +7010,12 @@ T PeekParam(u64 address) {
 }
 
 template <typename T>
-void PokeParam(u64 address, const T& value) {
+bool PokeParam(u64 address, const T& value) {
+    if (!IsWritableParam(address, sizeof(value))) {
+        return false;
+    }
     std::memcpy(reinterpret_cast<void*>(address), &value, sizeof(value));
+    return true;
 }
 
 bool PrepareScaling() {
@@ -6902,6 +7036,9 @@ bool PrepareScaling() {
         }
         std::array<u8, SpEffectRowSize> clean{};
         std::memcpy(clean.data(), reinterpret_cast<const void*>(source), clean.size());
+        if (!IsWritableParam(enemy, clean.size()) || !IsWritableParam(boss, clean.size())) {
+            continue;
+        }
         std::memcpy(reinterpret_cast<void*>(enemy), clean.data(), clean.size());
         std::memcpy(reinterpret_cast<void*>(boss), clean.data(), clean.size());
         rows_enemy.push_back(enemy);
@@ -7266,9 +7403,9 @@ void PS4_SYSV_ABI FloorGuardEntry(u64, const GuestRegisterSnapshot* registers) {
                 character, floor, GetCurrentPackedMap());
 }
 
-static void InstallNoFogWalls(u64 base) {
+static bool InstallNoFogWalls(u64 base) {
     if (EnvFlagEnabled("SHADPS4_BLOODBORNE_FOG_WALLS")) {
-        return;
+        return true;
     }
     static constexpr std::array<u8, 6> Prologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57};
     static constexpr std::array<u8, 8> SfxPrologue{0x55, 0x41, 0x57, 0x41, 0x56,
@@ -7277,11 +7414,23 @@ static void InstallNoFogWalls(u64 base) {
                                                     0x41, 0x57, 0x41, 0x56};
     static constexpr std::array<u8, 10> FloorLoad{0x48, 0x8B, 0xB3, 0x88, 0x02,
                                                   0x00, 0x00, 0x48, 0x85, 0xF6};
+    static constexpr std::array<u8, 5> MultiWall{0x55, 0x48, 0x89, 0xE5, 0x53};
+    static constexpr std::array<u8, 5> JumpToInvalid{0xE9, 0x6B, 0x01, 0x00, 0x00};
+    // Every site is checked before the first hook goes in, so that a mismatch leaves none.
+    if (!ImageBytesAre(0x018CB14F, FloorLoad) ||
+        !ImageBytesAre(EventObjectBankOffset, BankPrologue) ||
+        !ImageBytesAre(EventSfxBankOffset, BankPrologue) ||
+        !ImageBytesAre(ObjectDrawOffset, Prologue) ||
+        !ImageBytesAre(ObjectCollisionOffset, Prologue) ||
+        !ImageBytesAre(ObjectSfxEnableOffset, SfxPrologue) || !ImageBytesAre(0x0138B720, MultiWall)) {
+        LOG_ERROR(Debug, "Bloodborne fog walls: unexpected bytes at a wall site");
+        return false;
+    }
     // The floor guard first: without it no wall comes down.
     if (!InstallGuestCodeHook(reinterpret_cast<void*>(base + 0x018CB14F), FloorLoad, 0,
                               FloorGuardEntry)) {
-        LOG_ERROR(Debug, "Bloodborne fog walls: floor guard hook failed, the walls stay");
-        return;
+        LOG_ERROR(Debug, "Bloodborne fog walls: floor guard hook failed");
+        return false;
     }
     const bool ok =
         InstallGuestCodeHook(reinterpret_cast<void*>(base + EventObjectBankOffset), BankPrologue,
@@ -7294,17 +7443,13 @@ static void InstallNoFogWalls(u64 base) {
                              WallToggleEntry) &&
         InstallGuestCodeHook(reinterpret_cast<void*>(base + ObjectSfxEnableOffset), SfxPrologue,
                              2, WallToggleEntry);
-    if (!ok) {
-        LOG_ERROR(Debug, "Bloodborne fog walls: a wall hook failed");
-        return;
-    }
     // Lua_MultiWall -> JMP Lua_InvalidMultiWall.
-    static constexpr std::array<u8, 5> MultiWall{0x55, 0x48, 0x89, 0xE5, 0x53};
-    static constexpr std::array<u8, 5> JumpToInvalid{0xE9, 0x6B, 0x01, 0x00, 0x00};
-    if (std::memcmp(reinterpret_cast<const void*>(base + 0x0138B720), MultiWall.data(), 5) == 0) {
-        std::memcpy(reinterpret_cast<void*>(base + 0x0138B720), JumpToInvalid.data(), 5);
+    if (!ok || !PatchImage(0x0138B720, MultiWall, JumpToInvalid)) {
+        LOG_ERROR(Debug, "Bloodborne fog walls: a wall hook failed");
+        return false;
     }
     LOG_INFO(Debug, "Bloodborne fog walls: co-op walls stay down (boss walls stay), floor guard on");
+    return true;
 }
 
 void InstallSeamlessCoopPatches() {
@@ -7323,6 +7468,14 @@ void InstallSeamlessCoopPatches() {
     if (MemoryPatcher::g_game_serial != "CUSA03173") {
         return;
     }
+    // From here a return before the end leaves the mode incomplete, and the loader stops.
+    seamless_install_failure = "the seamless co-op core (the lines above say which part)";
+    image_patching_open = true;
+    struct CloseImage {
+        ~CloseImage() {
+            image_patching_open = false;
+        }
+    } close_image;
 
     const std::string_view app_version = Common::ElfInfo::Instance().AppVer();
     if (app_version != "01.09") {
@@ -7704,32 +7857,36 @@ void InstallSeamlessCoopPatches() {
     }
     healing_fountain_host_availability_hook_installed = true;
 
-    std::memcpy(area_comparison, BeckoningSignedAreaComparison.data(),
-                BeckoningSignedAreaComparison.size());
-    std::memcpy(area_flag_result, BeckoningAllowedAreaFlagResult.data(),
-                BeckoningAllowedAreaFlagResult.size());
-    std::memcpy(responder_bell_area_result, ResponderBellAllowedAreaResult.data(),
-                ResponderBellAllowedAreaResult.size());
-    std::memcpy(responder_bell_common_result, ResponderBellAllowedCommonResult.data(),
-                ResponderBellAllowedCommonResult.size());
-    std::memcpy(active_bell_area_comparison, ActiveBellSignedAreaComparison.data(),
-                ActiveBellSignedAreaComparison.size());
-    std::memcpy(active_bell_area_flag_result, ActiveBellAllowedAreaFlagResult.data(),
-                ActiveBellAllowedAreaFlagResult.size());
-    std::memcpy(responder_search_area_range_result, ResponderSearchSignedAreaRangeResult.data(),
-                ResponderSearchSignedAreaRangeResult.size());
-    std::memcpy(sos_status_area_restriction, SosStatusAllowedArea.data(),
-                SosStatusAllowedArea.size());
-    std::memcpy(summon_candidate_area_restriction, SummonCandidateAllowedCrossMap.data(),
-                SummonCandidateAllowedCrossMap.size());
-    std::memcpy(summon_build_area_restriction, SummonBuildAllowedCrossMap.data(),
-                SummonBuildAllowedCrossMap.size());
-    std::memcpy(summon_build_world_state_restriction, SummonBuildAllowedWorldState.data(),
-                SummonBuildAllowedWorldState.size());
-    std::memcpy(summon_build_negative_event_restriction, SummonBuildAllowedNegativeEvent.data(),
-                SummonBuildAllowedNegativeEvent.size());
-    std::memcpy(stage_transition_stop_matching_call, StageTransitionKeepMatchingCall.data(),
-                StageTransitionKeepMatchingCall.size());
+    bool core_written = true;
+    core_written &= WriteImageAt(area_comparison, BeckoningSignedAreaComparison.data(),
+                                 BeckoningSignedAreaComparison.size());
+    core_written &= WriteImageAt(area_flag_result, BeckoningAllowedAreaFlagResult.data(),
+                                 BeckoningAllowedAreaFlagResult.size());
+    core_written &= WriteImageAt(responder_bell_area_result, ResponderBellAllowedAreaResult.data(),
+                                 ResponderBellAllowedAreaResult.size());
+    core_written &= WriteImageAt(responder_bell_common_result, ResponderBellAllowedCommonResult.data(),
+                                 ResponderBellAllowedCommonResult.size());
+    core_written &= WriteImageAt(active_bell_area_comparison, ActiveBellSignedAreaComparison.data(),
+                                 ActiveBellSignedAreaComparison.size());
+    core_written &= WriteImageAt(active_bell_area_flag_result, ActiveBellAllowedAreaFlagResult.data(),
+                                 ActiveBellAllowedAreaFlagResult.size());
+    core_written &= WriteImageAt(responder_search_area_range_result, ResponderSearchSignedAreaRangeResult.data(),
+                                 ResponderSearchSignedAreaRangeResult.size());
+    core_written &= WriteImageAt(sos_status_area_restriction, SosStatusAllowedArea.data(),
+                                 SosStatusAllowedArea.size());
+    core_written &= WriteImageAt(summon_candidate_area_restriction, SummonCandidateAllowedCrossMap.data(),
+                                 SummonCandidateAllowedCrossMap.size());
+    core_written &= WriteImageAt(summon_build_area_restriction, SummonBuildAllowedCrossMap.data(),
+                                 SummonBuildAllowedCrossMap.size());
+    core_written &= WriteImageAt(summon_build_world_state_restriction, SummonBuildAllowedWorldState.data(),
+                                 SummonBuildAllowedWorldState.size());
+    core_written &= WriteImageAt(summon_build_negative_event_restriction, SummonBuildAllowedNegativeEvent.data(),
+                                 SummonBuildAllowedNegativeEvent.size());
+    core_written &= WriteImageAt(stage_transition_stop_matching_call, StageTransitionKeepMatchingCall.data(),
+                                 StageTransitionKeepMatchingCall.size());
+    if (!core_written) {
+        return;
+    }
     negative_area_patch_installed = true;
     area_flag_patch_installed = true;
     responder_bell_area_patch_installed = true;
@@ -7743,13 +7900,32 @@ void InstallSeamlessCoopPatches() {
     summon_build_world_state_patch_installed = true;
     summon_build_negative_event_patch_installed = true;
     stage_transition_keep_matching_patch_installed = true;
-    InstallStayInSessionPatches(base);
-    InstallFreeBellPatch(base);
-    InstallGuestEqualPatches(base);
-    InstallDeathRulePatches(base);
+    seamless_install_failure.clear();
+    if (!InstallStayInSessionPatches(base)) {
+        InstallFailed("the stay-in-session rules (SHADPS4_BLOODBORNE_STAY_IN_SESSION)");
+    }
+    if (!InstallFreeBellPatch(base)) {
+        InstallFailed("the free bell (SHADPS4_BLOODBORNE_BELL_INSIGHT=1 plays without it)");
+    }
+    if (!InstallGuestEqualPatches(base)) {
+        InstallFailed("the full-guest patches (SHADPS4_BLOODBORNE_GUEST_HALF_REWARDS=1, "
+                      "SHADPS4_BLOODBORNE_GHOST_NPCS=1, SHADPS4_BLOODBORNE_SCALING=0)");
+    }
+    if (!InstallDeathRulePatches(base)) {
+        InstallFailed("the boss-fight death rules (SHADPS4_BLOODBORNE_SPECTATE=0 plays without "
+                      "them)");
+    }
     StartScaling();
-    InstallNoFogWalls(base);
-    InstallSessionHooks(base);
+    if (!InstallNoFogWalls(base)) {
+        InstallFailed("the removal of co-op fog walls (SHADPS4_BLOODBORNE_FOG_WALLS=1 plays "
+                      "with the walls)");
+    }
+    if (!InstallSessionHooks(base)) {
+        InstallFailed("the session hooks (SHADPS4_BLOODBORNE_STAY_IN_SESSION)");
+    }
+    if (const char* part = std::getenv("SHADPS4_BLOODBORNE_TEST_INSTALL_FAILURE")) {
+        InstallFailed(part); // test aid: the loader's stop
+    }
     LOG_INFO(Debug,
              "Bloodborne seamless patches enabled Beckoning, Small Resonant, and Sinister Bell "
              "use, active search, cross-map candidate selection, and native summon construction "

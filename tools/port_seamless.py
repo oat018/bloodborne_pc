@@ -38,6 +38,8 @@ INCLUDES_NEW = '''#include <cstdio>
 #include <sys/uio.h>
 #include <unistd.h>
 extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+extern "C" int runtime_memory_has_access(uintptr_t address, uint64_t size, int write);
+extern "C" int bbport_image_access(uintptr_t address, uint64_t size, int write);
 #endif
 
 // bbport: the port's log shows warnings and errors only; co-op messages always go to the
@@ -108,12 +110,17 @@ bool HasMemoryAccess(u64 address, size_t size, MemoryProt required) {
     }
     return true;
 #else
+    // The loader and the runtime answer for the memory they made, with its protection: the
+    // image as the loader protected each segment (all writable while the co-op code installs),
+    // the game's own mappings as the game asked for them (a read takes the runtime's cached
+    // lookup: the hooks read on every frame).
+    const bool write = required == MemoryProt::CpuWrite;
     const u64 image = MemoryPatcher::g_eboot_address;
-    if (address >= image && address - image < MemoryPatcher::g_eboot_image_size &&
-        size <= MemoryPatcher::g_eboot_image_size - (address - image)) {
-        return true;
+    if (address >= image && address - image < MemoryPatcher::g_eboot_image_size) {
+        return bbport_image_access(address, size, write ? 1 : 0) != 0;
     }
-    if (runtime_memory_is_mapped(address, size) != 0) {
+    if ((write ? runtime_memory_has_access(address, size, 1)
+               : runtime_memory_is_mapped(address, size)) != 0) {
         return true;
     }
     // The runtime knows the game's own mappings only. A hook's return address and the

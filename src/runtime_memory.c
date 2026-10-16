@@ -813,6 +813,25 @@ int runtime_memory_is_mapped(uintptr_t address, uint64_t size) {
     read_unlock();
     return result;
 }
+/* The co-op code (gpu/bbnet) asks before it reads or writes the game's memory: every byte
+   mapped, not reserved, and with the access asked for (PS4 bits: 0x11 read, 0x22 write, 4 exec,
+   as host_prot maps them). */
+int runtime_memory_has_access(uintptr_t address, uint64_t size, int write) {
+    if (!size || address + size < address) return 0;
+    const int wanted=write ? 0x22 : 0x15;
+    int result=1;
+    read_lock();
+    size_t i=vma_index(address);
+    for (uintptr_t at=address; at<address+size; ++i) {
+        if (i==vma_count || vmas[i].start>at || vmas[i].kind==KIND_RESERVED || !(vmas[i].prot & wanted)) {
+            result=0;
+            break;
+        }
+        at=vmas[i].end;
+    }
+    read_unlock();
+    return result;
+}
 void runtime_memory_report(void) {
     printf("Runtime: direct memory allocations=%zu, maps=%zu, live=%" PRIu64 ", budget=%" PRIu64 "\n",
            allocations, maps, live_bytes, POOL_SIZE);
