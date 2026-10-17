@@ -2029,6 +2029,7 @@ constexpr u64 BossGaugePointerOffset = 0x05562878; // MenuMan: boss bars at +0x1
 constexpr u64 BlockClear2FirstOffset = 0x01385470; // boss killed (Lua BlockClear2_1)
 constexpr u64 PlayerSlotManagerPointerOffset = 0x0553B130;
 std::atomic<s64> boss_killed_at_ms{0};
+std::atomic<s64> guest_session_since_ms{0}; // when this game became a session guest (0: not one)
 u64 FindHostCharacter(u64 world_chr_man, u64 player);
 u64 GetChrTransform(u64 chr);
 std::atomic<bool> debug_boss_fight{false};
@@ -6431,6 +6432,11 @@ void ApplyGuestReinsertAfterReload() {
     const u64 data = GetChrDataModule(player);
     const s32 session = multi_play >= 0x10000 ? ReadValue<s32>(multi_play, 0x124) : 0;
     const bool in_session = session == 3 || session == 6; // hosting, or a guest
+    if (session != 6) {
+        guest_session_since_ms.store(0);
+    } else if (guest_session_since_ms.load() == 0) {
+        guest_session_since_ms.store(SteadyMs());
+    }
     for (auto& handle : partner_handles) {
         const u64 key = reinterpret_cast<u64>(handle.storage.data());
         if (handle.used && (!in_session || (handle.in_world && !IsSessionMember(key)))) {
@@ -6779,6 +6785,31 @@ static bool InstallSessionHooks(u64 base) {
     return complete;
 }
 
+// A lobby guest travels to the host's map in its own world first and joins there, so the map's
+// events start with its own flags. When the host's arrive, a boss that lives in the guest's
+// own world but is dead in the host's is taken for one that has just died, and the session
+// script runs its boss clear "BlockClear2" (the big "boss defeated" banner, the co-op mission
+// clear, and a guest that can pick nothing up afterwards; real session 17 Oct, Tomb of Oedon).
+// The game never meets this: a phantom cannot be summoned once the area's boss is dead. A boss
+// clear in the first 30 s of a guest's session is marked handled (byte +8 of the event, which
+// BlockClear2 tests first); a later one is a boss killed together and runs as usual.
+// SHADPS4_BLOODBORNE_STALE_BLOCK_CLEAR=1 lets the early one run too.
+constexpr u64 BlockClear2Offset = 0x013849A0;
+
+void PS4_SYSV_ABI StaleBlockClearEntry(u64, const GuestRegisterSnapshot* registers) {
+    const s64 since = guest_session_since_ms.load();
+    const u64 event = registers->rdx;
+    if (since == 0 || SteadyMs() - since > 30000 || event < 0x10000 ||
+        !HasMemoryAccess(event, 0x18, MemoryProt::CpuWrite) || ReadValue<u8>(event, 8) != 0) {
+        return;
+    }
+    WriteValue<u8>(event, 8, 1);
+    LOG_INFO(Debug,
+             "Bloodborne session: boss clear {} skipped, the boss was already dead in the "
+             "host's world when this guest joined",
+             ReadValue<s32>(event, 0x14));
+}
+
 // Experimental: keep a co-op guest in the host's world when the session script would send them
 // home. Guest-side changes to the native SprjSessionManager handlers, on with
 // SHADPS4_BLOODBORNE_STAY_IN_SESSION=1:
@@ -6840,6 +6871,14 @@ static bool InstallStayInSessionPatches(u64 base) {
         if (!PatchImage(patch.offset, patch.expected, patch.replacement)) {
             return false;
         }
+    }
+    static constexpr std::array<u8, 6> Prologue{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57};
+    if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_STALE_BLOCK_CLEAR") &&
+        (!ImageBytesAre(BlockClear2Offset, Prologue) ||
+         !InstallGuestCodeHook(reinterpret_cast<void*>(base + BlockClear2Offset), Prologue, 0,
+                               StaleBlockClearEntry))) {
+        LOG_ERROR(Debug, "Bloodborne stay-in-session: boss clear hook failed");
+        return false;
     }
     LOG_INFO(Debug, "Bloodborne stay-in-session patches enabled (host death, boss defeated)");
     // Talk scripts (lanterns, the characters of the world) also ask whether they run for a
