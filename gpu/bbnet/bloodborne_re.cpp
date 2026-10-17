@@ -6784,7 +6784,8 @@ static bool InstallSessionHooks(u64 base) {
 // SHADPS4_BLOODBORNE_STAY_IN_SESSION=1:
 //  - host died: the "HostDead_1" timer (forced warp home) is not scheduled
 //  - area boss defeated: the "BlockClear2_3Leave" timer (CSMultiPlayMan::Stop) is not scheduled
-//    and "BlockClear2_3" no longer takes its white-phantom branch (forced warp home)
+//    and "BlockClear2_3" no longer takes its white-phantom branch (forced warp home); nor is
+//    the co-op mission clear ("RecallMenuEvent_MisssionClear_forNormalCoop") scheduled
 static bool InstallStayInSessionPatches(u64 base) {
     if (!EnvFlagEnabled("SHADPS4_BLOODBORNE_STAY_IN_SESSION")) {
         return true;
@@ -6800,6 +6801,12 @@ static bool InstallStayInSessionPatches(u64 base) {
     static constexpr std::array<u8, 5> NoCall{0x0F, 0x1F, 0x44, 0x00, 0x00};
     static constexpr std::array<u8, 2> BlockClearPhantomBranch{0x75, 0x46};
     static constexpr std::array<u8, 2> BlockClearSkipPhantomBranch{0xEB, 0x46};
+    // "BlockClear2_1" on a white phantom also schedules "RecallMenuEvent_MisssionClear_forNormalCoop"
+    // (the farewell message, then the guest counts as leaving): it ran on every join into an area
+    // whose boss is dead in the host's world, and the guest could pick nothing up afterwards
+    // (real session 17 Oct). Not scheduled.
+    static constexpr std::array<u8, 2> BlockClearCoopRecall{0x75, 0x27};
+    static constexpr std::array<u8, 2> BlockClearSkipCoopRecall{0xEB, 0x27};
     // Death handler: a co-op guest (chr type 1) dies like a solo player ("SoloPlayDeath":
     // respawn) instead of "PartyGhostDeath" (sent home, leaves the room).
     static constexpr std::array<u8, 2> DeathCoopPhantomTest{0x08, 0xD1};
@@ -6812,10 +6819,11 @@ static bool InstallStayInSessionPatches(u64 base) {
     // or more than one player) and hide their prompts if so. Answer no.
     static constexpr std::array<u8, 3> TalkMultiplayerResult{0x0F, 0xB6, 0xC1};
     static constexpr std::array<u8, 3> TalkNoMultiplayer{0x31, 0xC0, 0x90};
-    const std::array<BytePatch, 6> patches{{
+    const std::array<BytePatch, 7> patches{{
         {0x01381A16, HostDeadSchedule, NoCall},
         {0x01385877, BlockClearLeaveSchedule, NoCall},
         {0x0138599C, BlockClearPhantomBranch, BlockClearSkipPhantomBranch},
+        {0x013855B7, BlockClearCoopRecall, BlockClearSkipCoopRecall},
         {0x013816EC, DeathCoopPhantomTest, NoTest},
         {0x013CDEF6, TransitionStop, NotStopped},
         {0x0203C566, TalkMultiplayerResult, TalkNoMultiplayer},
