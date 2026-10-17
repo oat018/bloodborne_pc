@@ -6816,11 +6816,16 @@ constexpr u64 BlockClear2Offset = 0x013849A0;
 void PS4_SYSV_ABI StaleBlockClearEntry(u64, const GuestRegisterSnapshot* registers) {
     const s64 since = guest_session_since_ms.load();
     const u64 event = registers->rdx;
-    if (since == 0 || SteadyMs() - since > 30000 || event < 0x10000 ||
-        !HasMemoryAccess(event, 0x18, MemoryProt::CpuWrite) || ReadValue<u8>(event, 8) != 0) {
+    // The event lies on the game's thread stack, which the runtime's memory checks do not know
+    // on Linux (WriteValue refuses there): written directly, as BlockClear2 itself reads it next.
+    if (since == 0 || SteadyMs() - since > 30000 || event < 0x10000) {
         return;
     }
-    WriteValue<u8>(event, 8, 1);
+    auto* const handled = reinterpret_cast<volatile u8*>(event + 8);
+    if (*handled != 0) {
+        return;
+    }
+    *handled = 1;
     LOG_INFO(Debug,
              "Bloodborne session: boss clear {} skipped, the boss was already dead in the "
              "host's world when this guest joined",
@@ -6898,7 +6903,7 @@ static bool InstallStayInSessionPatches(u64 base) {
         return false;
     }
     LOG_INFO(Debug, "Bloodborne stay-in-session patches enabled (host death, boss defeated, "
-                    "stale boss clear; build 2026-10-17 late)");
+                    "stale boss clear; build 2026-10-18)");
     // Talk scripts (lanterns, the characters of the world) also ask whether they run for a
     // guest: talk function 19 returns the byte at +0x25 of the talk's own data, 1 on a guest's
     // side, and the scripts then offer nothing. Answer 0, so that a guest can talk to the
