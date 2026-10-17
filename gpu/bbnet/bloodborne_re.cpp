@@ -6087,15 +6087,16 @@ s32 HostPlaceToFollow(bool& walked) {
 }
 
 // The return point the host last travelled to when it is in this player's map: 0 after a
-// death respawn, -1 when no host in this map has been heard of lately.
-s32 HostReturnPointHere() {
+// death respawn, -1 when no host in this map has been heard of lately. With partner_session 6,
+// the same for a guest (a host looking for its guest).
+s32 HostReturnPointHere(s32 partner_session = 3) {
     std::array<PlaceNote, 4> notes{};
     const int count = Libraries::Net::P2PSeamlessCollect(notes.data(), sizeof(PlaceNote),
                                                          static_cast<u32>(notes.size()));
     const u32 current = GetCurrentPackedMap() & 0xFFFF0000;
     for (int index = 0; index < count; ++index) {
         const PlaceNote& note = notes[index];
-        if (note.magic == PlaceNoteMagic && note.session == 3 &&
+        if (note.magic == PlaceNoteMagic && note.session == partner_session &&
             (note.map & 0xFFFF0000) == current) {
             return note.return_point;
         }
@@ -6105,14 +6106,15 @@ s32 HostReturnPointHere() {
 
 // A lantern of the host's map for a dead guest to respawn at: the one the host travelled to, else
 // the first one of that map (the guest then goes on to where the host stands). 0 when no host
-// has been heard of lately.
-s32 HostMapLantern() {
+// has been heard of lately. With partner_session 6, a lantern of the guest's map for a dead host.
+s32 HostMapLantern(s32 partner_session = 3) {
     std::array<PlaceNote, 4> notes{};
     const int count = Libraries::Net::P2PSeamlessCollect(notes.data(), sizeof(PlaceNote),
                                                          static_cast<u32>(notes.size()));
     for (int index = 0; index < count; ++index) {
         const PlaceNote& note = notes[index];
-        if (note.magic != PlaceNoteMagic || note.session != 3 || !IsUsablePackedMap(note.map)) {
+        if (note.magic != PlaceNoteMagic || note.session != partner_session ||
+            !IsUsablePackedMap(note.map)) {
             continue;
         }
         const u8 area = static_cast<u8>(note.map >> 24);
@@ -6534,20 +6536,28 @@ void ApplyGuestReinsertAfterReload() {
     // followed the host with a second load. Point it at a lantern of the host's map instead: one
     // load, as BBSC does, then on to where the host stands. The guest's own lantern is put back
     // once it is up again, so that its own world keeps its own respawn point.
+    // A host that dies does the same the other way: it respawns at a lantern of the map its
+    // guest is in and then goes to where the guest stands (the guest stays where it is).
     static s32 own_lantern = -1;
     static bool respawn_at_host = false;
     const bool dead = data != 0 && ReadValue<s32>(data, DataModuleHpOffset) <= 0;
     const bool in_world_now = state >= 0x10000 && ReadValue<u8>(state, 0x08) == 0 &&
                               ReadValue<u8>(state, 0x1520) == 0;
-    if (session == 6 && dead && in_world_now && own_lantern < 0 &&
+    if ((session == 6 || (session == 3 && GetPartnerState(world_chr_man, player).alive > 0)) &&
+        dead && in_world_now && own_lantern < 0 &&
         HasMemoryAccess(state, 0x152C, MemoryProt::CpuWrite)) {
-        if (const s32 lantern = HostMapLantern(); lantern > 0) {
+        if (const s32 lantern = HostMapLantern(session == 6 ? 3 : 6); lantern > 0) {
             const s32 own = ReadValue<s32>(state, 0x1528);
             if (lantern == own || WriteValue<s32>(state, 0x1528, lantern)) {
                 own_lantern = own;
                 respawn_at_host = true;
-                LOG_INFO(Debug, "Bloodborne session: dead guest respawns at the host's lantern {} "
-                         "(its own {})", lantern, own);
+                if (session == 6) {
+                    LOG_INFO(Debug, "Bloodborne session: dead guest respawns at the host's "
+                             "lantern {} (its own {})", lantern, own);
+                } else {
+                    LOG_INFO(Debug, "Bloodborne session: dead host respawns at lantern {} of "
+                             "the guest's map (its own {})", lantern, own);
+                }
             }
         }
     } else if (own_lantern >= 0 && !dead && in_world_now && data != 0) {
@@ -6660,7 +6670,7 @@ void ApplyGuestReinsertAfterReload() {
                 }
             }
         }
-        if (session != 6 || now >= join_spot_until) {
+        if ((session != 6 && session != 3) || now >= join_spot_until) {
             host_seen = 0;
         } else if (now - settled_since >= std::chrono::seconds{4}) {
             host_seen = GetPartnerState(world_chr_man, player).alive > 0 ? host_seen + 1 : 0;
@@ -6672,7 +6682,7 @@ void ApplyGuestReinsertAfterReload() {
             // Only while the host's notes put it in this map: a host that travelled on in the
             // meantime has a position of another map, and the guest was moved there in mid-air
             // (it fell through the world before its own follow loaded, first real session).
-            if (host_seen >= 12 && HostReturnPointHere() >= 0 &&
+            if (host_seen >= 12 && HostReturnPointHere(session == 6 ? 3 : 6) >= 0 &&
                 MoveToPartner(world_chr_man, player, 5.0f) > 0.0f) {
                 join_spot_until = {};
                 host_seen = 0;
@@ -6915,7 +6925,7 @@ static bool InstallStayInSessionPatches(u64 base) {
         return false;
     }
     LOG_INFO(Debug, "Bloodborne stay-in-session patches enabled (host death, boss defeated, "
-                    "stale boss clear; build 2026-10-18)");
+                    "stale boss clear, host respawns at the guest; build 2026-10-18b)");
     // Talk scripts (lanterns, the characters of the world) also ask whether they run for a
     // guest: talk function 19 returns the byte at +0x25 of the talk's own data, 1 on a guest's
     // side, and the scripts then offer nothing. Answer 0, so that a guest can talk to the
