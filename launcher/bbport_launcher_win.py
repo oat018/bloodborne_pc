@@ -40,7 +40,7 @@ PATCH_VERSION = '01.09'
 MAX_LOG_LINES = 6000
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 # This build; GitHub release tags are windows-v<VERSION>.
-VERSION = '1.7.8'
+VERSION = '1.9'
 # Co-op: the community server that answers the game's own server requests.
 COMMUNITY_SERVER = 'https://thehuntersdream.com'
 RELEASES_API = 'https://api.github.com/repos/Supermedo/bloodborne_pc/releases/latest'
@@ -192,10 +192,11 @@ TWEAKS = [
     ('quit_to_desktop', ('Quit to Desktop in the title menu and in the System menu',
                          'Пункт «Выйти на рабочий стол» в главном меню и в меню «Система»'), True),
 ]
-INI_FLAGS = {'sharpen', 'object_motion', 'show_fps', *(k for k, _t, _o in EFFECTS + EXTRAS + CHEATS + TWEAKS)}
+INI_FLAGS = {'sharpen', 'object_motion', 'show_fps', 'frame_gen_fit_display', *(k for k, _t, _o in EFFECTS + EXTRAS + CHEATS + TWEAKS)}
 INI_DEFAULTS = {'upscaler': 'fsr4', 'preset': '1', 'sharpen': '1', 'sharpness': '0.50',
                 'object_motion': '1', 'show_fps': '1', 'output_res': '1920x1080', 'model_lod': '0',
                 'live_resolution': 'auto', 'hud_position': '100',
+                'frame_gen': 'off', 'frame_gen_multiplier': '2', 'frame_gen_fit_display': '0',
                 **{key: '1' if on else '0' for key, _t, on in EFFECTS + EXTRAS + CHEATS + TWEAKS}}
 APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'), 'user_dir': '', 'dlc_dir': '',
                 'mods_dir': '', 'mods_enabled': True, 'patches_dir': '', 'language': '1',
@@ -206,8 +207,8 @@ APP_DEFAULTS = {'ui_language': '', 'game_dir': str(PORT_DIR.parent / 'CUSA03173'
                 'vk_validation': False, 'extra_env': '', 'close_on_play': False,
                 'check_updates': True, 'online': False, 'online_server': 'srv.shadps4.net:31313',
                 'online_webapi': '', 'online_npid': '', 'online_password': '', 'online_upnp': True,
-                'online_community': COMMUNITY_SERVER, 'online_pool': 'shadnet', 'bridge_live_map': True,
-                'supermedo_user': '', 'supermedo_password': ''}
+                'online_community': COMMUNITY_SERVER, 'online_pool': 'shadnet', 'bridge_live_map': False,
+                'supermedo_user': '', 'supermedo_password': '', 'thd_online_id': '', 'thd_token': ''}
 # bbbridge's own app reads and writes the online_* keys above: keep their names.
 
 UPSCALERS = [('dlss', ('DLSS (NVIDIA GeForce RTX)',)),
@@ -216,6 +217,14 @@ UPSCALERS = [('dlss', ('DLSS (NVIDIA GeForce RTX)',)),
              ('fsr3', ('FSR 3.1 (every GPU)', 'FSR 3.1 (любая видеокарта)')),
              ('taa', ('TAA (native resolution anti-aliasing)', 'TAA (нативное сглаживание)')),
              ('off', ('Off', 'Выключен'))]
+# Frames generated between two of the game's (vk_frame_generation.cpp).
+FRAME_GENERATION = [('off', ('Off', 'Выключена')),
+                    ('fsr3', ('AMD FSR 3.1 Frame Generation (any GPU)', 'AMD FSR 3.1 (любая видеокарта)')),
+                    ('dlss', ('NVIDIA DLSS Frame Generation (GeForce RTX 40/50)',
+                              'NVIDIA DLSS (GeForce RTX 40/50)'))]
+FRAME_GEN_MULTIPLIERS = [('2', ('2× (one generated frame)', '2× (один кадр)')),
+                         ('3', ('3× (DLSS on GeForce RTX 50)', '3× (DLSS на GeForce RTX 50)')),
+                         ('4', ('4× (DLSS on GeForce RTX 50)', '4× (DLSS на GeForce RTX 50)'))]
 PRESETS = [('0', ('Native AA (×1.0)',)), ('1', ('Quality (×1.5)',)), ('2', ('Balanced (×1.7)',)),
            ('3', ('Performance (×2)',)), ('4', ('Ultra Performance (×3)',))]
 OUTPUTS = [('1280x720', ('1280 × 720 (Steam Deck)',)), ('1920x1080', ('1920 × 1080',)),
@@ -378,49 +387,62 @@ def server_check(server, webapi, community):
     return '\n'.join(lines)
 
 
-# The Hunter's Dream co-op pool (with bbhost players): bbbridge (bbbridge/, by MaskZeus), which
-# run.py starts with the game. Its account (Discord sign-in) stays in <saves>/bbbridge.
-BRIDGE_PAGE = 'https://github.com/MaskZeus/bbbridge-bbport-online-tool'
-# The Hunter's Dream pool through bbbridge is off until it no longer troubles their server
-# (bad shadNet calls through the bridge); its code stays for when it is fixed with them.
-HUNTERS_DREAM_POOL = False
+# The Hunter's Dream pool: the engine's own backend for it (BB_NET_BACKEND=thd, bbhost's
+# protocol, from Awaken's port). BB_HUNTERS_DREAM=0 hides it.
+HUNTERS_DREAM_POOL = os.environ.get('BB_HUNTERS_DREAM', '1') != '0'
+
+
+def thd_call(url, body):
+    """A call to The Hunter's Dream's account service (bbhost's): its reply, or ValueError with
+    the server's reason."""
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), method='POST',
+                                     headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            text = response.read()
+    except urllib.error.HTTPError as error:
+        text = error.read()
+    try:
+        reply = json.loads(text)
+    except ValueError:
+        reply = None
+    if not isinstance(reply, dict) or 'ResKind' not in reply:
+        raise ValueError(f'{url} has no account service')
+    if reply['ResKind'] != 0:
+        raise ValueError(reply.get('Message') or 'refused')
+    return reply
+
+
+def thd_sign_in(game_server, on_code):
+    """Discord sign-in the way bbhost does it: a code to approve on the website. on_code(page,
+    code) shows it. Returns (online id, token); raises ValueError."""
+    auth = community_address(game_server)
+    start = thd_call(auth + '/auth/device/start', {'DeviceName': f'bbport on {os.environ.get("COMPUTERNAME", "PC")}'})
+    device, user_code = start.get('DeviceCode', ''), start.get('UserCode', '')
+    if not device or not user_code:
+        raise ValueError('no code in the reply')
+    interval = max(1, int(start.get('Interval') or 5))
+    deadline = time.monotonic() + int(start.get('ExpiresIn') or 600)
+    on_code(start.get('VerificationUri') or auth + '/link', user_code)
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        poll = thd_call(auth + '/auth/device/poll', {'DeviceCode': device})
+        status = poll.get('Status')
+        if status == 'approved':
+            if not poll.get('OnlineId') or not poll.get('Token'):
+                raise ValueError('no token in the reply')
+            return poll['OnlineId'], poll['Token']
+        if status == 'slow_down':
+            interval += 5
+        elif status == 'denied':
+            raise ValueError('the sign-in was denied')
+        elif status == 'expired':
+            break
+    raise ValueError('the code expired; try again')
 # The SuperMedo Server co-op pool: a public shadNet server. Accounts are made at
 # SUPERMEDO_SIGNUP. The launcher shows the pool's name, not its address.
 SUPERMEDO_SERVER = 'www.supermedo.com:31313'
 SUPERMEDO_SIGNUP = 'https://www.supermedo.com'
-
-
-def bridge_cli():
-    for folder in (PORT_DIR / 'bin', PORT_DIR / 'out'):
-        if (folder / 'bbbridge-cli.exe').is_file():
-            return folder / 'bbbridge-cli.exe'
-    return None
-
-
-def bridge_folder(user_dir):
-    folder = Path(user_dir or DATA_DIR / 'user')
-    return (folder if folder.is_absolute() else PORT_DIR / folder) / 'bbbridge'
-
-
-def bridge_config(user_dir):
-    """<saves>/bbbridge and bbbridge's config there (the same files run.py uses)."""
-    folder = bridge_folder(user_dir)
-    folder.mkdir(parents=True, exist_ok=True)
-    config = folder / 'bbbridge_config.json'
-    data = load_json(config, {})
-    data = data if isinstance(data, dict) else {}
-    state = str(folder / 'bbbridge_state.json')
-    if data.get('state_file') != state:
-        data['state_file'] = state
-        config.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-    return folder, config
-
-
-def bridge_accounts(user_dir):
-    """The Hunter's Dream ids signed in with Discord."""
-    state = load_json(bridge_folder(user_dir) / 'bbbridge_state.json', {})
-    accounts = state.get('accounts') if isinstance(state, dict) else None
-    return list(accounts) if isinstance(accounts, dict) else []
 
 
 def server_check_hunters_dream():
@@ -489,11 +511,16 @@ def game_environment(s):
             env['BB_SHADNET_NPID'] = str(s.get('supermedo_user', '')).strip()
             env['BB_SHADNET_PASSWORD'] = str(s.get('supermedo_password', ''))
         if s.get('online_pool') == 'huntersdream' and HUNTERS_DREAM_POOL:
-            # run.py starts bbbridge and signs the game in with the Hunter's Dream id.
-            env['BB_BRIDGE'] = '1'
+            # The engine's Hunter's Dream backend with the Discord-linked account (run.py sets
+            # the game server and the backend's addresses).
+            env['BB_NET_BACKEND'] = 'thd'
+            env['BB_THD_ONLINE_ID'] = str(s.get('thd_online_id', ''))
+            env['BB_THD_TOKEN'] = str(s.get('thd_token', ''))
             env['BB_BRIDGE_LIVE_MAP'] = '1' if s.get('bridge_live_map') else '0'
-            env['BB_SHADNET_NPID'] = ''
-            env['BB_SHADNET_PASSWORD'] = ''
+            for key in ('BB_SHADNET_SERVER', 'BB_SHADNET_WEBAPI', 'BB_SHADNET_NPID', 'BB_SHADNET_PASSWORD'):
+                env.pop(key, None)
+    # Which build a server sees (shadNet's client version, The Hunter's Dream's client field).
+    env.setdefault('BB_CLIENT_VERSION', f'bbport {VERSION}')
     env['PYTHONUNBUFFERED'] = '1'
     env['PYTHONIOENCODING'] = 'utf-8'
     return env
@@ -946,6 +973,26 @@ class Launcher:
         self.check(f, 'object_motion', 'ini', _('Object motion vectors', 'Векторы движения объектов'),
                    _('Less ghosting on characters, cloth and weapons; costs about 10% FPS.',
                      'Меньше гостинга на персонажах и одежде; стоит около 10% FPS.'))
+        self.section(f, _('Frame generation', 'Генерация кадров'))
+        self.row(f, _('Frame generation', 'Генерация кадров'),
+                 self.choice(f, 'frame_gen', 'ini', FRAME_GENERATION),
+                 _('Frames made between two of the game\'s: 60 FPS on screen becomes 120. Needs a display with '
+                   'that refresh rate (120 Hz or more at 60 FPS); it pauses when the display cannot show the extra '
+                   'frames. Adds a little input latency. Menus and movies are not generated. DLSS needs a GeForce '
+                   'RTX 40 or newer, otherwise FSR 3.1 is used.',
+                   'Кадры между двумя кадрами игры: 60 FPS на экране становятся 120. Нужен монитор с такой '
+                   'частотой (120 Гц и выше при 60 FPS); иначе генерация приостанавливается. Немного добавляет '
+                   'задержку ввода. Меню и ролики не генерируются. DLSS нужна GeForce RTX 40 или новее, иначе '
+                   'используется FSR 3.1.'))
+        self.row(f, _('Multiplier', 'Множитель'),
+                 self.choice(f, 'frame_gen_multiplier', 'ini', FRAME_GEN_MULTIPLIERS),
+                 _('FSR 3.1 makes one frame (2×); DLSS on a GeForce RTX 50 up to three (4×).',
+                   'FSR 3.1 делает один кадр (2×); DLSS на GeForce RTX 50 — до трёх (4×).'))
+        self.check(f, 'frame_gen_fit_display', 'ini', _('Fit to display refresh', 'Под частоту монитора'),
+                   _('On: no more frames than the display shows (an uncapped game gets fewer generated frames, and '
+                     'the GPU does less). Off: the multiplier as chosen.',
+                     'Вкл.: не больше кадров, чем показывает монитор (при снятом ограничении FPS генерируется меньше, '
+                     'видеокарта меньше нагружена). Выкл.: множитель как выбран.'))
         self.section(f, _('FSR 4 assets', 'Ассеты FSR 4'))
         self.fsr4_label = ttk.Label(f, text='', wraplength=self.px(640), justify='left')
         self.fsr4_label.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w')
@@ -1086,9 +1133,11 @@ class Launcher:
         account = ttk.Label(f, text='', justify='left')
         user_dir = self.var('user_dir', 'app')
 
+        thd_id, thd_token = self.var('thd_online_id', 'app'), self.var('thd_token', 'app')
+
         def show_accounts():
-            ids = bridge_accounts(user_dir.get())
-            account.configure(text=_('Signed in as {}').format(', '.join(ids)) if ids else _('Not signed in'))
+            name = thd_id.get() if thd_token.get() else ''
+            account.configure(text=_('Signed in as {}').format(name) if name else _('Not signed in'))
         show_accounts()
         self.row(f, _('Account'), account)
         signing = ttk.Label(f, text='', style='Muted.TLabel', justify='left', wraplength=self.px(560))
@@ -1110,42 +1159,24 @@ class Launcher:
                 code_box.grid_remove()
 
         def sign_in():
-            cli = bridge_cli()
-            if not cli:
-                signing.configure(text=_('bbbridge-cli.exe is missing from this installation.'))
-                return
-            try:
-                folder, config = bridge_config(user_dir.get())
-            except OSError as error:
-                signing.configure(text=_('Sign-in failed: {}').format(error))
-                return
             signing.configure(text=_('Starting the sign-in…'))
             show_code()
+            game = self.var('online_community', 'app').get()
+
+            def on_code(page, code):
+                text = _('In the page that opened ({0}), sign in with Discord and enter this code:').format(page)
+                self.ui_calls.put(lambda: (signing.configure(text=text), show_code(code)))
+                webbrowser.open(page)
 
             def work():
                 try:
-                    process = subprocess.Popen([str(cli), '--config', str(config), '--link-discord'], cwd=folder,
-                                               stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                               stderr=subprocess.STDOUT, creationflags=NO_WINDOW,
-                                               text=True, encoding='utf-8', errors='replace')
-                except OSError as error:
-                    self.ui_calls.put(lambda e=error: signing.configure(text=_('Sign-in failed: {}').format(e)))
+                    name, token = thd_sign_in(game, on_code)
+                except (OSError, ValueError) as error:
+                    self.ui_calls.put(lambda e=error: (signing.configure(text=_('Sign-in failed: {}').format(e)),
+                                                       show_code()))
                     return
-                for line in process.stdout:
-                    line = line.strip()
-                    code = re.match(r'Open (\S+) and enter the code (\S+)', line)
-                    if code:
-                        text = _('In the page that opened ({0}), sign in with Discord and enter this code:').format(
-                            code.group(1))
-                        self.ui_calls.put(lambda t=text, c=code.group(2): (signing.configure(text=t), show_code(c)))
-                        webbrowser.open(code.group(1))
-                    elif line.startswith('signed in as '):
-                        self.ui_calls.put(lambda: (signing.configure(text=''), show_code(), show_accounts()))
-                    elif line.startswith('failed'):
-                        reason = line.split(':', 1)[-1].strip()
-                        self.ui_calls.put(lambda r=reason: (signing.configure(text=_('Sign-in failed: {}').format(r)),
-                                                            show_code()))
-                process.wait()
+                self.ui_calls.put(lambda: (thd_id.set(name), thd_token.set(token), signing.configure(text=''),
+                                           show_code(), show_accounts(), self.collect()))
             threading.Thread(target=work, daemon=True).start()
         self.row(f, '', ttk.Button(f, text=_('Sign in with Discord'), command=sign_in))
         signing.grid(row=self.next_row(f), column=1, sticky='w', pady=(6, 0))
@@ -1153,10 +1184,11 @@ class Launcher:
         self.check(f, 'bridge_live_map', 'app', _('Show me on the live map'),
                    _("thehuntersdream.com/map shows where players are and which bells ring: the game sends "
                      "your position more often while you play."))
-        credit = ttk.Label(f, text=_("The bridge to The Hunter's Dream is bbbridge by MaskZeus; bbhost and "
-                                     "The Hunter's Dream are by droogie."), style='Muted.TLabel', cursor='hand2')
+        credit = ttk.Label(f, text=_("The connection to The Hunter's Dream is Awaken's port of bbhost's network "
+                                     "code; bbhost and The Hunter's Dream are by droogie."),
+                           style='Muted.TLabel', cursor='hand2')
         credit.grid(row=self.next_row(f), column=0, columnspan=2, sticky='w', pady=(8, 0))
-        credit.bind('<Button-1>', lambda _e: webbrowser.open(BRIDGE_PAGE))
+        credit.bind('<Button-1>', lambda _e: webbrowser.open('https://github.com/Awakenchan/BloodBorneButPc'))
         group('huntersdream')
         self.section(f, _('Game server (messages, bloodstains, ghosts)'))
         community = self.var('online_community', 'app')
@@ -1191,16 +1223,14 @@ class Launcher:
             online_on = self.var('online', 'app').get()
             pool_name = pool.get()
             hunters_dream, supermedo = pool_name == 'huntersdream', pool_name == 'supermedo'
-            signed_in = bridge_accounts(user_dir.get())
+            signed_in = thd_id.get() if thd_token.get() else ''
             result.configure(text=_('Checking…'))
 
             def work():
                 if hunters_dream:
                     text = server_check_hunters_dream()
-                    text += '\n' + (_('Signed in as {}').format(', '.join(signed_in)) if signed_in else
+                    text += '\n' + (_('Signed in as {}').format(signed_in) if signed_in else
                                     _('Not signed in: use "Sign in with Discord" above.'))
-                    if not bridge_cli():
-                        text += '\n' + _('bbbridge-cli.exe is missing from this installation.')
                 elif supermedo:
                     # The pool's name instead of its address.
                     text = server_check(SUPERMEDO_SERVER, webapi_address(SUPERMEDO_SERVER), game)
@@ -1825,7 +1855,7 @@ class Launcher:
         if not hasattr(self, 'patches_frame'):
             return
         tk, ttk = self.tk, self.ttk
-        from mods import discover
+        from mods import discover, unrecognized
         from patches import external_patches
         for holder in (self.mods_frame, self.patches_frame):
             for widget in holder.winfo_children():
@@ -1853,6 +1883,10 @@ class Launcher:
             ttk.Label(self.mods_frame, text=_('Lower in the list loads later and wins conflicts.',
                                               'Ниже в списке — загружается позже и перекрывает.'),
                       style='Muted.TLabel').pack(anchor='w', pady=(4, 0))
+        # Folders that are not mods are named, with why, instead of left out silently.
+        for name, problem in unrecognized(root):
+            ttk.Label(self.mods_frame, text=_('Not loaded: {}: {}', 'Не загружен: {}: {}').format(name, problem),
+                      style='Muted.TLabel', wraplength=self.px(620), justify='left').pack(anchor='w', pady=(4, 0))
         chosen = load_json(DATA_DIR / 'patches.json', {})
         found = external_patches(Path(self.var('patches_dir', 'app').get() or DATA_DIR / 'patches'), PATCH_VERSION)
         old = {n: v.get() for n, v in self.patch_vars.items()}
@@ -1929,7 +1963,7 @@ class Launcher:
             online.set(bool(choice))
         pool_name = self.var('online_pool', 'app').get()
         hunters_dream = pool_name == 'huntersdream'
-        if online.get() and hunters_dream and not bridge_accounts(self.var('user_dir', 'app').get()):
+        if online.get() and hunters_dream and not self.var('thd_token', 'app').get():
             self.messagebox.showwarning(
                 'Bloodborne', _("To play online with The Hunter's Dream, sign in with Discord first."))
             self.show('online')
