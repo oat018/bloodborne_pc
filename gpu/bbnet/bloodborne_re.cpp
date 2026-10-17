@@ -5632,6 +5632,7 @@ std::mutex progress_mutex;
 std::vector<u32> progress_boss;     // of this session
 std::vector<u32> progress_lanterns; // base flags of the lanterns seen since the game started
 std::vector<u32> progress_world;    // of this session: doors, shortcuts, lifts (see below)
+std::set<s32> progress_world_springy; // world flags this session's world cleared again
 std::atomic<bool> hosting_session{}; // this player is a host with a session (state 3)
 constexpr s32 LanternLitFlagOffset = 10;
 
@@ -5773,10 +5774,20 @@ void PS4_SYSV_ABI SessionEntry(u64 tag, const GuestRegisterSnapshot* registers) 
             // The host's own world clears it again: the state of a mechanism (a pressure plate,
             // a lever that springs back), not something opened for good. Kept by a guest it was
             // set again and again in the guest's own world and jammed that mechanism there
-            // (real session 17 Oct: 12400150 / 12400151, Tomb of Oedon).
+            // (real session 17 Oct: 12400150 / 12400151, Tomb of Oedon). Not noted again in
+            // this session: some flip many times a second (12100118).
             std::scoped_lock lock{progress_mutex};
             std::erase(progress_world, ProgressFlag << 28 | static_cast<u32>(flag));
+            if (progress_world_springy.size() < 4096) {
+                progress_world_springy.insert(flag);
+            }
             return;
+        }
+        if (world) {
+            std::scoped_lock lock{progress_mutex};
+            if (progress_world_springy.contains(flag)) {
+                return;
+            }
         }
         if (flag_log) {
             LOG_INFO(Debug, "Bloodborne flag: {} -> {} caller={:#x}", flag,
@@ -6419,6 +6430,7 @@ void ApplySharedProgressTick() {
         std::scoped_lock lock{progress_mutex};
         progress_boss.clear();
         progress_world.clear();
+        progress_world_springy.clear();
     }
     ApplySharedProgress(session, state >= 0x10000 && ReadValue<u8>(state, 0x08) == 0 &&
                                      ReadValue<u8>(state, 0x1520) == 0 && data != 0 &&
