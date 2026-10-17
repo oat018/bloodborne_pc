@@ -203,6 +203,11 @@ public:
     std::shared_ptr<StreamSocket> CreateStream();
 
     Error SendSignaling(std::span<const u8> data, const Endpoint& to);
+    // bbport: the shadp2p shadNet server (the seamless co-op server) frames its UDP packets
+    // with a bare 4-byte vport header, [src vport FFFF][dst vport FFFF][payload], and drops this
+    // codec's signaling frames. Signaling to it is sent once more in that framing; its replies
+    // are taken in either framing (see HandlePacket).
+    Error SendLegacySignaling(std::span<const u8> data, const Endpoint& to);
     bool RecvSignaling(size_t channel, std::vector<u8>* data, Endpoint* from);
 
     void SetOutgoingLossForTesting(double probability);

@@ -18,6 +18,7 @@
 #include "core/libraries/net/net_log.h"
 #include "core/libraries/net/net_p2p.h"
 #include "core/libraries/net/net_translate.h"
+#include "core/libraries/np/np_signaling/np_signaling_transport.h"
 #include "core/net/guest_net.h"
 #include "core/net/p2p_codec.h"
 
@@ -166,6 +167,14 @@ int ChannelSendTo(const void* data, u32 len, u32 dest_addr, u16 dest_port) {
         P2P::Endpoint::FromSockaddr(reinterpret_cast<const sockaddr*>(&to), sizeof(to));
     const Error e = transport->SendSignaling(
         {static_cast<const u8*>(data), static_cast<size_t>(len)}, endpoint);
+    // bbport: to the matchmaking server once more in the shadp2p server's framing (which one
+    // it is is not known; each answers only its own).
+    namespace SigTransport = Libraries::Np::NpSignaling::Transport;
+    if (dest_addr != 0 && dest_addr == SigTransport::MmServerAddr() &&
+        dest_port == SigTransport::MmServerUdpPort()) {
+        transport->SendLegacySignaling({static_cast<const u8*>(data), static_cast<size_t>(len)},
+                                       endpoint);
+    }
     return e == Error::Ok ? static_cast<int>(len) : -1;
 }
 

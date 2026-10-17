@@ -193,6 +193,13 @@ Error Transport::SendSignaling(std::span<const u8> data, const Endpoint& to) {
     return SendPacket(codec_->EncodeSignaling(data, to), to);
 }
 
+Error Transport::SendLegacySignaling(std::span<const u8> data, const Endpoint& to) {
+    std::vector<u8> framed{0xFF, 0xFF, 0xFF, 0xFF};
+    framed.insert(framed.end(), data.begin(), data.end());
+    std::scoped_lock lock{mutex_};
+    return SendPacket(framed, to);
+}
+
 bool Transport::RecvSignaling(size_t channel, std::vector<u8>* data, Endpoint* from) {
     std::scoped_lock lock{mutex_};
     if (channel >= signaling_.size() || signaling_[channel].empty()) {
@@ -336,7 +343,17 @@ u16 Transport::AllocateVport(bool stream) {
 
 void Transport::HandlePacket(std::span<const u8> packet, const Endpoint& from,
                              Clock::time_point now) {
-    Codec::Decoded decoded = codec_->Decode(packet, from);
+    Codec::Decoded decoded;
+    if (packet.size() > 4 && packet[0] == 0xFF && packet[1] == 0xFF && packet[2] == 0xFF &&
+        packet[3] == 0xFF) {
+        // bbport: signaling in the shadp2p server's framing (see SendLegacySignaling); no frame
+        // of this codec starts like this (the second byte would be a kind of 0x1F).
+        decoded.kind = Codec::Kind::Signaling;
+        decoded.src_vport = decoded.dst_vport = 0xFFFF;
+        decoded.payload.assign(packet.begin() + 4, packet.end());
+    } else {
+        decoded = codec_->Decode(packet, from);
+    }
     switch (decoded.kind) {
     case Codec::Kind::Stream:
         HandleStreamSegment(decoded.payload, from, now);
