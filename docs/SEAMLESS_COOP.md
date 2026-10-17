@@ -51,11 +51,15 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   (`SHADPS4_BLOODBORNE_GUEST_TALK=0` turns it off).
 - A lobby with a password instead of the bells (new after v2.5): with
   `SHADPS4_BLOODBORNE_LOBBY=host` on one player and `=join` plus the same
-  `SHADPS4_BLOODBORNE_LOBBY_PASSWORD` on the others, nobody rings anything. While a joining
-  game is in the lobby, the host's game opens its room by itself; the joining game travels
-  alone to the host's map and joins the room directly. After a death, a disconnection or a
-  restarted game they find each other again the same way. Home leaves for good (until the game
-  is started again). See "The lobby" below.
+  `SHADPS4_BLOODBORNE_LOBBY_PASSWORD` on the others. Since v3.4 the players meet when they
+  choose to: the host rings the Beckoning Bell and a joining player the Small Resonant Bell
+  (from the items or by hotkey; the bell's own summon search is called off at once, the bell
+  only starts the role). While a joining game that has rung is in the lobby, the host's game
+  opens its room; the joining game travels alone to the host's map and joins the room
+  directly. Deaths keep the session; after a disconnection they find each other again by
+  themselves; after Home or a restarted game the bell is needed again.
+  `SHADPS4_BLOODBORNE_LOBBY_AUTO=1` takes the role at the start without a bell (as before
+  v3.4). See "The lobby" below.
 - Bell hotkeys (without a lobby), so no bell items are needed: PgUp = Beckoning Bell (host),
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
 - Ringing the Beckoning Bell costs no Insight, by hotkey or from the inventory: the game took one
@@ -243,8 +247,8 @@ bells. Not yet tested between two machines.
 3. Copy the launch script from `packaging/seamless/` next to the game launcher, put the
    server address and your account in it, and start the game with it:
    `Play Seamless Co-op.bat` on Windows, `play-seamless-coop.sh` on Linux.
-4. Choose "Play Online". With the lobby set in the script the players meet by themselves;
-   without it the host presses PgUp and the guest PgDn.
+4. Choose "Play Online". The host rings the Beckoning Bell (PgUp, or the item; not in the
+   Hunter's Dream) and the guest the Small Resonant Bell (PgDn, or the item).
 
 ## Building
 

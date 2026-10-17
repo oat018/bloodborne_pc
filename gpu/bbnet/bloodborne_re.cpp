@@ -2758,10 +2758,40 @@ void ApplyAutoRejoin() {
     static const bool enabled = EnvFlagEnabled("SHADPS4_BLOODBORNE_AUTO_REJOIN") ||
                                 EnvFlagEnabled("SHADPS4_BLOODBORNE_SHARED_DEATH") ||
                                 lobby_goods != 0;
+    // With a lobby the role starts when the player rings the lobby role's bell (from the items
+    // or by hotkey): the host's Beckoning Bell opens the room, the guest's Small Resonant Bell
+    // joins it. The bell's own effect is then taken off again, so the meeting goes through the
+    // lobby alone (ApplyLobbyHostRoom / ApplyLobbyDirectJoin), not the game's summon search
+    // as well. The role stays through deaths and reloads; the leave key and a restarted game
+    // need the bell again. SHADPS4_BLOODBORNE_LOBBY_AUTO=1: the role from the start, no bell.
+    static const bool lobby_auto = EnvFlagEnabled("SHADPS4_BLOODBORNE_LOBBY_AUTO");
     static bool lobby_role_taken = false; // once: the leave key clears the role for good
-    if (lobby_goods != 0 && !lobby_role_taken) {
+    if (lobby_goods != 0 && lobby_auto && !lobby_role_taken) {
         lobby_role_taken = true;
         auto_bell_goods.store(lobby_goods);
+    }
+    if (lobby_goods != 0 && auto_bell_goods.load() == 0) {
+        using clock = std::chrono::steady_clock;
+        static clock::time_point next_check{};
+        if (clock::now() >= next_check) {
+            next_check = clock::now() + std::chrono::milliseconds{250};
+            const s32 bell_effect = lobby_goods == BeckoningBellGoodsId
+                                        ? 9000
+                                        : SmallResonantBellEffectId;
+            const u64 local_player = GetLocalPlayer();
+            if (local_player >= 0x10000 && HasPlayerEffect(local_player, bell_effect)) {
+                ExpirePlayerEffect(local_player, bell_effect);
+                if (lobby_goods == BeckoningBellGoodsId) {
+                    ExpirePlayerEffect(local_player, 9001);
+                }
+                auto_bell_goods.store(lobby_goods);
+                LOG_INFO(Debug, "Bloodborne lobby: {} rung, {}",
+                         lobby_goods == BeckoningBellGoodsId ? "Beckoning Bell"
+                                                             : "Small Resonant Bell",
+                         lobby_goods == BeckoningBellGoodsId ? "the room opens for the lobby"
+                                                             : "joining the lobby's host");
+            }
+        }
     }
     const s32 goods_id = auto_bell_goods.load();
     if (!enabled || goods_id == 0) {
@@ -6900,7 +6930,11 @@ void RequestBellUse(std::int32_t goods_id) {
     if (goods_id == BeckoningBellGoodsId || goods_id == SmallResonantBellGoodsId) {
         LOG_INFO(Debug, "Bloodborne bell hotkey requested goods {}", goods_id);
         requested_bell_goods.store(goods_id);
-        auto_bell_goods.store(goods_id);
+        // With a lobby the role starts from the bell's effect, as for a bell rung from the
+        // items (ApplyAutoRejoin), so a ring the game refuses starts nothing.
+        if (Libraries::Http::BloodborneLobbyBellGoods() == 0) {
+            auto_bell_goods.store(goods_id);
+        }
         bell_requested_at.store(true);
     }
 }
