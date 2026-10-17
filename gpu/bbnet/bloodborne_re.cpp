@@ -5764,9 +5764,18 @@ void PS4_SYSV_ABI SessionEntry(u64 tag, const GuestRegisterSnapshot* registers) 
         static const bool flag_log = EnvFlagEnabled("SHADPS4_BLOODBORNE_FLAG_LOG");
         const s32 flag = static_cast<s32>(registers->rsi);
         const bool on = static_cast<s32>(registers->rdx) != 0;
-        const bool world = on && hosting_session.load() && ShareWorldEnabled() &&
+        const bool world = hosting_session.load() && ShareWorldEnabled() &&
                            IsWorldProgressFlag(flag);
         if ((!flag_log && !world) || GetEventFlag(flag) == on) {
+            return;
+        }
+        if (world && !on) {
+            // The host's own world clears it again: the state of a mechanism (a pressure plate,
+            // a lever that springs back), not something opened for good. Kept by a guest it was
+            // set again and again in the guest's own world and jammed that mechanism there
+            // (real session 17 Oct: 12400150 / 12400151, Tomb of Oedon).
+            std::scoped_lock lock{progress_mutex};
+            std::erase(progress_world, ProgressFlag << 28 | static_cast<u32>(flag));
             return;
         }
         if (flag_log) {
@@ -6119,6 +6128,7 @@ struct KeptProgress {
     std::string owner; // the character it belongs to
     u32 entry;
     std::chrono::steady_clock::time_point set_since{};
+    int sets = 0; // times set at home (a flag its world keeps clearing is given up)
 };
 
 // The local character's name as hex text (PlayerGameData+0xA8, UTF-16), or empty.
@@ -6312,6 +6322,13 @@ void ApplySharedProgress(s32 session, bool in_world) {
                 return true; // item lots were handed over in the session
             }
             if (!GetEventFlag(id)) {
+                if (++item.sets > 3) {
+                    // Its own world clears it again each time: a mechanism's state (older
+                    // builds of the host kept those too), which would stay jammed.
+                    LOG_INFO(Debug, "Bloodborne progress: flag {} given up, this world keeps "
+                             "clearing it", id);
+                    return true;
+                }
                 SetEventFlag(id, true);
                 item.set_since = now;
                 LOG_INFO(Debug, "Bloodborne progress: guest sets flag {} in its own world", id);
@@ -6880,7 +6897,8 @@ static bool InstallStayInSessionPatches(u64 base) {
         LOG_ERROR(Debug, "Bloodborne stay-in-session: boss clear hook failed");
         return false;
     }
-    LOG_INFO(Debug, "Bloodborne stay-in-session patches enabled (host death, boss defeated)");
+    LOG_INFO(Debug, "Bloodborne stay-in-session patches enabled (host death, boss defeated, "
+                    "stale boss clear; build 2026-10-17 late)");
     // Talk scripts (lanterns, the characters of the world) also ask whether they run for a
     // guest: talk function 19 returns the byte at +0x25 of the talk's own data, 1 on a guest's
     // side, and the scripts then offer nothing. Answer 0, so that a guest can talk to the
