@@ -1,10 +1,13 @@
 # Seamless co-op for bbport
 
-This branch adds a seamless co-op mode to the Windows version of bbport 1.7
-(`Supermedo/bloodborne_pc`, itself based on `deadinside28/bloodborne_pc`). It builds on the
+This branch adds a seamless co-op mode to the Windows version of bbport 1.9
+(`Supermedo/bloodborne_pc`, itself based on `deadinside28/bloodborne_pc`). It started on the
 online play of 1.6 (the network and PSN libraries of `Wozzardman/shadp2p`) and on that
 project's experimental seamless mode, and adds session rules in the spirit of the Seamless
-Co-op mods for the Souls games.
+Co-op mods for the Souls games. Since v3.3 it runs on 1.8's network code (shadPS4 0.20's, in
+`gpu/bbnet/vendor`): the P2P packets have another layout, so a v3.3 build cannot play with
+v3.2 or older. Signaling to the server is sent in both the shadPS4 team's framing and the bare
+vport framing of the shadp2p server, so the shadp2p server (`shadnet-p2p`) still works.
 
 It is experimental. Most of what is below was tested with two copies of the game running on
 one PC against a private shadNet server. The first session between two machines (a Windows
@@ -312,6 +315,6 @@ Safety rules of the installation and of every write into the game:
   the HTTP layer repeats the guest's last advertisement between the game's own repeats (the
   answer to it is what sends a guest to a host in another area).
 
-`SHADPS4_P2P_LOG=1` logs the first 3000 P2P datagrams of the game (needs `BB_GPU_LOG=info`).
+`BB_GPU_LOG=info` (or `debug`) shows the network and PSN libraries' log on stderr.
 `SHADPS4_BLOODBORNE_DEBUG_FILE=<file>` turns on a test aid: the session state is logged when it
 changes and one command line written to that file is run (see `ApplyDebugCommands`).
