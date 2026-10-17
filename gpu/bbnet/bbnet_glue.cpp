@@ -472,8 +472,7 @@ extern "C" int bbnet_install_coop(void* image, uint64_t size) {
     Core::Bloodborne::InstallSeamlessCoopPatches();
     const std::string failure = Core::Bloodborne::SeamlessCoopInstallFailure();
     if (!failure.empty()) {
-        std::printf("Co-op: NOT STARTED: %s
-", failure.c_str());
+        std::printf("Co-op: NOT STARTED: %s\n", failure.c_str());
         std::fflush(stdout);
         return 1;
     }
