@@ -6188,8 +6188,23 @@ void ApplySharedProgress(s32 session, bool in_world) {
         // One pass over the table per character, a small slice per call (four calls a second,
         // about six seconds), so that the game never waits long for it. What the player picks
         // up afterwards comes from the removal hook.
-        if (home_since == clock::time_point{}) {
+        // Only after 15 s at home in one map with no load: a guest sent home still holds the
+        // host's flags (the join replaced its own) until its own world has loaded, and a scan
+        // then took the items the host had taken for this player's (real session 17 Oct: 122
+        // of the host's 131, all hidden from the guest in every later session).
+        static u32 home_map = 0;
+        const u64 home_state = GetGlobalState();
+        const u32 map_now = GetCurrentPackedMap();
+        const bool loading = home_state < 0x10000 || ReadValue<u8>(home_state, 0x08) != 0 ||
+                             ReadValue<u8>(home_state, 0x1520) != 0;
+        if (home_since == clock::time_point{} || loading || map_now != home_map) {
             home_since = now;
+            home_map = map_now;
+            if (next_row != 0) { // a pass cut short by a load starts over
+                next_row = 0;
+                scan.clear();
+                scan_time = {};
+            }
         }
         if (owner != scanned_owner && now - home_since >= std::chrono::seconds{15}) {
             const u64 repository = ReadValue<u64>(image_base + 0x05540340, 0);
