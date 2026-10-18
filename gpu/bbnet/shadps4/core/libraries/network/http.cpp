@@ -697,6 +697,40 @@ bool IsBloodborneSummonCreatePath(std::string_view path) {
     return path.find("/summon_messenger/create") != std::string_view::npos;
 }
 
+bool PrepareBbscFastSearch(SendRequestPlan& plan) {
+    if (!IsBloodborneSummonSearchPath(plan.path)) {
+        return false;
+    }
+    auto body = nlohmann::json::parse(plan.body.begin(), plan.body.end(), nullptr, false);
+    if (!body.is_object() || !body.contains("SummonWord") ||
+        !body["SummonWord"].is_string() || body["SummonWord"].get_ref<const std::string&>().empty() ||
+        !body.contains("SummonTypeList") || !body["SummonTypeList"].is_array()) {
+        return false;
+    }
+    auto coop = nlohmann::json::array();
+    for (const auto& entry : body["SummonTypeList"]) {
+        if (entry.is_object() && entry.contains("SummonType") &&
+            entry["SummonType"].is_number_integer() && entry["SummonType"] == 0) {
+            coop.push_back(entry);
+        }
+    }
+    if (coop.empty()) {
+        return false;
+    }
+    body["SummonTypeList"] = std::move(coop); // extra polls never accelerate invasion searches
+    const std::string encoded = body.dump();
+    plan.body.assign(encoded.begin(), encoded.end());
+    std::erase_if(plan.headers,
+                  [](const auto& header) { return HeaderNameMatches(header.first, "Content-Length"); });
+    return true;
+}
+
+bool BbscFastSearchPending(const HttpResponse& res) {
+    const auto body = nlohmann::json::parse(res.body.begin(), res.body.end(), nullptr, false);
+    return body.is_object() && body.contains("SummonDataList") &&
+           body["SummonDataList"].is_array() && body["SummonDataList"].empty();
+}
+
 std::optional<std::string_view> FindResponseHeader(std::string_view headers,
                                                    std::string_view name) {
     size_t line_start = 0;
@@ -1929,8 +1963,10 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
             std::any_of(plan.headers.begin(), plan.headers.end(), [](const auto& header) {
                 return HeaderNameMatches(header.first, "X-ShadPS4-Bloodborne-Seamless");
             });
+        SendRequestPlan poll_plan = plan;
+        const bool fast_search = seamless_route && PrepareBbscFastSearch(poll_plan);
         if (online && worker_errno == 0 && seamless_route &&
-            IsBloodborneSummonCreatePath(plan.path) &&
+            (IsBloodborneSummonCreatePath(plan.path) || fast_search) &&
             !EnvFlagEnabled("SHADPS4_BBSC_NO_FAST_SIGN")) {
             const auto delivered = [](const HttpResponse& res) {
                 const std::string_view body{reinterpret_cast<const char*>(res.body.data()),
@@ -1940,12 +1976,20 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
             constexpr int FastSignTries = 5;
             constexpr auto FastSignPause = std::chrono::seconds(3);
             for (int attempt = 1; attempt <= FastSignTries; ++attempt) {
-                if (local_res.status_code != 200 || delivered(local_res) ||
-                    g_state.shutting_down.load() || req_ptr->deleted) {
+                if (local_res.status_code != 200 ||
+                    (fast_search ? !BbscFastSearchPending(local_res) : delivered(local_res))) {
                     break;
                 }
-                std::this_thread::sleep_for(FastSignPause);
-                SendRequestPlan again = plan;
+                {
+                    std::unique_lock lock(g_state.m_mutex);
+                    if (req_ptr->cv.wait_for(lock, FastSignPause, [&] {
+                            return g_state.shutting_down.load() || req_ptr->deleted ||
+                                   req_ptr->state == HttpRequestState::Aborted;
+                        })) {
+                        break;
+                    }
+                }
+                SendRequestPlan again = poll_plan;
                 RewriteConnectFirstAreaId(again);
                 HttpResponse next_res;
                 u32 next_bits = 0;
@@ -1958,7 +2002,8 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
                 absorb_placement(next_res);
                 local_res = std::move(next_res);
                 success_event_bits = next_bits;
-                LOG_INFO(Lib_Http, "BBSC fast sign: re-post {} -> status {}, {} bytes{}", attempt,
+                LOG_INFO(Lib_Http, "BBSC fast {}: re-post {} -> status {}, {} bytes{}",
+                         fast_search ? "co-op search" : "sign", attempt,
                          local_res.status_code, local_res.body.size(),
                          delivered(local_res) ? " (claim delivered)" : "");
             }

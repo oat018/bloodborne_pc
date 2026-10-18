@@ -5,6 +5,7 @@
  * Paths containing ".." components are rejected rather than normalized. */
 #define _GNU_SOURCE
 #include "runtime.h"
+#include "../gpu/bbnet/bbnet.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,13 +38,95 @@ _Static_assert(sizeof(GuestStat)==120,"FreeBSD stat layout");
 typedef struct { char *names; size_t count, *offsets; unsigned char *types; } Listing;
 /* commit: a save file opened for writing is written to a temporary copy (temp), which replaces
  * the file (commit) in one rename when closed: a crash or a kill mid-save leaves the old file. */
-typedef struct { int used, host, dirty; Listing *dir; size_t position; char path[512]; char *commit, *temp; } File;
+typedef struct { int used, host, dirty, write_error; Listing *dir; size_t position; char path[512]; char *commit, *temp; } File;
 typedef struct { char guest[64]; char host[512]; } Mount;
 static File files[MAX_FILES];
 static Mount mounts[MAX_MOUNTS];
+static Mount save_mounts[MAX_MOUNTS];
+static size_t save_mount_count;
 static size_t mount_count, opens, reads, writes, missing;
 static uint64_t bytes_read;
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
+
+enum { MAX_SAVE_RECEIPTS=256 };
+static BbNetSaveReceipt save_receipts[MAX_SAVE_RECEIPTS];
+static size_t save_receipt_count;
+static uint64_t save_receipt_generation;
+static int save_receipts_full;
+static pthread_mutex_t receipt_lock=PTHREAD_MUTEX_INITIALIZER;
+static int translate(const char *guest,char *out,size_t size);
+static int resolve_mount(const char *guest,char *out,size_t size,int save_fact);
+
+static int receipt_path(const char *path,char out[1024]) {
+    if (!path || !*path) return EINVAL;
+    const char *slash=strrchr(path,'/'),*name=slash ? slash+1 : path;
+    if (!*name || !strcmp(name,".") || !strcmp(name,"..")) return EINVAL;
+    char parent[PATH_MAX],canonical[PATH_MAX];
+    if (slash) {
+        size_t n=(size_t)(slash-path);
+        if (n>=sizeof(parent)) return ENAMETOOLONG;
+        if (!n) strcpy(parent,"/");
+        else { memcpy(parent,path,n); parent[n]=0; }
+    } else strcpy(parent,".");
+    if (!realpath(parent,canonical)) return errno;
+    /* Atomic rename replaces the leaf itself; it may not exist after a first-save failure. */
+    if (snprintf(out,1024,"%s%s%s",canonical,!strcmp(canonical,"/") ? "" : "/",name)>=1024)
+        return ENAMETOOLONG;
+    return 0;
+}
+
+int32_t runtime_file_save_receipt(const char *path,BbNetSaveReceipt *out) {
+    if (!out) return EINVAL;
+    memset(out,0,sizeof(*out));
+    char canonical[1024];
+    char mounted[1024];
+    if (path && !strncmp(path,"/savedata",9)) {
+        if (strlen(path)>=sizeof(mounted)) return ENAMETOOLONG;
+        int result=resolve_mount(path,mounted,sizeof(mounted),1);
+        if (result) return result;
+        path=mounted;
+    }
+    int result=receipt_path(path,canonical);
+    if (result) return result;
+    pthread_mutex_lock(&receipt_lock);
+    result=save_receipts_full ? ENOSPC : ENOENT;
+    for (size_t i=0;i<save_receipt_count;++i) {
+        if (!strcmp(save_receipts[i].path,canonical)) {
+            *out=save_receipts[i];
+            result=0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&receipt_lock);
+    return result;
+}
+
+static void note_save_close(const File *closed,int result) {
+    if (!closed->temp || !closed->dirty || strncmp(closed->path,"/savedata",9)) return;
+    const char *name=strrchr(closed->path,'/');
+    if (!name || strlen(++name)!=12 || strncmp(name,"userdata000",11) ||
+        name[11]<'0' || name[11]>'9') return;
+    char canonical[1024];
+    if (receipt_path(closed->commit,canonical)) return;
+    pthread_mutex_lock(&receipt_lock);
+    size_t i=0;
+    while (i<save_receipt_count && strcmp(save_receipts[i].path,canonical)) ++i;
+    if (i==save_receipt_count) {
+        if (i==MAX_SAVE_RECEIPTS) {
+            save_receipts_full=1; /* Never evict proof still held by another character. */
+            pthread_mutex_unlock(&receipt_lock);
+            return;
+        }
+        strcpy(save_receipts[i].path,canonical);
+        ++save_receipt_count;
+    }
+    save_receipts[i].error=result<0 ? -result : result;
+    if (!result) {
+        if (save_receipt_generation==UINT64_MAX) save_receipts[i].error=EOVERFLOW;
+        else save_receipts[i].generation=++save_receipt_generation;
+    }
+    pthread_mutex_unlock(&receipt_lock);
+}
 
 static int save_path(const char *p) { return p && !strncmp(p,"/savedata",9); }
 static int temp_name(const char *name) {
@@ -67,15 +150,34 @@ static void remove_stale_temps(const char *dir,int depth) {
     closedir(d);
 }
 
+/* Save jobs unmount before the game resumes; retain their target only for receipt queries. */
+static void remember_save_mount(const char *guest,const char *host) {
+    if (!save_path(guest)) return;
+    size_t i=0;
+    while (i<save_mount_count && strcmp(save_mounts[i].guest,guest)) ++i;
+    if (i==save_mount_count) {
+        if (i==MAX_MOUNTS) return; // Unknown aliases have no historical receipt binding.
+        strcpy(save_mounts[i].guest,guest);
+        ++save_mount_count;
+    }
+    save_mounts[i].host[0]=0; // A different/invalid target must never reuse the previous root.
+    char canonical[PATH_MAX];
+    if (realpath(host,canonical) && strlen(canonical)<sizeof(save_mounts[i].host))
+        strcpy(save_mounts[i].host,canonical);
+}
+
 int runtime_file_mount(const char *guest,const char *host) {
+    if (!guest || !host || strlen(guest)>=64 || strlen(host)>=512) return -1;
     pthread_mutex_lock(&lock);
     for (size_t i=0;i<mount_count;++i) if (!strcmp(mounts[i].guest,guest)) {
         snprintf(mounts[i].host,sizeof(mounts[i].host),"%s",host);
+        remember_save_mount(guest,host);
         pthread_mutex_unlock(&lock); return 0;
     }
-    if (mount_count==MAX_MOUNTS || strlen(guest)>=64 || strlen(host)>=512) { pthread_mutex_unlock(&lock); return -1; }
+    if (mount_count==MAX_MOUNTS) { pthread_mutex_unlock(&lock); return -1; }
     snprintf(mounts[mount_count].guest,64,"%s",guest);
     snprintf(mounts[mount_count].host,512,"%s",host);
+    remember_save_mount(guest,host);
     ++mount_count;
     if (save_path(guest)) remove_stale_temps(host,0);
     pthread_mutex_unlock(&lock);
@@ -106,6 +208,9 @@ void runtime_file_configure(const char *app0,const char *user) {
 }
 /* Resolve a guest path to a host path; returns 0 or a host errno. */
 static int translate(const char *guest,char *out,size_t size) {
+    return resolve_mount(guest,out,size,0);
+}
+static int resolve_mount(const char *guest,char *out,size_t size,int save_fact) {
     if (!guest || !*guest) return ENOENT;
     char buffer[1024];
     if (guest[0]!='/') snprintf(buffer,sizeof(buffer),"/app0/%s",guest);
@@ -113,16 +218,18 @@ static int translate(const char *guest,char *out,size_t size) {
     for (const char *p=buffer;(p=strstr(p,".."));p+=2)
         if ((p==buffer || p[-1]=='/') && (p[2]==0 || p[2]=='/')) return EACCES;
     pthread_mutex_lock(&lock);
+    const Mount *table=save_fact ? save_mounts : mounts;
+    const size_t count=save_fact ? save_mount_count : mount_count;
     size_t best=0; const Mount *m=NULL;
-    for (size_t i=0;i<mount_count;++i) {
-        size_t n=strlen(mounts[i].guest);
-        if (!strncmp(buffer,mounts[i].guest,n) && (buffer[n]=='/' || !buffer[n]) && n>best) { best=n; m=&mounts[i]; }
+    for (size_t i=0;i<count;++i) {
+        size_t n=strlen(table[i].guest);
+        if (!strncmp(buffer,table[i].guest,n) && (buffer[n]=='/' || !buffer[n]) && n>best) { best=n; m=&table[i]; }
     }
     int result=0;
-    if (!m) result=ENOENT;
+    if (!m || !m->host[0]) result=ENOENT;
     else if ((size_t)snprintf(out,size,"%s%s",m->host,buffer+best)>=size) result=ENAMETOOLONG;
     pthread_mutex_unlock(&lock);
-    if (result==ENOENT) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
+    if (result==ENOENT && !save_fact) fprintf(stderr,"Runtime: no mount for guest path %s\n",guest);
     /* BB_FILE_TRACE=1: every guest path the game opens, stats or checks (mods, missing files). */
     static int trace=-1;
     if (trace<0) { const char *t=getenv("BB_FILE_TRACE"); trace=t && t[0]=='1'; }
@@ -282,27 +389,38 @@ static int open_for_commit(const char *path,const char *source,int flags,int mod
     *commit=c; *temp=t;
     return host;
 }
-static void sync_directory(const char *file) {
+static int fsync_retry(int fd) {
+    int result;
+    do { result=fsync(fd); } while (result && errno==EINTR);
+    return result;
+}
+static int sync_directory(const char *file) {
     char dir[1024];
-    snprintf(dir,sizeof(dir),"%s",file);
+    if (snprintf(dir,sizeof(dir),"%s",file)>=(int)sizeof(dir)) return -ENAMETOOLONG;
     char *slash=strrchr(dir,'/');
-    if (!slash) return;
-    *slash=0;
+    if (!slash) snprintf(dir,sizeof(dir),".");
+    else if (slash==dir) slash[1]=0;
+    else *slash=0;
     int d=open(dir,O_RDONLY|O_DIRECTORY|O_CLOEXEC);
-    if (d>=0) { fsync(d); close(d); }
+    if (d<0) return -errno;
+    int e=fsync_retry(d) ? errno : 0;
+    if (close(d) && !e) e=errno;
+    return -e;
 }
 static int commit_file(const File *f) {
     if (!f->dirty) { close(f->host); unlink(f->temp); return 0; } /* opened for writing, not written */
-    int e=fsync(f->host) ? errno : 0;
-    close(f->host);
+    int e=f->write_error;
+    if (!e && fsync_retry(f->host)) e=errno;
+    if (close(f->host) && !e) e=errno;
     if (!e && rename(f->temp,f->commit)) e=errno;
     if (e) {
         fprintf(stderr,"Runtime: save file %s not replaced (%s); the old one is kept\n",f->path,strerror(e));
         unlink(f->temp);
         return -e;
     }
-    sync_directory(f->commit);
-    return 0;
+    int result=sync_directory(f->commit);
+    if (result) fprintf(stderr,"Runtime: save file %s replaced but directory durability not confirmed (%s)\n",f->path,strerror(-result));
+    return result;
 }
 /* The game's option pages (menu/optionsetting.gfx, Scaleform): the ControllSetting layout
  * (sprite "_Option_ItemList_71", rows Item_0_0 .. Item_6_0) stacks its rows upwards, a later row
@@ -511,6 +629,7 @@ static int64_t do_close(int fd) {
     int result=0;
     if (closed.temp) result=commit_file(&closed);
     else close(closed.host);
+    note_save_close(&closed,result);
     if (save_trace() && save_path(closed.path))
         printf("Save trace: close(fd %d, %s)%s -> %d\n",fd,closed.path,closed.temp ? closed.dirty ? " commit" : " unwritten" : "",result);
     free(closed.commit); free(closed.temp);
@@ -528,6 +647,13 @@ static int host_fd_written(int fd) {
     if (!f->dirty && save_trace() && save_path(f->path)) printf("Save trace: first write to fd %d (%s)\n",fd,f->path);
     f->dirty=1;
     return f->host;
+}
+static int file_write_failure(int fd,int error) {
+    pthread_mutex_lock(&lock);
+    File *f=get(fd);
+    if (f && f->temp && !f->write_error) f->write_error=error;
+    pthread_mutex_unlock(&lock);
+    return -error;
 }
 /* The GPU side is told of the write first (runtime_memory_note_write: its tracking unprotects the
  * range). Pages protected again meanwhile would make the kernel's copy fail with EFAULT instead
@@ -583,20 +709,22 @@ static void touch_for_read(const void *buffer,uint64_t size) {
         (void)*(volatile const unsigned char *)(p<(uintptr_t)buffer ? (uintptr_t)buffer : p);
 }
 static int64_t do_write(int fd,const void *buffer,uint64_t size) {
-    int h=host_fd_written(fd);
+    int h=size ? host_fd_written(fd) : host_fd(fd);
     if (h<0) return -EBADF;
     touch_for_read(buffer,size);
-    ssize_t n=write(h,buffer,size);
-    if (n<0) return -errno;
+    ssize_t n;
+    do { n=write(h,buffer,size); } while (n<0 && errno==EINTR);
+    if (n<0) return file_write_failure(fd,errno);
     __atomic_add_fetch(&writes,1,__ATOMIC_RELAXED);
     return n;
 }
 static int64_t do_pwrite(int fd,const void *buffer,uint64_t size,int64_t offset) {
-    int h=host_fd_written(fd);
+    int h=size ? host_fd_written(fd) : host_fd(fd);
     if (h<0) return -EBADF;
     touch_for_read(buffer,size);
-    ssize_t n=pwrite(h,buffer,size,offset);
-    return n<0 ? -errno : n;
+    ssize_t n;
+    do { n=pwrite(h,buffer,size,offset); } while (n<0 && errno==EINTR);
+    return n<0 ? file_write_failure(fd,errno) : n;
 }
 static int64_t do_lseek(int fd,int64_t offset,int whence) {
     if (save_trace()) { File *t=get(fd); if (t && save_path(t->path)) printf("Save trace: lseek(fd %d, %lld, %d)\n",fd,(long long)offset,whence); }
@@ -684,7 +812,9 @@ static int64_t do_rename(const char *from,const char *to) {
 static int64_t do_ftruncate(int fd,int64_t length) {
     int h=host_fd_written(fd);
     if (h<0) return -EBADF;
-    return ftruncate(h,length) ? -errno : 0;
+    int result;
+    do { result=ftruncate(h,length); } while (result && errno==EINTR);
+    return result ? file_write_failure(fd,errno) : 0;
 }
 static int64_t do_truncate(const char *guest,int64_t length) {
     if (game_path(guest)) return -EROFS;
@@ -693,9 +823,18 @@ static int64_t do_truncate(const char *guest,int64_t length) {
     if (e) return -e;
     if (save_path(guest)) current_copy(path,sizeof(path),1);
     if (save_trace() && save_path(guest)) printf("Save trace: truncate(%s, %lld)\n",guest,(long long)length);
-    return truncate(path,length) ? -errno : 0;
+    int result;
+    do { result=truncate(path,length); } while (result && errno==EINTR);
+    if (!result) return 0;
+    e=errno;
+    pthread_mutex_lock(&lock);
+    for (int i=3;i<MAX_FILES;++i)
+        if (files[i].used && files[i].temp && !strcmp(files[i].temp,path) && !files[i].write_error)
+            files[i].write_error=e;
+    pthread_mutex_unlock(&lock);
+    return -e;
 }
-static int64_t do_fsync(int fd) { int h=host_fd(fd); if (h<0) return -EBADF; return fsync(h) ? -errno : 0; }
+static int64_t do_fsync(int fd) { int h=host_fd(fd); if (h<0) return -EBADF; return fsync_retry(h) ? file_write_failure(fd,errno) : 0; }
 static int64_t do_access(const char *guest,int mode) {
     char path[1024];
     int e=translate(guest,path,sizeof(path));

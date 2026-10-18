@@ -94,6 +94,9 @@ if [[ ${1:-} == --test ]]; then
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_sema.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/sema-test
     out/sema-test
     "$CC" -std=c11 -O2 -g -Wall -Wextra -Werror -pthread -I. -Isrc tests/test_online.c "${runtime[@]}" out/libatrac9.a -lm "${gpu[@]}" "${libraries[@]}" -o out/online-test
+    "$CC" -std=c11 -O2 -Wall -Wextra -Werror -fPIC -shared -I. tests/test_bbnet_save_host.c -o out/bbnet-save-host-test.so
+    out/online-test --bbsc-save-host
+    out/online-test --bbsc-reject-host
     out/online-test
     "$CC" -std=c11 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror -I. -Isrc tests/test_content.c src/runtime_content.c -o out/content-test
     out/content-test

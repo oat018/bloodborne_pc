@@ -10,7 +10,15 @@
 extern "C" {
 #endif
 
-#define BBNET_ABI_VERSION 1
+#define BBNET_ABI_VERSION 2
+
+/* A runtime observation, not a character identity or proof of a particular game event.
+ * generation is process-local; error is a positive errno from the last dirty close. */
+typedef struct BbNetSaveReceipt {
+    uint64_t generation;
+    char path[1024];
+    int32_t error;
+} BbNetSaveReceipt;
 
 /* What the runtime gives the module: the game's identity (param.sfo, its folder for
  * sce_sys/npbind.dat) and guest threads for the NP libraries' callbacks into the game. */
@@ -24,6 +32,9 @@ typedef struct BbNetHost {
     int32_t (*thread_spawn)(void **thread, void *(__attribute__((sysv_abi)) *entry)(void *),
                             void *argument, uint64_t stack_size, const char *name);
     int32_t (*thread_join)(void *thread, void **result);
+    /* Host or last runtime /savedata target, even after unmount; 0 or positive errno.
+     * Returns the committed host path, not active-mount, character or snapshot proof. */
+    int32_t (*save_receipt)(const char *save_path, BbNetSaveReceipt *out);
 } BbNetHost;
 
 /* Registers the libraries; 0 on success, else the module cannot run (the game stays offline). */
@@ -40,6 +51,9 @@ typedef uintptr_t (*BbNetResolveFn)(const char *scoped_nid);
 uintptr_t bbnet_resolve(const char *scoped_nid);
 
 #ifdef __cplusplus
+}
+namespace Core {
+int32_t ReadRuntimeSaveReceipt(const char *path, BbNetSaveReceipt *out);
 }
 #endif
 #endif

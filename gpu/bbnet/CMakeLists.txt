@@ -18,7 +18,8 @@ file(GLOB_RECURSE BBNET_SOURCES CONFIGURE_DEPENDS shadps4/core/libraries/network
 # BBSC, Bloodborne seamless co-op (GPL-2.0+): its game code and the
 # port's stand-ins for shadPS4's UI (bbsc_glue.cpp). Installed only for Bloodborne with BB_BBSC=1.
 list(APPEND BBNET_SOURCES shadps4/core/bloodborne_re.cpp shadps4/core/bbsc_persistence.cpp
-    shadps4/core/bbsc_memscan.cpp shadps4/core/bbsc_cinematic.cpp bbsc_glue.cpp)
+    shadps4/core/bbsc_memscan.cpp shadps4/core/bbsc_cinematic.cpp shadps4/core/bbsc_party.cpp
+    bbsc_glue.cpp)
 # Trophies and the system dialogs stay in the C runtime; their shadPS4 versions need the
 # emulator's UI layers.
 list(FILTER BBNET_SOURCES EXCLUDE REGEX
@@ -42,3 +43,29 @@ target_link_libraries(bbnet PRIVATE bbgpu nlohmann_json::nlohmann_json protobuf:
     OpenSSL::SSL OpenSSL::Crypto ZLIB::ZLIB "${MINIUPNPC_LIBRARY}" Vulkan::Headers fmt::fmt
     Boost::headers magic_enum::magic_enum)
 target_include_directories(bbnet PRIVATE "${MINIUPNPC_INCLUDE}")
+
+if (NOT WIN32)
+    target_sources(bbnet PRIVATE shadps4/core/bbsc_party_journal.cpp)
+    add_executable(bbsc-party-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_party.cpp
+        ../../tests/test_bbsc_party_journal.cpp shadps4/core/bbsc_party.cpp
+        shadps4/core/bbsc_party_journal.cpp)
+    target_include_directories(bbsc-party-test PRIVATE include)
+    target_compile_options(bbsc-party-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_link_libraries(bbsc-party-test PRIVATE ZLIB::ZLIB)
+    set_target_properties(bbsc-party-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+    add_executable(bbsc-join-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_join.cpp
+        shadps4/core/bbsc_party.cpp)
+    target_include_directories(bbsc-join-test PRIVATE include shadps4 .. ../shim)
+    target_compile_options(bbsc-join-test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
+    target_link_options(bbsc-join-test PRIVATE -Wl,--gc-sections)
+    target_link_libraries(bbsc-join-test PRIVATE fmt::fmt pthread)
+    set_target_properties(bbsc-join-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+    add_executable(bbsc-http-poll-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_http_poll.cpp)
+    target_include_directories(bbsc-http-poll-test PRIVATE include shadps4 .. ../shim ../third_party/httplib)
+    target_compile_options(bbsc-http-poll-test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
+    target_link_options(bbsc-http-poll-test PRIVATE -Wl,--gc-sections)
+    target_link_libraries(bbsc-http-poll-test PRIVATE fmt::fmt pthread)
+    set_target_properties(bbsc-http-poll-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+endif()

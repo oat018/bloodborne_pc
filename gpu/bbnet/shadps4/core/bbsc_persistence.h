@@ -14,7 +14,7 @@ namespace Core::Bbsc {
 // any environment variable, so the build runs straight from a launcher. Everything still only
 // applies to CUSA03173 01.09 (checked where each feature installs). Experimental switches stay
 // off, and so is the boot intro (SHADPS4_BBSC_INTRO=1 brings it back). Setting a variable always wins: "0" turns a default off, any other value turns it on.
-inline constexpr std::array<std::string_view, 31> DefaultOnSwitches{
+inline constexpr std::array<std::string_view, 30> DefaultOnSwitches{
     "SHADPS4_BBSC_SHARED_PROGRESS",     // merge the host's progress into the guest's world (adds only)
     "SHADPS4_BBSC_WARP_TOGETHER",        // the guest follows the host through a lamp warp
     "SHADPS4_BBSC_WORLD_SYNC",           // ...and loads the host's map with the host's world flags
@@ -31,7 +31,6 @@ inline constexpr std::array<std::string_view, 31> DefaultOnSwitches{
     "SHADPS4_BBSC_NO_FOG_WALLS",         // co-op area fog walls hidden, leaving the area allowed
     "SHADPS4_BBSC_MESSAGES",             // co-op texts that fit seamless play (no "Returning to your world")
     "SHADPS4_BBSC_CONNECT_FIRST",        // cross-map summon: join first, one load into host map
-    "SHADPS4_BBSC_WARP_JOIN",            // after a cross-map join, one more real reload (lighting)
     "SHADPS4_BLOODBORNE_SEAMLESS_COOP",  // Wozzardman's seamless summon
     "SHADPS4_BLOODBORNE_RE_TRACE",       // installs the BBSC hooks (and the trace logs)
     "SHADPS4_CAPTURE_BLOODBORNE_SUMMON", // summon capture files for collect-logs

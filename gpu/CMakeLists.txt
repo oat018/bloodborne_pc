@@ -237,7 +237,7 @@ if (WIN32)
         -Wl,--stack,16777216 -Wl,--error-limit=0)
 endif()
 
-# Explicit test targets; neither launches the game nor needs a Vulkan device.
+# Explicit test targets; hardware-dependent checks are marked below.
 if (NOT WIN32)
     add_executable(bbsc-memory-test EXCLUDE_FROM_ALL ../tests/test_bbsc_memory.cpp
         ../src/runtime_memory.c)
@@ -246,6 +246,19 @@ if (NOT WIN32)
         -ffunction-sections -fdata-sections)
     target_link_options(bbsc-memory-test PRIVATE -Wl,--gc-sections)
     target_link_libraries(bbsc-memory-test PRIVATE pthread)
+
+    add_executable(bbsc-memscan-test EXCLUDE_FROM_ALL ../tests/test_bbsc_memscan.cpp
+        bbnet/shadps4/core/bbsc_memscan.cpp)
+    target_include_directories(bbsc-memscan-test PRIVATE bbnet/shadps4)
+    target_compile_options(bbsc-memscan-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_link_options(bbsc-memscan-test PRIVATE -Wl,--wrap=process_vm_readv -Wl,--wrap=pread)
+
+    # Explicit hardware regression; no window or game, but needs dma-buf export on the GPU.
+    add_executable(bbsc-memscan-dmabuf-test EXCLUDE_FROM_ALL ../tests/test_bbsc_memscan_dmabuf.cpp
+        bbnet/shadps4/core/bbsc_memscan.cpp)
+    target_include_directories(bbsc-memscan-dmabuf-test PRIVATE bbnet/shadps4)
+    target_compile_options(bbsc-memscan-dmabuf-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    target_link_libraries(bbsc-memscan-dmabuf-test PRIVATE Vulkan::Vulkan)
 endif()
 add_executable(motion-history-test EXCLUDE_FROM_ALL ../tests/test_motion_history.cpp)
 target_compile_options(motion-history-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)

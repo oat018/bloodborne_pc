@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "core/bloodborne_re.h"
+#include "bbnet/bbnet.h"
 
 #include <algorithm>
 #include <array>
@@ -9,6 +10,7 @@
 #include <bit>
 #include <charconv>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -32,6 +34,7 @@
 #include "common/path_util.h"
 #include "common/singleton.h"
 #include "core/bbsc_memscan.h"
+#include "core/bbsc_party.h"
 #include "core/bbsc_persistence.h"
 #include "core/bbsc_cinematic.h"
 #include "imgui/bbsc_loading_layer.h"
@@ -68,6 +71,11 @@ enum class TraceKind : u8 {
     UseItemExecution,
     GoodsActionSubmit,
     GoodsParamLookup,
+    BlankMenu,
+    BlankUse,
+    BlankAnimation,
+    BlankAvailability,
+    ActionMessage,
     BellAvailability,
     ResponderBellAvailability,
     NetworkAreaRegion,
@@ -97,6 +105,7 @@ enum class TraceKind : u8 {
     WorldStateValidation,
     EnginePanic,
     LuaSessionEvent,
+    SaveLifecycle,
 };
 
 struct TraceSite {
@@ -120,6 +129,15 @@ constexpr std::array<u8, 16> StandardRbxPrologue{0x55, 0x48, 0x89, 0xE5, 0x53};
 constexpr std::array<u8, 16> ReturnAndPadding{0xC3, 0x66, 0x66, 0x66, 0x66, 0x66,
                                               0x66, 0x2E, 0x0F, 0x1F, 0x84};
 constexpr u64 GlobalStatePointerOffset = 0x05556678;
+constexpr u64 NativeSaveRequestOffset = 0x0156D570;
+constexpr u64 NativeSaveSerializeOffset = 0x0156AA50;
+constexpr u64 NativeSaveSerializeEndOffset = 0x0156B8F3;
+constexpr u64 NativeSaveLoadOffset = 0x0156B970;
+constexpr u64 NativeSaveCopyOffset = 0x01831977;
+constexpr u64 NativeSlotReserveOffset = 0x01B3E633;
+constexpr u64 NativeSlotClearOffset = 0x01686708;
+constexpr u64 NativeSlotClearTaskOffset = 0x01B3F1BE;
+constexpr u64 NativeSlotClearOtherTaskOffset = 0x01B45DFE;
 constexpr u64 CandidateLocalStatePointerOffset = 0x0553E878;
 constexpr u64 SummonManagerRootPointerOffset = 0x0553B120;
 constexpr u64 CurrentMapListPointerOffset = 0x0553B148;
@@ -328,6 +346,21 @@ constexpr auto Sites = std::to_array<TraceSite>({
     // Engine Lua event dispatch 0x01339870(lua_state, name): names every session event
     // (OnBeKickOut, OnRoomTimeOut, OnIrregularLeaveSession, OnJoinMutiplay, ...).
     {"BBSC.LuaEvent", 0x01339870, TraceKind::LuaSessionEvent, StandardR15Prologue, 6},
+    {"BBSC.Save.Request", NativeSaveRequestOffset, TraceKind::SaveLifecycle, StandardR15Prologue, 6},
+    {"BBSC.Save.Serialize", NativeSaveSerializeOffset, TraceKind::SaveLifecycle, StandardR15Prologue, 6},
+    {"BBSC.Save.SerializeEnd", NativeSaveSerializeEndOffset, TraceKind::SaveLifecycle,
+     {0x88, 0xD8, 0x48, 0x8D, 0x65, 0xD8}, 6},
+    {"BBSC.Save.Load", NativeSaveLoadOffset, TraceKind::SaveLifecycle, StandardR15Prologue, 6},
+    {"BBSC.Save.CopyInput", NativeSaveCopyOffset, TraceKind::SaveLifecycle,
+     {0x8D, 0x71, 0x07, 0x83, 0xF9, 0x0A}, 6},
+    {"BBSC.Save.ClearSlotTask", NativeSlotClearTaskOffset, TraceKind::SaveLifecycle,
+     {0xC6, 0x44, 0x32, 0x10, 0x00}, 5},
+    {"BBSC.Save.ClearSlotOtherTask", NativeSlotClearOtherTaskOffset, TraceKind::SaveLifecycle,
+     {0xC6, 0x44, 0x32, 0x10, 0x00}, 5},
+    {"BBSC.Save.ClearSlot", NativeSlotClearOffset, TraceKind::SaveLifecycle,
+     {0xC6, 0x44, 0x11, 0x10, 0x00}, 5},
+    {"BBSC.Save.ReserveSlot", NativeSlotReserveOffset, TraceKind::SaveLifecycle,
+     {0x89, 0xBA, 0x90, 0x14, 0x00, 0x00}, 6},
     // CSMultiPlayMan::RemoveMember(member_id): sets the exit flag on that member's insert task.
     // Traced with caller chain to find what drops the guest on the host when the host dies.
     {"BBSC.RemoveMember", 0x01E54DB0, TraceKind::MatchingLeaveDecision, StandardR15Prologue, 6},
@@ -544,6 +577,15 @@ constexpr auto Sites = std::to_array<TraceSite>({
     {"ChrAction.UseItem.ActionSubmit", 0x01FF0FA0, TraceKind::GoodsActionSubmit,
      StandardR15Prologue, 6},
     {"GameParam.Goods.Lookup", 0x01F1E3D0, TraceKind::GoodsParamLookup, StandardR15Prologue, 6},
+    {"BBSC.BlankMenu.Text", 0x01BE8930, TraceKind::BlankMenu,
+     {0x55, 0x48, 0x89, 0xE5, 0x53, 0x50}, 6},
+    {"BBSC.Blank.AnimationResult", 0x018C377A, TraceKind::BlankAnimation,
+     {0x48, 0x83, 0xC4, 0x38, 0x5B, 0x41, 0x5C}, 7},
+    {"BBSC.Blank.AvailabilityResult", 0x018C3A08, TraceKind::BlankAvailability,
+     {0x48, 0x83, 0xC4, 0x38, 0x5B, 0x41, 0x5C}, 7},
+    {"BBSC.ActionMessage", 0x01AE78B0, TraceKind::ActionMessage, StandardR15Prologue, 6},
+    {"BBSC.BlankUse.NativeFlag", 0x018F98B4, TraceKind::BlankUse,
+     {0xC7, 0x83, 0x90, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 10},
     {"Beckoning.Availability.Area",
      0x0157F8BA,
      TraceKind::BellAvailability,
@@ -832,9 +874,6 @@ std::optional<SummonPlacementDescriptor> seamless_received_host_placement;
 bool seamless_received_host_placement_consumed{};
 // BBSC connect-first: host placement from the prepare reply, kept until the join load uses it.
 std::optional<SummonPlacementDescriptor> bbsc_connect_first_placement;
-// Set when a connect-first join has loaded the guest into the host's map; TickBbscJoinTeleport then
-// adds the join warp's second, real reload (see BbscWarpJoinEnabled).
-std::atomic<bool> bbsc_cross_map_join{false};
 bool BbscConnectFirstEnabled();
 bool BbscConnectFirstPlacementFresh(); // prepare reply received within the timeout
 std::atomic<u32> pending_summon_reload_map{};
@@ -1223,23 +1262,16 @@ void BbscWriteConnectFirstPlacement(std::string_view when) {
     }
     const bool already = ReadValue<u8>(state, 0x1648) != 0 &&
                          ReadValue<u32>(state, 0x1644) == host->packed_region &&
-                         ReadValue<u32>(state, 0x14C4) == host->packed_region &&
-                         ReadValue<u32>(state, 0x14C0) == host->packed_region;
+                         ReadValue<u32>(state, 0x14C4) == host->packed_region;
     if (already) {
         return;
     }
     const u32 previous_map = ReadValue<u32>(state, 0x1644);
-    const u32 previous_sign_map = ReadValue<u32>(state, 0x14C0);
     const std::array<float, 4> position{host->x, host->y, host->z, 1.0F};
     const std::array<float, 4> rotation{0.0F, host->heading, 0.0F, 0.0F};
-    // Third block: the guest's own sign placement at state+0x14A0 (pos), +0x14B0 (rot), +0x14C0 (map).
-    // In both cross-map runs it still named Central Yharnam while the guest loaded Cathedral Ward
-    // with Central Yharnam lighting and low-detail map pieces (a same-map join never differs here;
-    // cross-map without co-op renders normally, 2026-09-17). HYPOTHESIS: the load takes the area
-    // setup from it.
-    const bool ok = WriteValue(state, 0x14A0, position) && WriteValue(state, 0x14B0, rotation) &&
-                    WriteValue<u32>(state, 0x14C0, host->packed_region) &&
-                    WriteTransportedSummonPlacement(state, *host) &&
+    // Native own-world restoration copies 14A0/14B0/14C0 back into the forced placement.
+    // Do not overwrite that engine-owned source ourselves; it also changes during native loads.
+    const bool ok = WriteTransportedSummonPlacement(state, *host) &&
                     WriteValue(state, 0x1620, position) && WriteValue(state, 0x1630, rotation) &&
                     WriteValue<s32>(state, 0x1640, host->area) &&
                     WriteValue<u32>(state, 0x1644, host->packed_region) &&
@@ -1248,7 +1280,7 @@ void BbscWriteConnectFirstPlacement(std::string_view when) {
              "BBSC connect-first: placement {} at {} (map {:#x} area {} at ({:.2f}, {:.2f}, "
              "{:.2f}); block had map {:#x}, sign map {:#x}; current map {:#x})",
              ok ? "written" : "WRITE FAILED", when, host->packed_region, host->area, host->x,
-             host->y, host->z, previous_map, previous_sign_map, GetCurrentPackedMap());
+             host->y, host->z, previous_map, ReadValue<u32>(state, 0x14C0), GetCurrentPackedMap());
 }
 
 void BbscFillConnectFirstReceivedPlacement() {
@@ -1262,7 +1294,6 @@ void BbscConnectFirstReloadFinished() {
     }
     std::scoped_lock lock{seamless_placement_mutex};
     bbsc_connect_first_placement.reset();
-    bbsc_cross_map_join.store(true, std::memory_order_release);
     LOG_INFO(Debug, "BBSC connect-first: summoned reload finished in host map {:#x}",
              host->packed_region);
 }
@@ -2666,7 +2697,7 @@ void WriteUseItemState(std::ostream& out, const TraceSite& site,
 }
 
 bool IsTrackedGoods(s32 goods_id) {
-    constexpr std::array TrackedGoods{100, 111, 200, 201, 205, 206, 225, 226};
+    constexpr std::array TrackedGoods{100, 111, 200, 201, 205, 206, 225, 226, 11251};
     return std::ranges::find(TrackedGoods, goods_id) != TrackedGoods.end();
 }
 
@@ -3175,6 +3206,19 @@ void WriteLuaSessionEvent(std::ostream& out, const GuestRegisterSnapshot& regist
              return_address >= image_base ? return_address - image_base : 0);
     // The guest accepted a summon: its summon load is next (see "Load cover").
     if (name == "JoinSession_White" && GetSessionState() != 3) {
+        SummonPlacementDescriptor local{};
+        std::string_view result;
+        const u64 global = GetGlobalState();
+        if (ReadLocalSummonPlacement(local, result) && global >= 0x10000 &&
+            HasMemoryAccess(global, 0x1598, MemoryProt::CpuRead)) {
+            LOG_INFO(Debug, "BBSC native return origin: join at map {:#x} ({:.2f}, {:.2f}, "
+                            "{:.2f}), heading {:.3f}; native home map {:#x} ({:.2f}, {:.2f}, "
+                            "{:.2f}), heading {:.3f}; last lamp {}",
+                     local.packed_region, local.x, local.y, local.z, local.heading,
+                     ReadValue<u32>(global, 0x14C0), ReadValue<float>(global, 0x14A0),
+                     ReadValue<float>(global, 0x14A4), ReadValue<float>(global, 0x14A8),
+                     ReadValue<float>(global, 0x14B4), ReadValue<s32>(global, 0x1528));
+        }
         CaptureBbscOwnWorldBeforeJoin(); // first: the load resets the map's item flags
         StartBbscLoadCover("summon");
     }
@@ -3382,6 +3426,33 @@ s32 GetLocalCharacterType() {
     const u64 world_chr = ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0);
     const u64 player = ReadablePointer(world_chr, 0x68) ? ReadValue<u64>(world_chr, 0x60) : 0;
     return ReadablePointer(player, 0x80) ? ReadValue<s32>(player, 0x78) : -1;
+}
+
+struct BbscReturnOrigin {
+    u64 global;
+    SummonPlacementDescriptor placement;
+};
+// shortcut: process-local native return correction; restart recovery still needs the party journal.
+std::optional<BbscReturnOrigin> bbsc_return_origin;
+
+void CaptureBbscNativeReturnOrigin() {
+    const u64 global = GetGlobalState();
+    if (!ReadablePointer(global, 0x1598) || ReadValue<u8>(global, 0x1592) == 0 ||
+        GetSessionState() == 3) {
+        return; // rejoining inside a party must retain the original origin
+    }
+    bbsc_return_origin.reset();
+    SummonPlacementDescriptor local{};
+    std::string_view result;
+    if (GetLocalPlayerType() != 0 || ReadValue<u8>(global, 0x08) != 0 ||
+        !ReadLocalSummonPlacement(local, result) ||
+        !Core::Bbsc::Party::IsSupportedStoryMap(local.packed_region)) {
+        LOG_WARNING(Debug, "BBSC return origin: could not capture before join ({})", result);
+        return;
+    }
+    bbsc_return_origin = BbscReturnOrigin{global, local};
+    LOG_INFO(Debug, "BBSC return origin: captured map {:#x} at ({:.2f}, {:.2f}, {:.2f}), "
+                    "heading {:.3f}", local.packed_region, local.x, local.y, local.z, local.heading);
 }
 
 // [[0x0553B188]+4] is the type the game restores when a phantom returns to its own world
@@ -4116,6 +4187,190 @@ u64 GetLocalPlayerCharacter() {
     return ReadablePointer(world_chr, 0x68) ? ReadValue<u64>(world_chr, 0x60) : 0;
 }
 
+// Diagnostic candidates only: these fields are not an established character identity.
+std::optional<std::vector<std::pair<u32, s32>>> ReadBbscIdentityCandidates(u64 object, size_t bytes) {
+    if (bytes == 0 || bytes > 0x100 || bytes % sizeof(s32) != 0 || !ReadablePointer(object, bytes)) {
+        return std::nullopt;
+    }
+    std::vector<std::pair<u32, s32>> fields;
+    for (size_t offset = 0; offset < bytes; offset += sizeof(s32)) {
+        const s32 value = ReadValue<s32>(object, offset);
+        if (value >= -1 && value <= 10) {
+            fields.emplace_back(static_cast<u32>(offset), value);
+        }
+    }
+    return fields;
+}
+
+int32_t ReadBbscSelectedSaveReceipt(BbNetSaveReceipt& out) {
+    out = {};
+    const u64 global = GetGlobalState();
+    if (!ReadablePointer(global, 0x1494)) return EINVAL;
+    const s32 slot = ReadValue<s32>(global, 0x1490);
+    if (slot < 0 || slot >= 10) return EINVAL;
+    return Core::ReadRuntimeSaveReceipt(fmt::format("/savedata0/userdata{:04}", slot).c_str(), &out);
+}
+
+void TraceBbscSelectedSaveReceipt() {
+    static s64 last_ms = 0;
+    static unsigned lines = 0;
+    static int32_t last_result = -1;
+    static BbNetSaveReceipt last{};
+    const s64 now = SteadyNowMs();
+    if (lines >= 64 || now - last_ms < 1'000) return;
+    last_ms = now;
+    BbNetSaveReceipt receipt{};
+    const int32_t result = ReadBbscSelectedSaveReceipt(receipt);
+    if (result == last_result && receipt.generation == last.generation &&
+        receipt.error == last.error && !std::strcmp(receipt.path, last.path)) return;
+    last_result = result;
+    last = receipt;
+    ++lines;
+    LOG_INFO(Debug, "[BBSC-save-receipt] query {}, generation {}, close error {}, path {}",
+             result, receipt.generation, receipt.error, receipt.path);
+}
+
+struct BbscNativeSaveEvidence {
+    std::string_view stage;
+    s32 slot = -1;
+    u64 buffer = 0;
+    u32 bytes = 0;
+    u8 mode = 0;
+    bool own_world = false;
+    s32 success = -1;
+};
+
+std::optional<BbscNativeSaveEvidence> ReadBbscNativeSaveEvidence(
+    u64 offset, const GuestRegisterSnapshot& registers) {
+    BbscNativeSaveEvidence out{};
+    if (offset == NativeSlotClearOffset || offset == NativeSlotClearTaskOffset ||
+        offset == NativeSlotClearOtherTaskOffset) {
+        // Menu tasks clear occupancy directly; own_world is unused for this event.
+        const bool task = offset != NativeSlotClearOffset;
+        const u64 slot = task ? registers.rsi : registers.rdx;
+        const u64 metadata = task ? registers.rdx : registers.rcx;
+        if (slot >= 10 || !ReadablePointer(metadata, 0x1A)) return std::nullopt;
+        out.stage = "slot-clear";
+        out.slot = static_cast<s32>(slot);
+        return out;
+    }
+    const u64 global = GetGlobalState();
+    if (!ReadablePointer(global, 0x1593)) return std::nullopt;
+    out.slot = ReadValue<s32>(global, 0x1490);
+    out.own_world = ReadValue<u8>(global, 0x1592) != 0;
+    if (offset == NativeSaveRequestOffset) {
+        out.stage = "request";
+        const s32 requested = static_cast<s32>(registers.rdi);
+        if (requested != -1) out.slot = requested;
+        out.mode = static_cast<u8>(registers.rdx); // Nonzero clears the slot, not a save success.
+    } else if (offset == NativeSaveSerializeOffset || offset == NativeSaveLoadOffset) {
+        if (registers.rdi != global || registers.rdx != 0x140000) return std::nullopt;
+        out.stage = offset == NativeSaveLoadOffset ? "deserialize" : "serialize-begin";
+        out.buffer = registers.rsi;
+        out.bytes = 0x140000;
+    } else if (offset == NativeSaveSerializeEndOffset) {
+        out.stage = "serialize-end";
+        out.success = static_cast<u8>(registers.rbx) != 0;
+        if (out.success) {
+            // Successful 0156AA50 stores its original output pointer at rsp+28 before writing.
+            if (!ReadablePointer(registers.rsp, 0x30)) return std::nullopt;
+            out.buffer = ReadValue<u64>(registers.rsp, 0x28);
+            out.bytes = 0x140000;
+        }
+    } else if (offset == NativeSaveCopyOffset) {
+        out.stage = "copy-input"; // Before 02837100; neither queue acceptance nor durable close.
+        out.slot = static_cast<s32>(registers.rcx);
+        out.buffer = registers.r15;
+        out.bytes = 0x140000;
+    } else if (offset == NativeSlotReserveOffset) {
+        if (registers.rdx != global || !ReadValue<u8>(global, 0x1578)) return std::nullopt;
+        out.stage = "slot-reserved"; // Allocation can still be cancelled; not a character identity.
+        out.slot = static_cast<s32>(registers.rdi);
+    } else return std::nullopt;
+    if (out.slot < 0 || out.slot >= 10 ||
+        (out.bytes && !ReadablePointer(out.buffer, out.bytes))) return std::nullopt;
+    return out;
+}
+
+bool BbscSaveIdentityTraceEnabled() {
+    static const bool enabled = EnvFlagEnabled("SHADPS4_BBSC_IDENTITY_TRACE");
+    return enabled;
+}
+
+void TraceBbscNativeSaveEvidence(u64 offset, const GuestRegisterSnapshot& registers) {
+    if (!BbscSaveIdentityTraceEnabled()) return;
+    try {
+        const auto evidence = ReadBbscNativeSaveEvidence(offset, registers);
+        if (!evidence) return;
+        static std::atomic<u32> sequence{0};
+        const u32 seq = sequence.fetch_add(1, std::memory_order_relaxed);
+        if (seq >= 128) return;
+        LOG_INFO(Debug, "[BBSC-save-native] seq {} stage {} slot {} own {} mode {} success {} "
+                        "buffer {:#x} bytes {} site {:#x}",
+                 seq, evidence->stage, evidence->slot, evidence->own_world, evidence->mode,
+                 evidence->success, evidence->buffer, evidence->bytes, offset);
+    } catch (...) {
+        // Read-only diagnostics must never unwind through a native save operation.
+    }
+}
+
+void TickBbscSaveIdentityEvidence() {
+    if (!BbscSaveIdentityTraceEnabled() || image_base == 0) {
+        return;
+    }
+    static u64 last_player = 0;
+    const u64 global = GetGlobalState();
+    const u64 player = GetLocalPlayerCharacter();
+    if (!ReadablePointer(global, 0x1593) || ReadValue<u8>(global, 8) != 0 ||
+        ReadValue<u8>(global, 0x1592) == 0 || GetSessionState() != 0 ||
+        GetLocalPlayerType() != 0 || GetCharacterHp(player) <= 0) {
+        last_player = 0;
+        return;
+    }
+    TraceBbscSelectedSaveReceipt();
+    if (player == last_player) {
+        return;
+    }
+    last_player = player;
+    LOG_INFO(Debug, "[BBSC-save-identity] own character ready in map {:#x}, last lamp {}",
+             GetCurrentPackedMap(), ReadValue<s32>(global, 0x1528));
+    const u64 slots = ReadValue<u64>(image_base + PlayerSlotManagerPointerOffset, 0);
+    // GetClearCount (01334B90) reads this field; AddClearCount saturates at 7.
+    LOG_INFO(Debug, "[BBSC-save-identity] native clear count (capped at 7): {}",
+             ReadablePointer(slots, 0x6C) ? ReadValue<s32>(slots, 0x68) : -1);
+    const u64 data = ReadablePointer(slots, 0x10) ? ReadValue<u64>(slots, 8) : 0;
+    const u64 save_context = ReadValue<u64>(image_base + 0x0556D438, 0);
+    // Small integer fields are research evidence, never a journal key or recovery authorization.
+    for (const auto& [label, object, bytes] :
+         {std::tuple{"player_slots", slots, size_t{0x90}},
+          std::tuple{"global_save_selection", global + 0x1490, sizeof(s32)},
+          std::tuple{"local_data", data, size_t{0x100}},
+          std::tuple{"save_context", save_context, size_t{0x60}}}) {
+        const auto candidates = ReadBbscIdentityCandidates(object, bytes);
+        std::string fields;
+        if (candidates) {
+            for (const auto& [offset, value] : *candidates) {
+                fields += fmt::format(" {:#x}:{}", offset, value);
+            }
+        }
+        LOG_INFO(Debug, "[BBSC-save-identity] {} candidate integers:{}", label,
+                 candidates ? fields : " unreadable");
+    }
+}
+
+void ApplyBbscPartingBlankUseFlag(const GuestRegisterSnapshot& registers) {
+    if (registers.r15 != 11251 || image_base == 0 ||
+        registers.rbx != GetLocalPlayerCharacter() || !ReadablePointer(registers.r13, 0x681)) {
+        return;
+    }
+    // 018F9876 clears this for goods102; 018F989F sets it only for Silencing Blank111.
+    // The cloned Kit item must select the same native behavior, independent of the last item used.
+    const u8 before = ReadValue<u8>(registers.r13, 0x680);
+    if (WriteValue<u8>(registers.r13, 0x680, 1)) {
+        LOG_INFO(Debug, "BBSC Parting Blank: native item discriminator {} -> 1", before);
+    }
+}
+
 u64 FindLivingPartnerCharacter() {
     const u64 world_chr = ReadValue<u64>(image_base + CandidateLocalStatePointerOffset, 0);
     if (!ReadablePointer(world_chr, 0x68)) {
@@ -4264,28 +4519,6 @@ constexpr s64 BbscJoinTeleportSettleMs = 2'000;
 // so the two never move the same character at the same time.
 bool bbsc_join_teleport_done = false;
 
-// Ask the game to warp us properly instead of sliding the guest across the floor.
-//
-// The plain teleport is the game's own in-map event warp (0x013CB3D0 does exactly the same two
-// operations), which is meant for short hops inside an already streamed area. Used to arrive in
-// the host's world it moves the player without the engine ever running a real transition, which
-// is the suspected cause of the cross-map texture mess.
-//
-// The reload destination selector (0x01332BC0) has a forced-warp branch built for this:
-//   global+0x1520 = 1        ignore the last lamp, use my destination
-//   global+0x14f0            the map to load
-//   global+0x10              the point in it (kept, then corrected by the teleport afterwards)
-// and 0x013CDE30 performs the reload - loading screen, teardown, streaming, all of it. That is
-// the same call the death respawn already uses, so this is machinery we exercise every session.
-//
-// Sequence: request the reload once, wait for it to finish, then teleport to the host's exact
-// position as before. The teleport is a few metres inside a freshly loaded map, which is what the
-// in-map warp is actually for.
-bool BbscWarpJoinEnabled() {
-    static const bool enabled = EnvFlagEnabled("SHADPS4_BBSC_WARP_JOIN");
-    return enabled;
-}
-
 // A real reload for a guest in a session, to `to` (map + spot).
 //
 // Uses the game's own forced summon placement, in exactly the order the fork's cross-map join
@@ -4330,7 +4563,7 @@ bool RequestBbscSessionWarp(u64 global, const SummonPlacementDescriptor& to, std
     if (ReadablePointer(rules, 0x88) && HasMemoryAccess(rules + 0x84, 4, MemoryProt::CpuWrite)) {
         WriteValue<s32>(rules, 0x84, 3);
     }
-    StartBbscLoadCover(why); // already on for the summon when this is the cross-map second reload
+    StartBbscLoadCover(why);
     const u64 result = reinterpret_cast<StageTransition>(image_base + StageTransitionOffset)();
     LOG_INFO(Debug,
              "BBSC {} warp: full reload requested into map {:#x} at ({:.2f}, {:.2f}, {:.2f}), "
@@ -4339,14 +4572,11 @@ bool RequestBbscSessionWarp(u64 global, const SummonPlacementDescriptor& to, std
     return true;
 }
 
-void TickBbscJoinTeleport() {
+void TickBbscJoinTeleport(s64 now) {
     static bool done = false;
-    static bool warp_requested = false;
-    static s64 warp_requested_ms = 0;
     static s64 stable_since_ms = 0;
     static std::array<float, 3> last_host{};
     static s64 last_check_ms = 0;
-    const s64 now = SteadyNowMs();
     if (now - last_check_ms < 250) {
         return;
     }
@@ -4357,9 +4587,6 @@ void TickBbscJoinTeleport() {
     if (session_state != 6) {
         done = false;
         bbsc_join_teleport_done = false;
-        bbsc_cross_map_join.store(false, std::memory_order_release);
-        warp_requested = false;
-        warp_requested_ms = 0;
         stable_since_ms = 0;
         return;
     }
@@ -4406,34 +4633,7 @@ void TickBbscJoinTeleport() {
         return;
     }
 
-    // Let the engine do the transition first, once, then position inside the loaded map.
-    // Only after a cross-map join: the one summon load into the host's map left the lighting
-    // flickering (lights switching on and off, 2026-09-24) and this second reload fixed it. A
-    // same-map join does not need it, and the reload after every summon was what turned the guest
-    // into "Beckoner" (a tester, 2026-09-23).
-    if (BbscWarpJoinEnabled() && bbsc_cross_map_join.load(std::memory_order_acquire) &&
-        !warp_requested) {
-        SummonPlacementDescriptor to{};
-        to.packed_region = GetCurrentPackedMap();
-        to.x = host_transform->position[0] + 1.0f;
-        to.y = host_transform->position[1];
-        to.z = host_transform->position[2];
-        to.heading = host_transform->rotation[1];
-        if (RequestBbscSessionWarp(global, to, "join")) {
-            warp_requested = true;
-            warp_requested_ms = now;
-            stable_since_ms = 0; // the host's synced position has to settle again after the load
-            return;
-        }
-        // Could not ask for it - fall through and use the plain teleport rather than strand the
-        // guest wherever the load happened to drop them.
-        LOG_WARNING(Debug, "BBSC join warp: could not request the reload, teleporting instead");
-        warp_requested = true;
-    }
-    // Give the load a moment to finish before moving the character it just placed.
-    if (warp_requested && now - warp_requested_ms < BbscJoinTeleportSettleMs) {
-        return;
-    }
+    // Native summon already loaded this map; a second stage load rebuilds the guest as Beckoner.
     done = true;
     bbsc_join_teleport_done = true; // from here on TickBbscFollowHost may move the guest
     LogBbscHostWorldFlagsDiff(GetCurrentPackedMap(), "after joining");
@@ -5517,7 +5717,7 @@ extern "C" __declspec(dllimport) wchar_t* __stdcall GetCommandLineW();
 #endif
 
 // The local user this process plays as: --user-id N on the emulator's command line, empty when
-// not given (one player per PC: the newest save is then ours). 2026-10-12 two-window test: both
+// not given, require an unambiguous local save owner. 2026-10-12 two-window test: both
 // windows share %APPDATA%\shadPS4, the guest took the host's newer save (user 1002) for its own,
 // wrote its own-world journal and pending shared progress under it, and the HOST merged them
 // ("own world restored after a crash" + shared progress notice at every join).
@@ -5548,7 +5748,7 @@ const std::string& BbscProcessUserId() {
     return id;
 }
 
-// The character being played: the save slot file the game wrote last, during this run.
+// Native selected slot; retain the legacy current-run write gate until durable identity is proven.
 std::optional<BbscSaveSlot> BbscActiveSaveSlotUnchecked();
 // Runs inside game hooks (the join load): a filesystem error must never become an exception there.
 std::optional<BbscSaveSlot> BbscActiveSaveSlot() {
@@ -5563,6 +5763,30 @@ std::optional<BbscSaveSlot> BbscActiveSaveSlot() {
 std::optional<BbscSaveSlot> BbscActiveSaveSlotUnchecked() {
     namespace fs = std::filesystem;
     std::error_code ec;
+    const u64 global = GetGlobalState();
+    if (!ReadablePointer(global, 0x1494)) {
+        return std::nullopt;
+    }
+    // 0193F810 sets this from the loaded slot; 0156D5B2 uses it to save that character.
+    const s32 slot = ReadValue<s32>(global, 0x1490);
+    if (slot < 0 || slot >= 10) {
+        return std::nullopt;
+    }
+    const auto filename = fmt::format("userdata{:04}", slot);
+    const auto written_this_run = [&](const fs::path& dir) {
+        const auto file = dir / filename;
+        ec.clear();
+        if (!fs::is_regular_file(file, ec) || ec) {
+            return false;
+        }
+        const auto written = fs::last_write_time(file, ec);
+        return !ec && written > bbsc_run_started;
+    };
+    // An explicit mounted profile must never fall through to another user's newer file.
+    if (const char* save_dir = std::getenv("BBSC_SAVE_DIR"); save_dir != nullptr && save_dir[0]) {
+        return written_this_run(save_dir) ? std::optional{BbscSaveSlot{"save", slot}}
+                                          : std::nullopt;
+    }
     // As shadPS4 picks its user folder: <working folder>\user when it exists (portable install),
     // else %APPDATA%\shadPS4 - never both (another window may play from the other one).
     std::vector<fs::path> bases{fs::current_path(ec) / "user"};
@@ -5577,20 +5801,13 @@ std::optional<BbscSaveSlot> BbscActiveSaveSlotUnchecked() {
     ec.clear();
 #endif
     std::optional<BbscSaveSlot> best;
-    fs::file_time_type best_time = bbsc_run_started;
-    // BBSC_SAVE_DIR (2026-10-12): the folder holding userdata0000.. on hosts that keep saves
-    // elsewhere (bbhost: <data>\saves\SPRJ0005); its slots count as user "save".
-    if (const char* save_dir = std::getenv("BBSC_SAVE_DIR"); save_dir != nullptr && save_dir[0]) {
-        for (int slot = 0; slot < 10; ++slot) {
-            const fs::path file = fs::path(save_dir) / fmt::format("userdata{:04}", slot);
-            const auto written = fs::last_write_time(file, ec);
-            if (!ec && written > best_time) {
-                best_time = written;
-                best = BbscSaveSlot{"save", slot};
-            }
-            ec.clear();
+    bool ambiguous = false;
+    const auto consider = [&](const fs::path& dir, const std::string& user) {
+        if (written_this_run(dir)) {
+            ambiguous = ambiguous || best.has_value();
+            best = BbscSaveSlot{user, slot};
         }
-    }
+    };
     for (const fs::path& base : bases) {
         for (const auto& user : fs::directory_iterator(base / "home", ec)) {
             const std::string name = user.path().filename().string();
@@ -5601,15 +5818,8 @@ std::optional<BbscSaveSlot> BbscActiveSaveSlotUnchecked() {
                 continue; // another window's character on this PC
             }
             const fs::path dir = user.path() / "savedata" / "CUSA00207" / "SPRJ0005";
-            for (int slot = 0; slot < 10; ++slot) {
-                const fs::path file = dir / fmt::format("userdata{:04}", slot);
-                const auto written = fs::last_write_time(file, ec);
-                if (!ec && written > best_time) {
-                    best_time = written;
-                    best = BbscSaveSlot{name, slot};
-                }
-                ec.clear();
-            }
+            consider(dir, name);
+            ec.clear();
         }
         ec.clear();
         // The older layout <base>\savedata\<user>\CUSA00207 (BBport for Windows keeps its saves
@@ -5619,20 +5829,16 @@ std::optional<BbscSaveSlot> BbscActiveSaveSlotUnchecked() {
             if (name == "1004") {
                 continue;
             }
-            const fs::path dir = user.path() / "CUSA00207" / "SPRJ0005";
-            for (int slot = 0; slot < 10; ++slot) {
-                const fs::path file = dir / fmt::format("userdata{:04}", slot);
-                const auto written = fs::last_write_time(file, ec);
-                if (!ec && written > best_time) {
-                    best_time = written;
-                    best = BbscSaveSlot{"sd" + name, slot};
-                }
-                ec.clear();
+            if (!BbscProcessUserId().empty() && name != BbscProcessUserId()) {
+                continue;
             }
+            const fs::path dir = user.path() / "CUSA00207" / "SPRJ0005";
+            consider(dir, "sd" + name);
+            ec.clear();
         }
         ec.clear();
     }
-    return best;
+    return ambiguous ? std::nullopt : best;
 }
 
 
@@ -8110,6 +8316,7 @@ int RemotePlayerCount() {
 }
 
 void PS4_SYSV_ABI BbscQuitToTitleHook(u64, const GuestRegisterSnapshot* registers) {
+    bbsc_return_origin.reset(); // never reuse process-local coordinates after changing characters
     // Who asked to return to the title matters. A player choosing "quit to title" from the menu
     // and the game bailing out on its own both land here, and only the first should tear the
     // session down. Sessions were ending by themselves (2026-09-21) with nothing failing in the
@@ -8161,10 +8368,39 @@ void GuardBbscStrayForcedWarp(const GuestRegisterSnapshot& registers) {
         caller2 = ReadablePointer(up, 0x10) ? ReadValue<u64>(up, 8) : 0;
     }
     const auto offset = [](u64 address) { return address > image_base ? address - image_base : 0; };
-    const u32 forced_map = ReadValue<u32>(global, 0x14F0);
+    u32 forced_map = ReadValue<u32>(global, 0x14F0);
     // Mod 24 only cleared it when +0x14F0 held no map; 22:17:12 it held the host's own map and the
     // host still fell (the position is the summon placement's, not his). Not a guest = no forced warp.
     const bool clear = BbscOwnWorldNonGuest(global);
+    if (!clear && offset(caller) == 0x0138A51C &&
+        ReadValue<u8>(global, 0x1592) == 0 && GetLocalPlayerType() == 1 &&
+        bbsc_return_origin.has_value() && bbsc_return_origin->global == global) {
+        const auto& home = bbsc_return_origin->placement;
+        const u32 home_map = home.packed_region;
+        const std::array<float, 4> position{home.x, home.y, home.z, 1.0f};
+        const std::array<float, 4> rotation{0.0f, home.heading, 0.0f, 0.0f};
+        const auto finite = [](const auto& values) {
+            return std::ranges::all_of(values, [](float value) { return std::isfinite(value); });
+        };
+        // The engine rewrites the sign block during joining too (p73142 trace). Restore both
+        // the selector's forced block and the later own-world restore source from our copy.
+        if (Core::Bbsc::Party::IsSupportedStoryMap(home_map) && finite(position) && finite(rotation) &&
+            HasMemoryAccess(global + 0x14A0, 0x80, MemoryProt::CpuReadWrite)) {
+            WriteValue(global, 0x14A0, position);
+            WriteValue(global, 0x14B0, rotation);
+            WriteValue(global, 0x14C0, home_map);
+            WriteValue(global, 0x1500, position);
+            WriteValue(global, 0x1510, rotation);
+            WriteValue(global, 0x14F0, home_map);
+            LOG_INFO(Debug, "BBSC native return: forced map {:#x} -> own map {:#x} at "
+                            "({:.2f}, {:.2f}, {:.2f}), heading {:.3f}",
+                     forced_map, home_map, position[0], position[1], position[2], rotation[1]);
+            forced_map = home_map;
+        } else {
+            LOG_WARNING(Debug, "BBSC native return: home placement invalid or not writable; "
+                               "native selector unchanged");
+        }
+    }
     if (clear) {
         WriteValue<u8>(global, 0x1520, 0);
     }
@@ -12170,6 +12406,11 @@ void PrepareBbscKitRows(u64 table) {
         WriteValue<s32>(row, 100, -1);           // replaceItemId_bySpEffect
         WriteValue<s32>(row, 104, -1);           // replaceTriggerSpEffectId
         WriteValue<u8>(row, 58, 0);              // goodsType: normal item (some slots were keys)
+        if (item.id == 11251) {
+            // The native menu distinguishes stopping the bells from ending the session.
+            WriteValue<u8>(row, 63, ReadValue<u8>(source, 63));
+            WriteValue<s32>(row, 36, ReadValue<s32>(source, 36));
+        }
     }
     for (const u32 id : BbscHiddenVanilla) {
         if (const u64 row = BbscParamRow(table, id); row != 0) {
@@ -12521,6 +12762,52 @@ bool BackupBbscSavesUnchecked() {
 // from BOTH the carried items and the storage box goes into the carried items. Checked once per
 // loaded character (every new local player character), so a save loaded later is checked too; the
 // saves are backed up before anything is added.
+void LogBbscPartingBlankPresentation() {
+    const u64 repo = ReadValue<u64>(image_base + 0x05540340, 0);
+    if (!ReadablePointer(repo, 0x158) || ReadValue<s32>(repo, 0x148) == 0 ||
+        ReadValue<u64>(repo, 0x150) == 0) {
+        return;
+    }
+    struct alignas(8) LookupResult {
+        u32 id{0xFFFFFFFFu};
+        u32 pad{};
+        u64 row{};
+    } result;
+    using Lookup = void PS4_SYSV_ABI (*)(LookupResult*, u32);
+    reinterpret_cast<Lookup>(image_base + 0x01F1E3D0)(&result, 11251);
+    if (!ReadablePointer(result.row, GoodsRowSize)) {
+        return;
+    }
+    std::array<u8, GoodsRowSize> bytes{};
+    std::memcpy(bytes.data(), reinterpret_cast<const void*>(result.row), bytes.size());
+    u32 texts = 0;
+    for (const auto& message : BbscMessages) {
+        if (message.id != 11251) {
+            continue;
+        }
+        u64 fmg = 0;
+        const u64 slot = FindBbscMessageSlot(message.category, message.id, &fmg);
+        if (slot != 0 && ReadValue<u64>(slot, 0) == reinterpret_cast<u64>(message.text) - fmg) {
+            texts |= message.category == 10 ? 1 : message.category == 20 ? 2 : 4;
+        }
+    }
+    auto context = std::tuple{result.row, texts, GetSessionState(), GetLocalPlayerType(),
+                                    GetLocalCharacterType(), GetCurrentPackedMap()};
+    static decltype(context) previous{};
+    static std::array<u8, GoodsRowSize> previous_bytes{};
+    if (previous == context && previous_bytes == bytes) {
+        return;
+    }
+    previous = context;
+    previous_bytes = bytes;
+    LOG_INFO(Debug, "BBSC blank presentation: row {:#x}, ref {} category {} anim {} menu {} "
+                    "limit {} dialog {} enable {:#x} icon {} text_mask {:#x}, state {} "
+                    "player_type {} chr_type {} map {:#x}",
+             result.row, ReadValue<s32>(result.row, 0), bytes[59], bytes[62], bytes[63], bytes[64],
+             ReadValue<s32>(result.row, 36), bytes[68], ReadValue<u16>(result.row, 44), texts,
+             GetSessionState(), GetLocalPlayerType(), GetLocalCharacterType(), GetCurrentPackedMap());
+}
+
 void TickBbscDuelBellGive() {
     static s64 last_ms = 0;
     static u64 checked_player = 0;
@@ -12531,14 +12818,26 @@ void TickBbscDuelBellGive() {
     last_ms = now;
     const u64 player = GetLocalPlayerCharacter();
     const u64 global = GetGlobalState();
+    if (ReadablePointer(player, 0x410) && GetCharacterHp(player) > 0 &&
+        ReadablePointer(global, 0x1598) && ReadValue<u8>(global, 0x08) == 0) {
+        LogBbscPartingBlankPresentation();
+    }
     if (player == checked_player || !ReadablePointer(player, 0x410) ||
         GetCharacterHp(player) <= 0 || !ReadablePointer(global, 0x1598) ||
         ReadValue<u8>(global, 0x08) != 0) {
+        LOG_INFO(Debug,
+                 "BBSC kit waiting: player {:#x}, checked {:#x}, player readable {}, hp {}, "
+                 "global {:#x}, global readable {}, loading {}",
+                 player, checked_player, ReadablePointer(player, 0x410), GetCharacterHp(player),
+                 global, ReadablePointer(global, 0x1598),
+                 ReadablePointer(global, 0x09) ? ReadValue<u8>(global, 0x08) : -1);
         return; // already checked, not in the game yet, dead, or loading
     }
     const u64 carried = BbscCarriedInventory();
     const u64 storage = BbscStorageInventory();
     if (carried == 0 || storage == 0) {
+        LOG_INFO(Debug, "BBSC kit waiting for inventories: carried {:#x}, storage {:#x}",
+                 carried, storage);
         return;
     }
     checked_player = player;
@@ -12833,7 +13132,28 @@ void TickBbscHostBlank() {
 constexpr u32 BbscPartingBlankGoodsId = 11251;
 constexpr s64 BbscGuestBlankWaitMs = 3'000;
 
-void TickBbscGuestBlank() {
+void LogBbscBlankBehavior(const TraceSite& site, const GuestRegisterSnapshot& registers) {
+    const bool animation = site.kind == TraceKind::BlankAnimation;
+    const u64 player = animation ? registers.r12 : registers.r13;
+    if (player != GetLocalPlayerCharacter() || !ReadablePointer(player, 0x1C4) ||
+        ReadValue<u32>(player, 0x1C0) != BbscPartingBlankGoodsId) {
+        return;
+    }
+    const std::array<u64, 5> value{player, static_cast<u8>(registers.rax),
+                                  static_cast<u64>(GetSessionState()),
+                                  static_cast<u64>(GetLocalPlayerType()),
+                                  static_cast<u64>(GetLocalCharacterType())};
+    static std::array<u64, 5> last_animation{}, last_availability{};
+    auto& last = animation ? last_animation : last_availability;
+    if (value != last) {
+        last = value;
+        LOG_INFO(Debug, "[BBSC-blank-path] {} result {} state {} player {:#x} type {} chr_type {}",
+                 animation ? "animation" : "availability", value[1], value[2], player,
+                 GetLocalPlayerType(), GetLocalCharacterType());
+    }
+}
+
+void TickBbscBlank() {
     static s64 used_ms = 0;
     static bool was_using = false;
     const s64 now = SteadyNowMs();
@@ -13602,6 +13922,25 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
     }
 
     const auto& site = Sites[tag];
+    if (site.kind == TraceKind::SaveLifecycle) {
+        TraceBbscNativeSaveEvidence(site.offset, *registers);
+        return;
+    }
+    if (site.kind == TraceKind::BlankAnimation || site.kind == TraceKind::BlankAvailability) {
+        LogBbscBlankBehavior(site, *registers);
+    }
+    if (site.kind == TraceKind::ActionMessage) {
+        const u64 caller = ReadValue<u64>(registers->rsp, 0);
+        const u32 id = static_cast<u32>(registers->rsi);
+        const u64 offset = caller >= image_base ? caller - image_base : 0;
+        if (id == 0 || offset == 0x0138A2A8 || offset == 0x0138A7CC || offset == 0x0196BCFB) {
+            LOG_INFO(Debug, "[BBSC-blank-path] action message {} caller {:#x} state {}",
+                     id, offset, GetSessionState());
+        }
+    }
+    if (site.offset == 0x018F98B4) {
+        ApplyBbscPartingBlankUseFlag(*registers);
+    }
     if (site.offset == SummonBuildEntryOffset) {
         ApplyBbscHunterCap(registers->rdi);
     }
@@ -13667,7 +14006,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         TickBbscLifeBroadcast();
         TickBbscSessionEnd();
         TickBbscStrayForcedWarp();
-        TickBbscGuestBlank();
+        TickBbscBlank();
         TickBbscDeadWatchdog();
         TickBbscDeathCurtain();
         TickBbscStageWatch();
@@ -13676,6 +14015,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         CaptureBbscGuestLoot();
         TickBbscGuestLootReset();
         TickBbscDreamStateRestore();
+        TickBbscSaveIdentityEvidence();
         TickBbscFreeBell();
         TickBbscEchoTrace();
         TickBbscMapTrace();
@@ -13688,7 +14028,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
             TickBbscRemoteRevive();
             TickBbscDeathLockClear();
             TickBbscStateDiff();
-            TickBbscJoinTeleport();
+            TickBbscJoinTeleport(SteadyNowMs());
         }
         TickBbscGuestRejoin();
         if (BbscRejoinEnabled()) {
@@ -13735,6 +14075,9 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
     if (site.kind == TraceKind::LuaSessionEvent) {
         // Only session-relevant Lua events; the dispatcher also runs gameplay events.
         const std::string name = ReadGuestAscii(registers->rsi, 64);
+        if (name == "JoinSession_White") {
+            CaptureBbscNativeReturnOrigin(); // before sampling: every join needs its own origin
+        }
         static constexpr std::array<std::string_view, 8> Interesting{
             "Session", "Kick", "Room", "Match", "Multiplay", "Summon", "Reload", "Leave"};
         if (!std::ranges::any_of(Interesting, [&name](std::string_view part) {
@@ -13748,6 +14091,13 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
     }
     if (site.kind == TraceKind::GoodsParamLookup &&
         !IsTrackedGoods(static_cast<s32>(registers->rsi))) {
+        return;
+    }
+    if (site.kind == TraceKind::BlankAnimation || site.kind == TraceKind::BlankAvailability ||
+        site.kind == TraceKind::ActionMessage) {
+        return;
+    }
+    if (site.kind == TraceKind::BlankUse && registers->r15 != 11251) {
         return;
     }
     if (site.offset == CharacterWarpSetOrCopyFloorOffset) {
@@ -14110,6 +14460,19 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         case TraceKind::GoodsParamLookup:
             WriteGoodsParamLookup(capture_file, *registers);
             break;
+        case TraceKind::BlankMenu:
+            capture_file << ",\"blank_menu\":{\"native_flag\":"
+                         << static_cast<u32>(static_cast<u8>(registers->rsi))
+                         << ",\"native_selector\":" << static_cast<s32>(registers->rdx)
+                         << ",\"session_state\":" << GetSessionState()
+                         << ",\"player_type\":" << GetLocalPlayerType()
+                         << ",\"chr_type\":" << GetLocalCharacterType() << '}';
+            break;
+        case TraceKind::BlankUse:
+            capture_file << ",\"blank_use\":{\"goods_id\":"
+                         << static_cast<u32>(registers->r15) << ",\"native_discriminator\":"
+                         << static_cast<u32>(ReadValue<u8>(registers->r13, 0x680)) << '}';
+            break;
         case TraceKind::BellAvailability:
             WriteBellAvailability(capture_file, site, *registers);
             break;
@@ -14263,6 +14626,8 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         case TraceKind::EnginePanic:
             WriteEnginePanicStack(capture_file, *registers);
             break;
+        case TraceKind::SaveLifecycle:
+            break; // Emitted separately before sampled JSON capture.
         }
         capture_file << "}\n";
         capture_file.flush();
@@ -14281,6 +14646,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
 bool VerifySites() {
     const auto image_size = MemoryPatcher::g_eboot_image_size;
     for (const auto& site : Sites) {
+        if (site.kind == TraceKind::SaveLifecycle && !BbscSaveIdentityTraceEnabled()) continue;
         if ((summon_build_host_placement_hook_installed && site.offset == SummonBuildEntryOffset) ||
             (cross_map_guest_handoff_hook_installed && site.offset == CrossMapGuestHandoffOffset) ||
             (summon_reload_state_hook_installed &&
@@ -14669,7 +15035,13 @@ bool SetSeamlessHostPlacementHeader(std::string_view value) {
 }
 
 void ClearSeamlessHostPlacementHeader() {
-    // A host that stopped looking for signs: its map is no target for our sign either.
+    // Preparing -> Advertised acknowledges the rewritten area without a header. Keep the
+    // preparation until its existing deadline; empty ACKs must not renew that deadline.
+    if (BbscConnectFirstEnabled() &&
+        bbsc_connect_first_map.load(std::memory_order_acquire) != 0 &&
+        BbscConnectFirstPlacementFresh()) {
+        return;
+    }
     if (const u32 old = bbsc_connect_first_map.exchange(0, std::memory_order_acq_rel); old != 0) {
         LOG_INFO(Debug, "BBSC connect-first: no word from that host for a while - the sign goes "
                         "back to our own map (was advertised in {:#x})",
@@ -15280,9 +15652,11 @@ void InstallReverseEngineeringTrace() {
                  << (healing_fountain_host_availability_hook_installed ? "true" : "false") << "}\n";
     capture_file.flush();
 
-    size_t hook_count = 0;
+    size_t hook_count = 0, expected_count = 0;
     for (size_t index = 0; index < Sites.size(); ++index) {
         const auto& site = Sites[index];
+        if (site.kind == TraceKind::SaveLifecycle && !BbscSaveIdentityTraceEnabled()) continue;
+        ++expected_count;
         if ((summon_build_host_placement_hook_installed && site.offset == SummonBuildEntryOffset) ||
             (cross_map_guest_handoff_hook_installed && site.offset == CrossMapGuestHandoffOffset) ||
             (summon_reload_state_hook_installed &&
@@ -15303,9 +15677,9 @@ void InstallReverseEngineeringTrace() {
         ++hook_count;
     }
 
-    installed = hook_count == Sites.size();
+    installed = hook_count == expected_count;
     LOG_INFO(Debug, "Bloodborne RE trace installed {}/{} hooks; capture={}", hook_count,
-             Sites.size(), Common::FS::PathToUTF8String(capture_path));
+             expected_count, Common::FS::PathToUTF8String(capture_path));
     InstallBbscSpectateHooks();
     InstallBbscWallHooks();
     InstallBbscEchoPathHooks();

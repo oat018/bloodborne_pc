@@ -95,6 +95,9 @@ void runtime_file_unmount(const char *guest);
 int runtime_file_translate(const char *guest, char *out, size_t size);
 int64_t runtime_file_open(const char *path, int flags, int mode);
 int64_t runtime_file_close(int fd);
+struct BbNetSaveReceipt;
+/* Host or last runtime /savedata target; 0 or positive errno. Does not prove an active mount. */
+int32_t runtime_file_save_receipt(const char *path, struct BbNetSaveReceipt *out);
 int64_t runtime_file_read(int fd, void *buffer, uint64_t size);
 int64_t runtime_file_pread(int fd, void *buffer, uint64_t size, int64_t offset);
 int64_t runtime_file_write(int fd, const void *buffer, uint64_t size);

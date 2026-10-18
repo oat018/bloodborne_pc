@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -79,6 +80,12 @@ namespace {
 /// The runtime's side (bbnet_init).
 BbNetHost g_host{};
 } // namespace
+
+int32_t Core::ReadRuntimeSaveReceipt(const char* path, BbNetSaveReceipt* out) {
+    if (!out) return EINVAL;
+    *out = {};
+    return g_host.save_receipt ? g_host.save_receipt(path, out) : ENOSYS;
+}
 
 // ---- Kernel ---------------------------------------------------------------------------------
 
@@ -564,7 +571,8 @@ extern "C" __attribute__((visibility("default"))) void bbnet_image_ready(std::ui
 }
 
 extern "C" __attribute__((visibility("default"))) int bbnet_init(const BbNetHost* host) {
-    if (!host || host->abi != BBNET_ABI_VERSION || !host->thread_spawn || !host->thread_join) {
+    if (!host || host->abi != BBNET_ABI_VERSION || !host->thread_spawn || !host->thread_join ||
+        !host->save_receipt) {
         std::printf("Online: the runtime and the online module are from different versions\n");
         return -1;
     }

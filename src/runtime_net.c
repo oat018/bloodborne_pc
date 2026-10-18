@@ -74,18 +74,19 @@ static BbNetResolveFn module_resolve(void) {
         printf("Online: the online module is not available (%s): offline play\n",dlerror());
         return NULL;
     }
-    module_handle=module;
     const BbNetInitFn init=(BbNetInitFn)dlsym(module,"bbnet_init");
     const BbNetResolveFn found=(BbNetResolveFn)dlsym(module,"bbnet_resolve");
     const BbNetHost host={
         .abi=BBNET_ABI_VERSION, .app0=game_folder, .serial=game_serial, .title=game_title,
         .app_ver=game_version, .thread_spawn=runtime_thread_spawn,
         .thread_join=runtime_thread_join_spawned,
+        .save_receipt=runtime_file_save_receipt,
     };
     if (!init || !found || init(&host)!=0) {
         printf("Online: %s did not start: offline play\n",path);
         return NULL;
     }
+    module_handle=module;
     printf("Online: module %s\n",path);
     resolve=found;
     return resolve;

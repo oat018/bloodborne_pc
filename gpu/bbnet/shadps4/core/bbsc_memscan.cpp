@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstring>
 #ifndef _WIN32
+#include <cerrno>
+#include <fcntl.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #endif
@@ -74,8 +76,8 @@ std::vector<std::uint64_t> FindInMemory(std::span<const std::uint8_t> needle, st
     }
 #else
     // bbport (Linux): readable mappings from /proc/self/maps, copied in pieces with
-    // process_vm_readv on this process: a page the port protects meanwhile (its write and read
-    // traps) only fails that copy instead of faulting.
+    // kernel reads on this process: racing protection changes fail the copy instead of faulting.
+    // dma-buf VMAs reject process_vm_readv's page pinning; /proc/self/mem supports their access op.
     if (needle.empty()) {
         return hits;
     }
@@ -83,6 +85,8 @@ std::vector<std::uint64_t> FindInMemory(std::span<const std::uint8_t> needle, st
     if (!maps) {
         return hits;
     }
+    int memory = -1;
+    bool memory_opened = false;
     constexpr std::size_t Piece = 1u << 20;
     std::vector<std::uint8_t> buffer(Piece + needle.size());
     char line[512];
@@ -99,7 +103,26 @@ std::vector<std::uint64_t> FindInMemory(std::span<const std::uint8_t> needle, st
                 std::size_t(std::min<std::uint64_t>(end - at, Piece + needle.size() - 1));
             iovec local{buffer.data(), want};
             iovec remote{reinterpret_cast<void*>(at), want};
-            const ssize_t got = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+            ssize_t got = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+            if (got < ssize_t(want)) {
+                if (!memory_opened) {
+                    memory = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
+                    memory_opened = true;
+                }
+                std::size_t copied = got > 0 ? std::size_t(got) : 0;
+                while (memory >= 0 && copied < want) {
+                    const ssize_t n = pread(memory, buffer.data() + copied, want - copied,
+                                            static_cast<off_t>(at + copied));
+                    if (n < 0 && errno == EINTR) {
+                        continue;
+                    }
+                    if (n <= 0) {
+                        break;
+                    }
+                    copied += std::size_t(n);
+                }
+                got = static_cast<ssize_t>(copied);
+            }
             if (got < ssize_t(needle.size())) {
                 continue;
             }
@@ -117,6 +140,9 @@ std::vector<std::uint64_t> FindInMemory(std::span<const std::uint8_t> needle, st
                 }
             }
         }
+    }
+    if (memory >= 0) {
+        close(memory);
     }
     std::fclose(maps);
 #endif

@@ -4,6 +4,38 @@ BBSC (seamless co-op for Bloodborne, GPL-2.0-or-later; https://seamlesshunt.com)
 session alive through deaths, lamps, area changes, bosses and the Hunter's Dream, for up to five
 hunters. It is written for shadp2p (a shadPS4 fork); the port carries it in its online module.
 
+## Development checkpoint: 2026-10-19
+
+Native cross-map co-op has been confirmed with the BBSC Kit on the configured
+private servers: one join load, original Parting Blank menu/animation, host and
+guest departure, and return to the guest's captured pre-join position during the
+same process. A host ending the party can produce the native disconnected-session
+notice on the guest. All-map lighting and unsupported-area behavior remain open.
+
+Selected-slot ownership and the native create, reload, Load Game deletion and
+subsequent reuse of slot1 have been captured using disposable saves. Deletion
+updates metadata while leaving the old character payload intact, so filename,
+name and nonzero file contents do not identify a replacement character.
+
+Runtime save receipts use bbnet ABI2 and report the canonical file, successful
+commit generation and close error, including after the native save mount is
+removed. These are file facts, not a stable character ID or proof of newly earned
+progress. Runtime and online module must be rebuilt together.
+
+The party policy and durable journal code remain foundations. Stable character
+incarnation, uncapped cycle identity, durable restart/disconnect recovery, safe
+lamp fallback, admission gates and the joined-event/reward catalog are unfinished.
+The legacy `SHADPS4_BBSC_SHARED_PROGRESS` whole-group merge remains present;
+controlled checkpoints explicitly set it to0. The requested event-only sync is
+not enabled. Do not treat this checkpoint as the completed anywhere-co-op feature.
+
+Build and automated checks use distrobox `bbport-dev`. Gameplay uses copied
+profiles and is run by the user. The verified create/load/delete/reuse sequence
+needs no repeat; resume with the identity binding and remaining integration gates.
+See the [plan](superpowers/plans/2026-10-18-bbsc-anywhere-coop.md),
+[design](superpowers/specs/2026-10-18-bbsc-anywhere-coop-design.md) and
+[evidence](superpowers/specs/2026-10-18-bbsc-integration-evidence.md).
+
 ## Switching it on
 
 Launcher, Online page: "Play online" and "Seamless co-op (BBSC)". Every player needs it on and the
@@ -30,6 +62,11 @@ port's relay is the UDP one on port 3478 of the shadNet server.)
 Environment: `BB_ONLINE=1 BB_BBSC=1` (what the launcher sets). BBSC's own switches
 (`SHADPS4_BBSC_*`, `SHADPS4_BLOODBORNE_*`, see `gpu/bbnet/shadps4/core/bbsc_persistence.h`) work as
 in BBSC: most features are on by default, `=0` turns one off.
+
+When shadNet and the game/relay server run on different hosts, also set
+`SHADPS4_P2P_RELAY=<game-relay-ip>:3478` for every player. The relay otherwise
+defaults to the shadNet host, so HTTP matching may succeed while signaling times
+out. The relay's UDP port must be reachable; TCP/WebAPI health alone is insufficient.
 
 ## Where it lives
 
@@ -69,6 +106,13 @@ Differences from BBSC's own builds:
 
 ## Checks
 
+Checkpoint verification on 2026-10-19 passed inside `bbport-dev`: full
+`BB_PGO=off BB_LTO=OFF bash build.sh --test`, plus `bbsc-memory-test`,
+`bbsc-memscan-test`, the actual RX 9060 XT dma-buf check,
+`bbsc-party-test` (policy/return/journal), `bbsc-join-test` and
+`bbsc-http-poll-test`. These automated checks do not complete the remaining
+live identity, recovery or event/reward gates.
+
 `ninja -C out/gpu bbsc-memory-test && out/gpu/bbsc-memory-test` checks the native loader's image
 mapping through BBSC's memory interface, including permission changes, mapping boundaries,
 unmapping and overflowing sizes. The image and guest stacks are host-owned allocations, outside
@@ -83,5 +127,67 @@ every BBSC read caused a CPU bottleneck after loading a character: the main thre
 are still queried each time, including after `mprotect` and `munmap`. Older kernels keep the text
 fallback; the memory test also exercises that path by simulating an unsupported ioctl.
 
+The param-table scanner has a separate Linux dma-buf read path. On the RX 9060 XT,
+`process_vm_readv` returns `EFAULT` for exported device mappings even though CPU
+loads work. It now falls back to bounded reads through `/proc/self/mem`, including
+short/interrupted reads, while still selecting readable VMAs and keeping faults
+inside the kernel copy. Without this path the Kit's table scan stays at zero and
+never reaches inventory delivery, even with the mapping-query fix above.
+
+`ninja -C out/gpu bbsc-memscan-test && out/gpu/bbsc-memscan-test` checks scan bounds,
+chunk overlap, failed/partial reads, protection exclusions and disappearing mappings.
+The explicit hardware target `bbsc-memscan-dmabuf-test` requires Vulkan cached
+system-memory dma-buf export; it creates a 2 MiB buffer without a window or game
+and checks scanning across the 1 MiB chunk boundary. It passed on the RX 9060 XT
+in `bbport-dev`; it is not part of the default build.
+
 `out/dev/verify/verify.sh NAME BB_ONLINE=1 BB_BBSC=1`: loads the save offline-capable, 14 self-tests
 pass, no faults (2026-10-14). Real co-op needs two players on a BBSC server.
+
+
+The explicit `bbsc-join-test` target exercises the actual placement cache and
+native placement adapters with synthetic mapped state (no game or account). It
+covers empty preparation ACKs, unchanged expiry, same-map target clearing, native
+home preservation and co-op-only send-home restoration. Run builds/tests in
+`bbport-dev`, for example `cmake --build out/gpu --target bbsc-join-test` followed
+by `out/gpu/bbsc-join-test` inside that container.
+
+Legacy per-slot storage now takes the selected slot from the native game's
+load/save state instead of choosing the newest character file. An explicit
+`BBSC_SAVE_DIR` restricts lookup to that profile; without it, ambiguous local
+owners reject. The existing requirement for a write during this run remains.
+The regression also covers newer files from another character and invalid or
+missing selections. This does not identify a replacement character reusing a
+deleted slot or implement durable position recovery after restarting the game.
+
+Connect-first does not write host coordinates into the engine sign block, but
+native loads also reuse that block. A separate process-local origin therefore
+reads the guest's live native map/XYZ/heading at JoinSession_White before sampling,
+retains it across guest rejoin, and restores sign+forced fields only at co-op
+send-home. Quit to title clears this temporary copy. The user has confirmed original-point voluntary returns; this does not implement
+durable restart recovery, character identity,
+geometry checks or lamp fallback.
+
+Password co-op host searches now share the bounded fast-sign poll loop (up to
+five additional requests, three seconds apart). Initial mixed searches remain
+intact; additional queries contain only co-op entries. Public/invasion-only
+searches retain their native cadence. The explicit `bbsc-http-poll-test` target
+checks eligibility and uses the real HTTP worker with an ephemeral loopback
+server to verify candidate delivery, opt-out and cancellation. No game/account
+is needed. Real end-to-end matchmaking time still requires gameplay testing.
+
+
+Parting Blank keeps the game's native menu: stop the bell signal or end co-op.
+The Kit row retains the original menu/dialog, leave effect7 and animation15;
+the compatibility hook supplies the original Blank-use discriminator for11251.
+
+Cross-map native summon already loads the host map. The old forced second join
+reload has been removed; the post-summon tick only settles the guest beside the
+host. An actual-adapter regression verifies no extra StageTransition, one placement,
+and the invader exclusion. The unused host-effect fallback was removed after
+live traces showed it never received a local Blank event. User gameplay now confirms
+one cross-map load, correct guest Blank animation/messages and both host/guest
+exit. Host-initiated exit reaches RemoveMember then guest OnRoomDisappeared; the
+session-disconnected notice represents that host-initiated closure in this capture,
+with no OnP2PTimeOut event. Lighting across all supported maps remains unverified.
+Durable restart recovery and joined-event-only progress remain separate open gates.
