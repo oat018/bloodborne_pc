@@ -4,6 +4,19 @@
 
 **Goal:** Let password-matched friends join across story maps or the Dream, earn only new shared progress, and return safely to their own world after leaving or restarting.
 
+**Release priority (user, 2026-10-19):** Complete the requested feature paths first,
+then produce Linux AppImage and Windows EXE pre-releases with explicit untested
+areas. Continue implementation without repeated gameplay checkpoint pauses. Keep
+focused build/save-durability/peer-binding/idempotency checks; move the broad
+same-map/cross-map/death/disconnect/restart/NG acceptance matrix after packaging.
+Do not equate deferred manual validation with completed implementation. Remaining
+release work, in order: connect verified identity and journal to native admission
+and return recovery; wire the ordered event channel to first-playable boundaries;
+finish explicit boss/story/item application and native-save acknowledgement;
+implement managed cycle transitions and conflict deferral; port journal durability
+to Windows; build both packages and describe outstanding gameplay checks.
+An unavailable ending save defers live NG verification, not independent code work.
+
 **Architecture:** Keep native joins, world presentation, inventory operations, and warps in BBSC's existing game-thread code. Add a small testable party policy/state module and durable journal, connect them to existing HTTP/signaling, and expose only the runtime save/recovery facts the module cannot obtain reliably today. Resolve native and broker integration gates before enabling changes to saves.
 
 **Tech Stack:** C++23, existing C runtime, CMake/Ninja, standard library/POSIX file operations, installed nlohmann_json, existing shadNet/NP signaling, assert-based tests. No new dependencies.
@@ -16,8 +29,10 @@
 Selected slot1 and the copied-profile create → reload → Load Game delete →
 create-again sequence now have verified native/save evidence. All captures and
 hashes are recorded in the evidence document. Do not repeat these observations.
-Runtime ABI2 save receipts are implemented and live-confirmed across ephemeral
-mounts; they are filesystem facts, not native snapshot or incarnation proof.
+Runtime ABI2 receipts were live-confirmed across ephemeral mounts. ABI3 now adds
+locked generation/byte-count/SHA256 binding to the committed copy; automated
+runtime/module tests and live generation/hash correlation pass. Neither bridge
+alone proves incarnation or a newly earned event.
 
 **Resume here:** Native character ID allocation, reload stability and same-slot
 replacement distinction now pass. Integrate that discriminator with the verified
@@ -77,8 +92,8 @@ Current checkpoint: shared bounded serialized-snapshot parser/SHA256 and three
 pre-increment observers are built/tested, opt-in and read-only. The user has no
 near-ending/NG+7 fixture. Existing guest BBSCTrace was used to compare
 load→successful serialize-end→copy-input→saved-file hashes/commits without joining
-or recreating characters. Actual cycle transition/replay and an atomic
-generation/hash contract remain unverified, so no recovery/event consumer is enabled.
+or recreating characters. Actual cycle transition/replay remains unverified, so no recovery/event consumer
+is enabled. Atomic runtime generation/hash correlation now passes the live trial.
 
 The live buffer-provenance checkpoint now passes as native-snapshot-correlated:
 three successful own serialize/copy pairs, final file equals last pair, loaded
@@ -86,6 +101,76 @@ hash matches prior baseline and all other character slots unchanged. Do not
 repeat this trial. Generation2 observes the second commit, not the final third
 save. Resume at atomic runtime generation/hash binding; no actual NG transition
 has been exercised, and cycle/admission/recovery/event gates remain open.
+
+ABI3 implementation now hashes the exact temporary copy and holds the receipt
+lock through rename, directory durability and publication. A failed close or
+hash clears bytes/hash and cannot advance generation; a hash diagnostic failure
+does not fail the game's save. Runtime and module must be rebuilt together.
+Live checkpoint now passes as native-receipt-correlated. Generation2/error0,
+1310720 bytes and hash269a8e27…0840 match the second successful native
+serialize/copy/commit. The final file instead matches the later third pair,
+ef99a2dd…cade; do not attribute that third snapshot to the observed generation2.
+All nine other character slots are unchanged; current/backup IDs agree, normal
+closure, no cycle entry. Full raw/save/manifests are retained without overwriting
+prior captures. This checkpoint is complete; do not repeat it. Resume at the
+uncapped cycle transition/intent/replay contract and complete CharacterKey before
+offline recovery. The user has no near-ending/NG+7 fixture; do not fabricate a
+transition or infer an exact cycle from saturated count7. No new gameplay trial
+is needed for the completed identity, snapshot or ABI3 receipt checks.
+
+Post-increment evidence now has three opt-in byte-checked sites:0131D2A8,
+01334C05 and017C045A. They validate the final store plus retained arithmetic
+registers; the shared event epilogue additionally requires command21 and success.
+The Lua guard can reach its epilogue without incrementing and is rejected.
+Actual hook-provider fixture replay executes captured native arithmetic for0→1,
+6→7 and7→7 and verifies a skipped guard produces no applied observation. This
+closes the instruction/observer seam, not the live ending→save→restart contract.
+Do not request another unchanged fresh-character load to test an NG transition.
+Next correlate a durable transition intent, applied observation and a subsequent
+selected snapshot/ABI3 receipt, preserving ambiguous or interrupted7→7 evidence.
+No actual cycle was changed in the copied profile. Windows runtime now explicitly
+links the existing OpenSSL Crypto dependency for ABI3 hashing; no Windows build
+or package validation is claimed.
+
+Task5 protocol components now pass focused tests: type0x28/version1, fixed46-byte
+header, ≤1024-byte packets, bounded baseline chunks; ordered per-guest admission;
+peer-bound targeted routing; room-owner/membership snapshots; bounded receive
+queue; retained delivery retries and cumulative Ack after durable intent storage.
+Journal v3 adds the prepared snapshot reference; retained claims preserve earlier
+party/admission across subsequent parties, and journal v1/v2 remain readable. The actual host character is required for initial placement.
+Task5 remains partial: native first-playable timing, event capture, retry cadence
+and recovery must still be connected to these components. Catalog membership and
+native inventory/save completion are not established by a packet or intent Ack.
+Do not treat this as enabled event-only progress sync.
+
+Task6 home adapter now has focused native-fixture coverage: canonical selected-file
+and native-ID CharacterKey, cycle0..6 only when saved/live counters agree, leased
+origin plus native-resolved own-world respawn destination, and preservation of
+pending/corrupt/foreign records. Native Lua dispatch01339870 has a verified null-name
+zero-return branch, now used by a Linux guard for existing unresolved managed records.
+This rejects before the event is delivered, without inventing a return value.
+Actual hook-provider replay verifies RSI changes reach the predicate and unrelated
+Lua events/other characters remain unaffected. Own-world capture/load curtain and
+Blank leave handling moved out of sampled JSON formatting. A bounded 2 MiB own-world
+payload is now bound to the verified in-memory CharacterKey, persisted in an immutable
+per-party snapshot, and referenced by journal v3 with size/CRC validation. Legacy
+slot-only world files are not adopted as managed snapshots. Focused journal/native
+fixtures cover wrong-character/party, truncation/corruption, missing-reference and
+write-failure rejection. Task6 remains partial: normal joins do not invoke prepared
+capture; the snapshot is not yet consumed by restart recovery, and capability/backup,
+candidate binding, safe fallback, return/save confirmation and Windows journal work
+remain before activation.
+
+## Pre-release implementation priority (user update)
+
+Implement and connect the agreed features before the broad manual acceptance
+matrix. Do not wait on the unavailable ending/NG+7 fixture to implement independent
+admission, targeted transport, durable event acknowledgements, return coordination
+and packaging. Keep per-change build checks and focused assertions for save loss,
+wrong-host events and duplicate rewards; defer full-map/soak/Windows gameplay
+validation until the feature implementation is connected. Track implemented,
+enabled and manually verified separately. Do not describe a disabled foundation
+as a completed feature or bypass unresolved save identity checks to meet a date.
 
 ## Development environment
 
@@ -520,3 +605,38 @@ Every stage is snapshotted; prior snapshot hashes are verified before the next,
 especially before deletion. Reordered stages and overwrites refuse before launch.
 Self-checks/private-server preflight pass; pending human captures must verify
 actual control flow before any stable-identity/recovery consumer is enabled.
+
+2026-10-19 follow-up: managed own-world payload loading is connected at the verified
+native respawn-point resolver `0x01938F65`. Only a matching Visiting/Returning
+record can apply, and only at that home-load boundary after native identity, own-
+world state, snapshot integrity, ready flag-manager metadata and every target group
+storage validate. `Prepared`, malformed/unverifiable, foreign, truncated, host-world
+and missing-target cases preserve live/in-memory state. Legacy slot recovery does
+not fall through while a current-key managed record is prepared, pending or
+unverifiable. Journal and payload remain unchanged after restoration; no native
+save-confirmation event is wired, so repeated verified home loads may reapply.
+Focused `bbport-dev` build of `bbnet bbsc-join-test` and `bbsc-join-test` pass;
+logs are `managed-home-recovery-{build,checks}.log` in the ignored SDD directory.
+This is restart restore only: normal-join admission, offline initialization/warp,
+completion/save confirmation, backup/capability checks, managed cycle handling and
+Windows persistence remain release blockers.
+
+2026-10-19 checkpoint: return save provenance is now connected to the managed native
+return selector. Journal v4 stores monotone `native_return_selected`; the selected
+native point ID drives the game's last-lamp branch, and its map is resolved through
+the verified native point-to-map routine. Unresolved off-map XYZ values are metadata
+only. Do not use the older raw `native-selector-1.09.txt` artifact; corrected PT_LOAD
+disassembly is `root-native-selector.{bin,txt}`. A managed return completes only after
+the selected native destination is observed after load, then a later SerializeBegin/
+successful SerializeEnd hash matches a newer ABI3 receipt for the exact selected save.
+The first destination confirmation invalidates older save evidence. Pending managed
+records block legacy raw-coordinate fallback.
+
+Focused `bbnet`, `bbsc-party-test`, `bbsc-join-test` and
+`bbsc-party-transport-test` build/checks pass in `bbport-dev`; see
+`checkpoint-v4-final-{build,party,join,transport}.log`. Join fixture intentionally
+proves mismatch refusal/pending snapshot preservation; positive exact-point proof is
+limited to the pure tracker fixture, not a live/native-return integration test. This
+supersedes the earlier status that no native save-confirmation consumer was wired,
+but does not close restart/offline loading/warp/retry. Normal admission, capability,
+backup, catalog/event application, NG7, Windows runtime and broad gameplay remain open.

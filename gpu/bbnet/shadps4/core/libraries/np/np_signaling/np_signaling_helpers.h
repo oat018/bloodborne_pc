@@ -4,6 +4,7 @@
 #pragma once
 
 #include "common/types.h"
+#include "core/bbsc_party.h"
 
 namespace Libraries::Np::NpSignaling::Helpers {
 
@@ -33,6 +34,10 @@ u32 SendBbscFollowToPeers(u32 packed_map, float x, float y, float z, float headi
 // BBSC: send one world-flag chunk (SignalingBbscWorldFlags, filled in by the caller) to every
 // established signaling peer. Same threading as SendBbscFollowToPeers.
 u32 SendBbscWorldFlagsToPeers(const void* packet, u32 size);
+std::optional<Core::Bbsc::Party::Peer> FindBbscPartyPeer(std::string_view online_id);
+
+// One established connection and its expected account; no fallback to broadcast.
+u32 SendBbscPartyToPeer(const Core::Bbsc::Party::Peer& peer, const void* packet, u32 size);
 
 } // namespace Libraries::Np::NpSignaling::Helpers
 

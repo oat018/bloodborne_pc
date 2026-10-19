@@ -63,6 +63,7 @@ enum class SignalingPacketType : u8 {
     // the host's world state (bosses, doors, shortcuts) instead of whatever its own flags say.
     // 0x21 is taken (Matching2 frames, see P2PTransport::ClassifyInternal).
     BbscWorldFlags = 0x22,
+    BbscParty = kSignalingBbscPartyType,
 };
 static_assert(static_cast<u8>(SignalingPacketType::BbscWorldFlags) == kSignalingBbscWorldFlagsType);
 

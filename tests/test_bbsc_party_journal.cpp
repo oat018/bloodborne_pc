@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "core/bbsc_party.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cerrno>
 #include <cstdio>
@@ -88,6 +89,34 @@ static void TestJournalRoundTrip(const fs::path& root) {
     assert(StoreJournal(*lease, record, ec) && !ec);
     assert(LoadJournal(path, record.key, ec) == record && !ec);
     const auto bytes = Read(path);
+    // Version 1 has the same body without the retained-claim count.
+    auto legacy = bytes;
+    const auto snapshot_at = 16 + 2 + record.key.save_dir.size() + 2 + record.key.user.size() + 1 + 16 +
+                             4 + 16 + 8 + 1 + 24 + 24 + 8;
+    legacy.erase(snapshot_at, 8);
+    legacy.resize(legacy.size() - 2);
+    legacy.pop_back(); // v4 native-return-selected byte
+    legacy[4] = 1;
+    RepairHeader(legacy);
+    Replace(path, legacy);
+    assert(LoadJournal(path, record.key, ec) == record && !ec);
+    assert(StoreJournal(*lease, record, ec));
+    assert(Read(path) == bytes);
+    auto version3 = bytes;
+    version3.pop_back();
+    version3[4] = 3;
+    RepairHeader(version3);
+    Replace(path, version3);
+    assert(LoadJournal(path, record.key, ec) == record && !ec);
+    assert(StoreJournal(*lease, record, ec) && Read(path) == bytes);
+    auto version2 = bytes;
+    version2.pop_back();
+    version2.erase(snapshot_at, 8);
+    version2[4] = 2;
+    RepairHeader(version2);
+    Replace(path, version2);
+    assert(LoadJournal(path, record.key, ec) == record && !ec);
+    assert(StoreJournal(*lease, record, ec) && Read(path) == bytes);
     for (int field = 0; field < 4; ++field) {
         auto foreign = record.key;
         if (field == 0) foreign.user = "another-user";
@@ -111,21 +140,51 @@ static void TestJournalRoundTrip(const fs::path& root) {
     illegal = record;
     illegal.pending.clear();
     assert(!StoreJournal(*lease, illegal, ec));
-    record.phase = Phase::Returning;
+    assert(BeginReturnSaveFence(record, 5));
+    record.native_return_selected = true;
     assert(StoreJournal(*lease, record, ec));
+    assert(LoadJournal(path, record.key, ec) == record);
+    illegal = record;
+    illegal.native_return_selected = false;
+    assert(!StoreJournal(*lease, illegal, ec));
     record.phase = Phase::Complete;
     assert(StoreJournal(*lease, record, ec));
-    record.phase = Phase::Prepared;
-    record.party[0] += 1;
-    assert(StoreJournal(*lease, record, ec));
-    assert(LoadJournal(path, record.key, ec)->pending == std::vector<EventId>{2200});
-    record.committed = {2200};
-    record.pending.clear();
-    assert(StoreJournal(*lease, record, ec));
-    illegal = record;
-    illegal.pending = {2200};
-    illegal.committed.clear();
+    auto next = PrepareNextParty(record, PartyId{9, 8, 7}, record.origin, record.fallback);
+    assert(next && next->admission == 0 && next->pending.empty());
+    assert(next->retained == std::vector<EarnedClaim>({{2200, record.party, 7, false}}));
+    assert(StoreJournal(*lease, *next, ec));
+    assert(LoadJournal(path, record.key, ec) == next);
+    illegal = *next;
+    illegal.retained.clear();
     assert(!StoreJournal(*lease, illegal, ec));
+    illegal = *next;
+    illegal.retained[0].party[0] ^= 1;
+    assert(!StoreJournal(*lease, illegal, ec));
+    // The host's identity is bound after the pre-join origin has been persisted.
+    next->party = {11, 12};
+    next->admission = 42;
+    next->phase = Phase::Visiting;
+    assert(StoreJournal(*lease, *next, ec));
+    illegal = *next;
+    illegal.pending = {2200};
+    assert(!StoreJournal(*lease, illegal, ec));
+    next->retained[0].committed = true;
+    assert(StoreJournal(*lease, *next, ec));
+    const auto retained_bytes = Read(path);
+    for (const bool invalid_status : {true, false}) {
+        auto corrupt = retained_bytes;
+        if (invalid_status) corrupt.back() = static_cast<char>(255);
+        else corrupt[corrupt.size() - 2] = static_cast<char>(2); // retained-claim status before v4 marker
+        RepairHeader(corrupt);
+        Replace(path, corrupt);
+        assert(!LoadJournal(path, next->key, ec));
+    }
+    Replace(path, retained_bytes);
+    illegal = *next;
+    illegal.retained[0].committed = false;
+    assert(!StoreJournal(*lease, illegal, ec));
+    assert(!PrepareNextParty(*next, PartyId{8}, next->origin, next->fallback));
+    std::puts("PASS: subsequent parties preserve earned-claim provenance and monotonic delivery");
 }
 
 static void TestJournalRejectsCorruption(const fs::path& root) {
@@ -144,7 +203,7 @@ static void TestJournalRejectsCorruption(const fs::path& root) {
     // Recompute the checksum to exercise the parser, not just checksum rejection.
     const std::size_t slot_at = 16 + 2 + record.key.save_dir.size() + 2 + record.key.user.size();
     const std::size_t phase_at = slot_at + 1 + 16 + 4 + 16 + 8;
-    const std::size_t pending_at = phase_at + 1 + 24 + 24 + 8;
+    const std::size_t pending_at = phase_at + 1 + 24 + 24 + 8 + 8;
     for (const auto& [offset, value] : {std::pair{std::size_t{16}, char{127}},
                                       std::pair{slot_at, char{10}},
                                       std::pair{phase_at, char{127}},
@@ -281,6 +340,96 @@ static void TestLeaseAndRestart(const fs::path& root) {
     assert(CharacterLease::Acquire(root / "move", ec));
 }
 
+static void TestDurableEventAck(const fs::path& root) {
+    auto record = Record(root);
+    std::error_code ec;
+    const auto path = root / "earned-ack";
+    auto lease = CharacterLease::Acquire(path, ec);
+    assert(lease && StoreJournal(*lease, record, ec));
+    record.phase = Phase::Visiting;
+    assert(StoreJournal(*lease, record, ec));
+    const Peer host{"host", 7};
+    Admission admission;
+    admission.Begin(host, record.party, record.admission, 100, {});
+    Message message; message.party = record.party; message.admission = record.admission;
+    message.sequence = 100;
+    for (Kind kind : {Kind::Hello, Kind::Ready, Kind::Baseline, Kind::Ack}) {
+        message.kind = kind; assert(admission.Accept(host, message));
+    }
+    auto ack = PersistEarnedEvents(*lease, record, admission, ec);
+    assert(ack && ack->kind == Kind::Ack && ack->sequence == 100 && !ec);
+    message.kind = Kind::Event; message.sequence = 101; message.events = {2300};
+    assert(admission.Accept(host, message));
+    const auto before = record;
+    for (int failure : {1, 2}) {
+        flush_calls = 0; fail_flush = failure;
+        assert(!PersistEarnedEvents(*lease, record, admission, ec) && ec);
+        fail_flush = 0;
+        assert(record == before); // A failed directory flush must not announce saved delivery.
+    }
+    ack = PersistEarnedEvents(*lease, record, admission, ec);
+    assert(ack && ack->sequence == 101 && !ec);
+    assert((record.pending == std::vector<EventId>{2200, 2300}));
+    const auto saved = LoadJournal(path, record.key, ec);
+    assert(saved && saved->pending == record.pending);
+    ack = PersistEarnedEvents(*lease, record, admission, ec);
+    assert(ack && record.pending.size() == 2);
+    auto foreign = record; foreign.party[0] ^= 1;
+    assert(!PersistEarnedEvents(*lease, foreign, admission, ec) && ec);
+    std::puts("PASS: earned-event Ack follows durable journal, failed flushes retain retry and duplicate intents do not grow");
+}
+
+static void TestPreparedWorldSnapshot(const fs::path& root) {
+    const auto path = root / "prepared-home.bin";
+    auto record = Record(root);
+    const PartyId party = record.party;
+    const std::array<std::uint8_t, 6> payload{1, 0, 2, 0, 3, 4};
+    std::error_code ec;
+    auto lease = CharacterLease::Acquire(path, ec);
+    assert(lease);
+    SnapshotRef ref;
+    assert(StoreWorldSnapshot(*lease, record.key, party, payload, ref, ec) && !ec);
+    assert(ref.bytes == payload.size() && ref.crc32 != 0);
+    record.world_snapshot = ref;
+    assert(StoreJournal(*lease, record, ec) && !ec);
+    assert(LoadJournal(path, record.key, ec) == record);
+    const auto loaded = LoadWorldSnapshot(path, record.key, party, ref, ec);
+    assert(loaded && std::ranges::equal(*loaded, payload));
+    auto wrong = record.key;
+    wrong.character[0] ^= 1;
+    assert(!LoadWorldSnapshot(path, wrong, party, ref, ec) && ec);
+    auto other_party = party;
+    other_party[0] ^= 1;
+    assert(!LoadWorldSnapshot(path, record.key, other_party, ref, ec) && ec);
+    const auto snapshot_path = WorldSnapshotPath(path, party);
+    const auto intact = Read(snapshot_path);
+    Replace(snapshot_path, intact.substr(0, intact.size() - 1));
+    assert(!LoadWorldSnapshot(path, record.key, party, ref, ec) && ec);
+    Replace(snapshot_path, intact);
+    auto bad_ref = ref;
+    ++bad_ref.bytes;
+    assert(!LoadWorldSnapshot(path, record.key, party, bad_ref, ec) && ec);
+    auto changed_payload = payload;
+    changed_payload[0] ^= 1;
+    SnapshotRef changed_ref;
+    assert(!StoreWorldSnapshot(*lease, record.key, party, changed_payload, changed_ref, ec) && ec);
+    assert(Read(snapshot_path) == intact);
+    fs::remove(snapshot_path);
+    record.phase = Phase::Visiting;
+    assert(!StoreJournal(*lease, record, ec) && ec); // Missing referenced snapshot cannot advance admission.
+    Replace(snapshot_path, intact);
+    record.phase = Phase::Prepared;
+    fail_write = true;
+    auto second_party = party;
+    second_party[0] ^= 4;
+    SnapshotRef second_ref;
+    assert(!StoreWorldSnapshot(*lease, record.key, second_party, payload, second_ref, ec) && ec);
+    fail_write = false;
+    assert(!fs::exists(WorldSnapshotPath(path, second_party)));
+    assert(Read(snapshot_path) == intact);
+    std::puts("PASS: prepared own-world snapshot binds character and party, rejects corruption, and preserves prior payload on write failure");
+}
+
 void TestJournal() {
     char pattern[] = "/tmp/bbsc-party-test-XXXXXX";
     const char* made = mkdtemp(pattern);
@@ -290,6 +439,8 @@ void TestJournal() {
     TestJournalRejectsCorruption(root);
     TestWriteFailures(root);
     TestLeaseAndRestart(root);
+    TestDurableEventAck(root);
+    TestPreparedWorldSnapshot(root);
     fs::remove_all(root);
     std::puts("PASS: journal");
 }

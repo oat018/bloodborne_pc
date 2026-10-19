@@ -174,6 +174,55 @@ std::vector<BbscPeer> EstablishedBbscPeers() {
 }
 } // namespace
 
+std::optional<Core::Bbsc::Party::Peer> FindBbscPartyPeer(std::string_view online_id) {
+    std::optional<Core::Bbsc::Party::Peer> peer;
+    SignalingMutexGuard lock;
+    for (const auto& [connection, info] : g_connections) {
+        if (!info.addr || !info.port || info.state != ConnState::Established ||
+            OnlineIdToString(info.online_id) != online_id) continue;
+        if (peer) return std::nullopt;
+        peer = Core::Bbsc::Party::Peer{std::string{online_id}, connection};
+        if (!Core::Bbsc::Party::ValidPeer(*peer)) return std::nullopt;
+    }
+    return peer;
+}
+
+u32 SendBbscPartyToPeer(const Core::Bbsc::Party::Peer& peer, const void* packet, u32 size) {
+    if (!Core::Bbsc::Party::ValidPeer(peer) || !packet ||
+        !Core::Bbsc::Party::DecodeMessage({static_cast<const u8*>(packet), size})) return 0;
+    u32 address = 0;
+    u16 port = 0;
+    {
+        SignalingMutexGuard lock;
+        const auto it = g_connections.find(peer.connection);
+        if (it == g_connections.end() || it->second.state != ConnState::Established ||
+            OnlineIdToString(it->second.online_id) != peer.online_id) return 0;
+        address = it->second.addr;
+        port = it->second.port;
+    }
+    if (!address || !port) return 0;
+    return Stubs::SignalingSendTo(packet, size, address, port) == static_cast<int>(size) ? 1 : 0;
+}
+
+bool ReceiveBbscPartyPacket(const void* packet, u32 size, u32 address, u16 port) {
+    if (!packet || !address || !port ||
+        !Core::Bbsc::Party::DecodeMessage({static_cast<const u8*>(packet), size})) return false;
+    std::optional<Core::Bbsc::Party::Peer> peer;
+    {
+        SignalingMutexGuard lock;
+        for (const auto& [connection, info] : g_connections) {
+            if (info.addr != address || info.port != port || info.state != ConnState::Established)
+                continue;
+            if (peer) return false; // Reused endpoint is ambiguous, never choose the first account.
+            peer = Core::Bbsc::Party::Peer{OnlineIdToString(info.online_id), connection};
+            if (!Core::Bbsc::Party::ValidPeer(*peer)) return false;
+        }
+    }
+    if (!peer) return false;
+    Core::Bloodborne::OnBbscPartyPacket(*peer, packet, size);
+    return true;
+}
+
 u32 SendBbscWorldFlagsToPeers(const void* packet, u32 size) {
     u32 sent = 0;
     for (const BbscPeer& peer : EstablishedBbscPeers()) {
@@ -363,6 +412,10 @@ static void ReceiveThreadMain() {
         }
         const u8 type = buf[4];
 
+        if (type == kSignalingBbscPartyType) {
+            Helpers::ReceiveBbscPartyPacket(buf, static_cast<u32>(nbytes), from_addr, from_port);
+            continue;
+        }
         if (nbytes == sizeof(SignalingEchoPing) &&
             type == static_cast<u8>(SignalingPacketType::EchoPing)) {
             SignalingEchoPing ping{};

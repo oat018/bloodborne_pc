@@ -49,18 +49,26 @@ if (NOT WIN32)
     add_executable(bbsc-party-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_party.cpp
         ../../tests/test_bbsc_party_journal.cpp shadps4/core/bbsc_party.cpp
         shadps4/core/bbsc_party_journal.cpp)
-    target_include_directories(bbsc-party-test PRIVATE include)
+    target_include_directories(bbsc-party-test PRIVATE include shadps4 ..)
     target_compile_options(bbsc-party-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
     target_link_libraries(bbsc-party-test PRIVATE ZLIB::ZLIB)
     set_target_properties(bbsc-party-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
     add_executable(bbsc-join-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_join.cpp
-        shadps4/core/bbsc_party.cpp)
+        shadps4/core/bbsc_party.cpp shadps4/core/bbsc_party_journal.cpp ../shim/bbport_guest_code_hooks.cpp ../common/decoder.cpp)
     target_include_directories(bbsc-join-test PRIVATE include shadps4 .. ../shim)
     target_compile_options(bbsc-join-test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
     target_link_options(bbsc-join-test PRIVATE -Wl,--gc-sections)
-    target_link_libraries(bbsc-join-test PRIVATE fmt::fmt pthread OpenSSL::Crypto)
+    target_link_libraries(bbsc-join-test PRIVATE fmt::fmt pthread OpenSSL::Crypto Zydis::Zydis ZLIB::ZLIB)
     set_target_properties(bbsc-join-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+    add_executable(bbsc-party-transport-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_party_transport.cpp
+        shadps4/core/bbsc_party.cpp)
+    target_include_directories(bbsc-party-transport-test PRIVATE include shadps4 .. ../shim)
+    target_compile_options(bbsc-party-transport-test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
+    target_link_options(bbsc-party-transport-test PRIVATE -Wl,--gc-sections)
+    target_link_libraries(bbsc-party-transport-test PRIVATE fmt::fmt pthread)
+    set_target_properties(bbsc-party-transport-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
     add_executable(bbsc-http-poll-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_http_poll.cpp)
     target_include_directories(bbsc-http-poll-test PRIVATE include shadps4 .. ../shim ../third_party/httplib)

@@ -218,6 +218,7 @@ endif()
 # runtime against libbbgpu.so). Below 1 TiB stay the host heap and thread stacks the game packs
 # into 40-bit fields: no high-entropy address randomization.
 if (WIN32)
+    find_package(OpenSSL REQUIRED COMPONENTS Crypto)
     file(GLOB BB_RUNTIME_SOURCES CONFIGURE_DEPENDS ../src/runtime*.c)
     file(GLOB BB_ATRAC9_SOURCES CONFIGURE_DEPENDS ../third_party/LibAtrac9/C/src/*.c)
     add_library(bbatrac9 STATIC ${BB_ATRAC9_SOURCES})
@@ -227,7 +228,7 @@ if (WIN32)
     set_target_properties(bb-probe PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
     target_include_directories(bb-probe PRIVATE .. ../src)
     target_compile_options(bb-probe PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra>)
-    target_link_libraries(bb-probe PRIVATE bbgpu bbatrac9 pthread ws2_32 bcrypt dbghelp winmm onecore
+    target_link_libraries(bb-probe PRIVATE bbgpu bbatrac9 OpenSSL::Crypto pthread ws2_32 bcrypt dbghelp winmm onecore
         ${Vulkan_LIBRARIES})
     # Plain -l names in the packages' CMake files (Zydis: Zycore) are found in the sysroot.
     foreach(root ${CMAKE_FIND_ROOT_PATH})

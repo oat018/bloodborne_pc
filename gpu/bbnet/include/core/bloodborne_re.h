@@ -8,6 +8,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
+#include "core/bbsc_party.h"
 
 namespace Core::Bloodborne {
 
@@ -24,6 +26,19 @@ void OnBbscHostFollowPacket(std::uint32_t packed_map, float x, float y, float z,
 // BBSC world state: one chunk of the host's event flags for its map block arrived (a whole
 // SignalingBbscWorldFlags packet). Signaling receive thread; only stores it.
 void OnBbscWorldFlagsPacket(const void* packet, std::uint32_t size);
+struct BbscPartyRoom {
+    std::int32_t context{};
+    std::uint64_t room{};
+    bool is_host{};
+    std::string owner;
+    std::vector<std::string> members; // Other members only; includes the host for a guest.
+};
+void OnBbscPartyRoomState(BbscPartyRoom room);
+std::optional<BbscPartyRoom> GetBbscPartyRoomState();
+struct BbscPartyPacket { Core::Bbsc::Party::Peer peer; Core::Bbsc::Party::Message message; };
+bool SetBbscPartyPeers(std::span<const Core::Bbsc::Party::Peer> peers);
+void OnBbscPartyPacket(const Core::Bbsc::Party::Peer& peer, const void* packet, std::uint32_t size);
+std::vector<BbscPartyPacket> TakeBbscPartyPackets();
 // BBSC life state: another player says whether it is dead (spectating) or alive. Relay receive
 // thread; only stores it.
 void OnBbscLifePacket(std::uint32_t player, std::uint8_t dead, std::uint32_t sequence);

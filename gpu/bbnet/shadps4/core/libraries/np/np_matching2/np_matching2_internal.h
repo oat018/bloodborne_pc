@@ -313,6 +313,8 @@ struct RequestCallbackInfo {
     void* arg = nullptr;
 };
 
+void PublishBbscPartyRoom(const ContextObject& ctx);
+
 class ContextManager {
 public:
     static constexpr u32 kMaxContexts = 10;

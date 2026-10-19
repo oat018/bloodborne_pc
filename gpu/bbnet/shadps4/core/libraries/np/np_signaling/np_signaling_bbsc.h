@@ -14,6 +14,19 @@
 namespace Libraries::Np::NpSignaling {
 
 inline constexpr u8 kSignalingBbscWorldFlagsType = 0x22;
+inline constexpr u8 kSignalingBbscPartyType = 0x28;
+inline constexpr u8 kBbscPartyVersion = 1;
+inline constexpr size_t kBbscPartyHeaderBytes = 46;
+inline constexpr size_t kBbscPartyMaxPacketBytes = 1024;
+inline constexpr size_t kBbscPartyMaxCatalogEvents = 1024;
+inline constexpr size_t kBbscPartyEventsPerPacket =
+    (kBbscPartyMaxPacketBytes - kBbscPartyHeaderBytes) / sizeof(u32);
+inline constexpr size_t kBbscPartyMaxChunks =
+    (kBbscPartyMaxCatalogEvents + kBbscPartyEventsPerPacket - 1) / kBbscPartyEventsPerPacket;
+enum class BbscPartyKind : u8 { Hello = 0, Ready = 1, Baseline = 2, Event = 3, Ack = 4, Leave = 5 };
+// Little endian, no struct casts: magic4/type1/version1/kind1/reserved0_1,
+// party16/admission8/sequence8/chunk2/chunks2/event_count2, then event_count * u32.
+
 
 // One chunk of a host world-flag snapshot: up to 8 event-flag groups (1000 flags, 125 bytes each)
 // of the host's current map block, in the fixed order of Core::Bloodborne's BbscWorldGroupKey.

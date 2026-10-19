@@ -17,10 +17,14 @@ subsequent reuse of slot1 have been captured using disposable saves. Deletion
 updates metadata while leaving the old character payload intact, so filename,
 name and nonzero file contents do not identify a replacement character.
 
-Runtime save receipts use bbnet ABI2 and report the canonical file, successful
-commit generation and close error, including after the native save mount is
-removed. These are file facts, not a stable character ID or proof of newly earned
-progress. Runtime and online module must be rebuilt together.
+Runtime save receipts now use bbnet ABI3. Each successful observation binds the
+canonical path, process-local generation, byte count and SHA256 of the actual
+temporary copy committed by the runtime, including after unmount. Hash or durability
+failure clears snapshot proof without advancing its generation; a diagnostic hash
+failure does not prevent the game from saving. Receipts describe the committed
+copy, not later external edits, stable character identity or newly earned progress.
+Runtime and online module must be rebuilt together; ABI2 modules are rejected.
+The runtime reuses the project's existing OpenSSL dependency (`libcrypto`).
 
 The party policy and durable journal code remain foundations. Runtime integration
 of the verified native character discriminator, uncapped cycle identity, durable
@@ -51,10 +55,43 @@ the live value. A mismatch is diagnostic evidence; matching values, particularly
 The same diagnostic now records full snapshot SHA256 at native load, completed
 serialization and copy input, and at the selected saved file. Three opt-in
 pre-increment observers identify potential NG transitions without changing the
-count. ABI2 receipt semantics are unchanged.
+count. Three additional post-store observers validate the increment registers and
+final capped value, rejecting a skipped Lua guard and unrelated event commands.
+Fixture replay through the actual hook provider executes the captured 1.09
+arithmetic for0→1,6→7 and7→7. These are diagnostic observations, not committed
+cycle identities; the ending/save/restart flow still needs integration.
 The copied-character provenance trial now confirms three native serialize/copy
-hash matches and a final saved file matching the last snapshot. An atomic
-generation/hash receipt and real NG transition evidence are still missing.
+hash matches and a final saved file matching the last snapshot. Atomic
+generation/hash receipts now pass both automated runtime/module tests and the
+live copied-character checkpoint: generation2 matches the second native
+serialize/copy/commit, while the final file matches the later third save. Other
+character slots remain unchanged. Do not repeat this checkpoint. Real NG
+transition/replay and complete cycle identity remain unverified.
+The new party protocol now has ordered admission and independent per-guest
+baselines, account/connection-bound routing, bounded retry queues and cumulative
+acknowledgement. Matching2 publishes copied room-owner/membership snapshots;
+receive-thread messages enter a bounded game-thread inbox only for selected room
+members (only the owner on a guest). Acknowledgement of earned events is produced
+only after the intent journal has been flushed successfully. This acknowledges
+recorded intent, not inventory delivery or a native character save.
+Journal version2 preserves unfinished and committed claims with their original
+party/admission across successive parties; version1 remains readable. A later
+party cannot relabel or erase earlier claims. A native home-capture adapter now binds the selected canonical save path and native
+character IDs to a leased durable origin/native-respawn record. Unresolved records
+are preserved. On Linux the Lua join hook now refuses a new join for an existing
+pending, locked or unreadable managed record, using the game's own null-name
+failure path. Own-world capture and Blank leave handling run before trace sampling.
+The normal join path does not yet create these new home records: durable own-world
+snapshot/capability checks and the recovery coordinator must be connected first.
+The game-thread coordinator still needs to connect these components to first-playable
+admission, event capture, recovery and the native save fence. No new event rewards are enabled yet.
+
+Development now prioritizes completing the pre-release feature paths before the
+broad gameplay matrix. Keep focused compilation, journal durability, wrong-peer
+and duplicate-reward checks; defer repeated manual checkpoints and long sessions.
+Linux AppImage and Windows EXE packaging follow the runtime integration. Windows
+journal I/O still needs a native implementation: the current POSIX journal is
+excluded from the Windows target. Neither package is feature-complete today.
 See the [plan](superpowers/plans/2026-10-18-bbsc-anywhere-coop.md),
 [design](superpowers/specs/2026-10-18-bbsc-anywhere-coop-design.md) and
 [evidence](superpowers/specs/2026-10-18-bbsc-integration-evidence.md).
@@ -214,3 +251,28 @@ exit. Host-initiated exit reaches RemoveMember then guest OnRoomDisappeared; the
 session-disconnected notice represents that host-initiated closure in this capture,
 with no OnP2PTimeOut event. Lighting across all supported maps remains unverified.
 Durable restart recovery and joined-event-only progress remain separate open gates.
+
+### 2026-10-19 — Native return save fence checkpoint
+
+Prepared-home journal v4 adds a monotone `native_return_selected` marker. The guest
+send-home path persists it before selecting the saved native respawn point ID through
+the native last-lamp branch. Off-map point maps come from the native point-to-map
+resolver; zero XYZ values are unresolved metadata and are never written as warp
+coordinates. The old raw `native-selector-1.09.txt` disassembly has an incorrect ELF
+offset and is non-authoritative; use corrected PT_LOAD artifact `root-native-selector.txt`.
+
+Return completion requires matching selected character/slot, the durable selector marker,
+own-world/player readiness, live position equal to the resolved native point after its
+map loads, and a SerializeBegin after destination confirmation whose successful
+SerializeEnd hash matches a newer ABI3 selected-file receipt. First destination
+confirmation discards earlier save evidence. A mismatched or unresolved destination
+leaves recovery pending; pending/unverifiable managed state blocks the legacy
+process-local raw-coordinate fallback. The focused join fixture verifies fail-closed
+mismatch behavior; the party tracker fixture verifies a matching synthetic point.
+
+Focused `bbport-dev` build plus party, join and transport checks pass; logs are
+`checkpoint-v4-final-{build,party,join,transport}.log` under the ignored SDD evidence
+directory. This checkpoint does not complete anywhere co-op: normal-join admission,
+offline recovery-only module loading/warp, event catalog/application, NG7 isolation,
+Windows compilation/runtime and broad gameplay validation remain unfinished. No
+AppImage or EXE was packaged.

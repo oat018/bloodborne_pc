@@ -10,14 +10,17 @@
 extern "C" {
 #endif
 
-#define BBNET_ABI_VERSION 2
+#define BBNET_ABI_VERSION 3
 
 /* A runtime observation, not a character identity or proof of a particular game event.
- * generation is process-local; error is a positive errno from the last dirty close. */
+ * generation is process-local; error is a positive errno from the last dirty close or hash.
+ * bytes/SHA256 identify that durable committed copy only when error==0; not the current file. */
 typedef struct BbNetSaveReceipt {
     uint64_t generation;
     char path[1024];
     int32_t error;
+    uint64_t bytes;
+    char sha256[65];
 } BbNetSaveReceipt;
 
 /* What the runtime gives the module: the game's identity (param.sfo, its folder for
@@ -33,7 +36,7 @@ typedef struct BbNetHost {
                             void *argument, uint64_t stack_size, const char *name);
     int32_t (*thread_join)(void *thread, void **result);
     /* Host or last runtime /savedata target, even after unmount; 0 or positive errno.
-     * Returns the committed host path, not active-mount, character or snapshot proof. */
+     * Returns one locked path/generation/hash observation, not active-mount or character proof. */
     int32_t (*save_receipt)(const char *save_path, BbNetSaveReceipt *out);
 } BbNetHost;
 

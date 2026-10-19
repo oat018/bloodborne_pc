@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <openssl/evp.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -101,31 +102,68 @@ int32_t runtime_file_save_receipt(const char *path,BbNetSaveReceipt *out) {
     return result;
 }
 
-static void note_save_close(const File *closed,int result) {
-    if (!closed->temp || !closed->dirty || strncmp(closed->path,"/savedata",9)) return;
+static int character_save_close(const File *closed) {
+    if (!closed->temp || !closed->dirty || strncmp(closed->path,"/savedata",9)) return 0;
     const char *name=strrchr(closed->path,'/');
-    if (!name || strlen(++name)!=12 || strncmp(name,"userdata000",11) ||
-        name[11]<'0' || name[11]>'9') return;
+    return name && strlen(++name)==12 && !strncmp(name,"userdata000",11) &&
+        name[11]>='0' && name[11]<='9';
+}
+
+static int hash_save_copy(const File *closed,BbNetSaveReceipt *snapshot) {
+    int fd=open(closed->temp,O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    if (fd<0) return errno;
+    struct stat copy,writer;
+    int error=0;
+    if (fstat(fd,&copy) || fstat(closed->host,&writer)) error=errno;
+    else if (!S_ISREG(copy.st_mode) || copy.st_dev!=writer.st_dev || copy.st_ino!=writer.st_ino)
+        error=EIO;
+    EVP_MD_CTX *ctx=EVP_MD_CTX_new();
+    if (!ctx && !error) error=ENOMEM;
+    if (!error && !EVP_DigestInit_ex(ctx,EVP_sha256(),NULL)) error=EIO;
+    unsigned char buffer[65536],digest[EVP_MAX_MD_SIZE];
+    while (!error) {
+        ssize_t n=read(fd,buffer,sizeof(buffer));
+        if (n<0 && errno==EINTR) continue;
+        if (n<0) { error=errno; break; }
+        if (!n) break;
+        snapshot->bytes+=(uint64_t)n;
+        if (!EVP_DigestUpdate(ctx,buffer,(size_t)n)) error=EIO;
+    }
+    unsigned int size=0;
+    if (!error && (snapshot->bytes!=(uint64_t)copy.st_size ||
+        !EVP_DigestFinal_ex(ctx,digest,&size) || size!=32)) error=EIO;
+    if (close(fd) && !error) error=errno;
+    EVP_MD_CTX_free(ctx);
+    if (!error) for (unsigned int i=0;i<size;++i)
+        snprintf(snapshot->sha256+i*2,3,"%02x",digest[i]);
+    return error;
+}
+
+/* Caller holds receipt_lock across rename, durability and receipt publication. */
+static void note_save_close(const File *closed,int result,const BbNetSaveReceipt *snapshot) {
     char canonical[1024];
     if (receipt_path(closed->commit,canonical)) return;
-    pthread_mutex_lock(&receipt_lock);
     size_t i=0;
     while (i<save_receipt_count && strcmp(save_receipts[i].path,canonical)) ++i;
     if (i==save_receipt_count) {
         if (i==MAX_SAVE_RECEIPTS) {
             save_receipts_full=1; /* Never evict proof still held by another character. */
-            pthread_mutex_unlock(&receipt_lock);
             return;
         }
         strcpy(save_receipts[i].path,canonical);
         ++save_receipt_count;
     }
+    save_receipts[i].bytes=0;
+    save_receipts[i].sha256[0]=0;
     save_receipts[i].error=result<0 ? -result : result;
     if (!result) {
         if (save_receipt_generation==UINT64_MAX) save_receipts[i].error=EOVERFLOW;
-        else save_receipts[i].generation=++save_receipt_generation;
+        else {
+            save_receipts[i].generation=++save_receipt_generation;
+            save_receipts[i].bytes=snapshot->bytes;
+            strcpy(save_receipts[i].sha256,snapshot->sha256);
+        }
     }
-    pthread_mutex_unlock(&receipt_lock);
 }
 
 static int save_path(const char *p) { return p && !strncmp(p,"/savedata",9); }
@@ -627,9 +665,19 @@ static int64_t do_close(int fd) {
     pthread_mutex_unlock(&lock);
     free_listing(closed.dir);
     int result=0;
+    const int tracked=character_save_close(&closed);
+    BbNetSaveReceipt snapshot={0};
+    int hash_error=0;
+    if (tracked) {
+        pthread_mutex_lock(&receipt_lock);
+        hash_error=hash_save_copy(&closed,&snapshot);
+    }
     if (closed.temp) result=commit_file(&closed);
     else close(closed.host);
-    note_save_close(&closed,result);
+    if (tracked) {
+        note_save_close(&closed,result ? result : hash_error,&snapshot);
+        pthread_mutex_unlock(&receipt_lock);
+    }
     if (save_trace() && save_path(closed.path))
         printf("Save trace: close(fd %d, %s)%s -> %d\n",fd,closed.path,closed.temp ? closed.dirty ? " commit" : " unwritten" : "",result);
     free(closed.commit); free(closed.temp);

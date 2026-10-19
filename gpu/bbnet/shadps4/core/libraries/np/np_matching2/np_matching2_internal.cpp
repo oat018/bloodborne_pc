@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "common/logging/log.h"
+#include "core/bloodborne_re.h"
 #include "common/thread.h"
 #include "core/libraries/network/net.h"
 #include "core/libraries/np/np_common.h"
@@ -17,6 +18,23 @@
 namespace Libraries::Np::NpMatching2 {
 
 NpMatching2State g_state;
+
+void PublishBbscPartyRoom(const ContextObject& ctx) {
+    Core::Bloodborne::BbscPartyRoom snapshot;
+    snapshot.context = ctx.ctx_id;
+    const auto found = ctx.room_cache.find(ctx.room_id);
+    if (ctx.room_id && found != ctx.room_cache.end()) {
+        snapshot.room = ctx.room_id;
+        snapshot.is_host = ctx.is_room_owner;
+        for (const auto& [id, member] : found->second.members) {
+            const std::string name(member.np_id.handle.data,
+                                   strnlen(member.np_id.handle.data, ORBIS_NP_ONLINEID_MAX_LENGTH));
+            if (id == found->second.signaling_main_member) snapshot.owner = name;
+            if (id != ctx.my_member_id) snapshot.members.push_back(name);
+        }
+    }
+    Core::Bloodborne::OnBbscPartyRoomState(std::move(snapshot));
+}
 
 namespace {
 
@@ -194,6 +212,7 @@ void BuildCreateJoinRoomPayloadCommon(ContextObject& ctx,
             ctx.peers[mc.member_id] = peer;
         }
     }
+    PublishBbscPartyRoom(ctx);
 }
 
 OrbisNpMatching2RoomGroup* FindPayloadGroup(CallbackPayload& p, OrbisNpMatching2RoomGroupId id) {
@@ -340,6 +359,7 @@ void* BuildLeaveRoomPayload(ContextObject& ctx, const shadnet::LeaveRoomReply& r
         ctx.is_room_owner = false;
     }
 
+    PublishBbscPartyRoom(ctx);
     p.request_data = p.leave_room_response.get();
     return p.request_data;
 }
@@ -1177,6 +1197,7 @@ bool ContextManager::Destroy(OrbisNpMatching2ContextId ctx_id) {
         LOG_DEBUG(Lib_NpMatching2, "context destroy deferred until stop callback: id={}", ctx_id);
         return true;
     }
+    Core::Bloodborne::OnBbscPartyRoomState({ctx_id, 0, false, {}, {}});
     m_contexts[ctx_id].Reset();
     m_used[ctx_id] = false;
     LOG_DEBUG(Lib_NpMatching2, "context destroyed: id={}", ctx_id);
@@ -1193,6 +1214,7 @@ void ContextManager::CompleteStop(OrbisNpMatching2ContextId ctx_id) {
     if (!ctx->destroy_pending) {
         return;
     }
+    Core::Bloodborne::OnBbscPartyRoomState({ctx_id, 0, false, {}, {}});
     m_contexts[ctx_id].Reset();
     m_used[ctx_id] = false;
     LOG_DEBUG(Lib_NpMatching2, "context destroyed after stop callback: id={}", ctx_id);
@@ -1225,6 +1247,7 @@ s32 ContextManager::Stop(OrbisNpMatching2ContextId ctx_id) {
     }
     ctx->started = false;
     ctx->stop_pending = true;
+    Core::Bloodborne::OnBbscPartyRoomState({ctx_id, 0, false, {}, {}});
     LOG_DEBUG(Lib_NpMatching2, "context stopped: id={}", ctx_id);
     return ORBIS_OK;
 }
@@ -1244,6 +1267,7 @@ void ContextManager::ApplyContextCallback(OrbisNpMatching2ContextCallback callba
 void ContextManager::Reset() {
     std::lock_guard lock(m_mutex);
     for (auto& ctx : m_contexts) {
+        Core::Bloodborne::OnBbscPartyRoomState({ctx.ctx_id, 0, false, {}, {}});
         ctx.Reset();
     }
     m_used = {};

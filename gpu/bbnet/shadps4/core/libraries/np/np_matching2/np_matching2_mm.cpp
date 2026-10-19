@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/logging/log.h"
+#include "core/bloodborne_re.h"
 #include "core/libraries/network/net.h"
 #include "core/libraries/network/net_upnp.h"
 #include "core/libraries/network/sockets.h"
@@ -538,6 +539,9 @@ void HandleRoomEvent(const ShadNet::NotifyRoomEvent& n) {
         return;
     }
 
+    if (event == ORBIS_NP_MATCHING2_ROOM_EVENT_KICKEDOUT)
+        Core::Bloodborne::OnBbscPartyRoomState({ctx->ctx_id, 0, false, {}, {}});
+    else PublishBbscPartyRoom(*ctx);
     LOG_DEBUG(Lib_NpMatching2, "RoomEvent ctx={} room={} event={:#x} cause={}", n.ctx_id, n.room_id,
               n.event, n.event_cause);
 

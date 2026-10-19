@@ -40,6 +40,8 @@ static int check_save_host(int reject) {
     assert(fd>=3 && runtime_file_write(fd,"save",4)==4 && !runtime_file_close(fd));
     assert(!query("/savedata0/userdata0001",&receipt));
     assert(receipt.generation>0 && !receipt.error);
+    assert(receipt.bytes==4 && !strcmp(receipt.sha256,
+        "157dca92e4250458339d4b835250d44c238f3355e1b7986195188ee434e9baff"));
     char path[1024]; snprintf(path,sizeof(path),"%s/userdata0001",root);
     assert(!strcmp(receipt.path,path));
     const uint64_t generation=receipt.generation;
@@ -49,7 +51,7 @@ static int check_save_host(int reject) {
     assert(!query("/savedata0/userdata0001",&receipt) && receipt.generation==generation);
     assert(runtime_file_open("/savedata0/userdata0001",0,0)==-ENOENT);
     assert(!unlink(path) && !rmdir(root));
-    puts("PASS: ABI-2 loader supplies actual mounted save receipts to the module");
+    puts("PASS: ABI-3 loader supplies actual mounted save receipts to the module");
     return 0;
 }
 
@@ -83,6 +85,8 @@ int main(int argc,char **argv) {
     assert(init);
     const BbNetHost old_host={.abi=1};
     assert(init(&old_host)!=0); // Rejected before reading fields beyond an ABI-1 caller.
+    const BbNetHost abi2_host={.abi=2};
+    assert(init(&abi2_host)!=0); // Receipt size changed; never call an ABI-2 callback.
     BbNetHost incomplete={.abi=BBNET_ABI_VERSION,.thread_spawn=runtime_thread_spawn,
         .thread_join=runtime_thread_join_spawned};
     assert(init(&incomplete)!=0);

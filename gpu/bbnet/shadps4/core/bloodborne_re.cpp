@@ -142,6 +142,9 @@ constexpr u64 NativeSlotClearOtherTaskOffset = 0x01B45DFE;
 constexpr u64 NativeCycleIncrementOffset = 0x0131D260;
 constexpr u64 NativeCycleLuaIncrementOffset = 0x01334BB0;
 constexpr u64 NativeCycleEventIncrementOffset = 0x017C0FD2;
+constexpr u64 NativeCycleAppliedOffset = 0x0131D2A8;
+constexpr u64 NativeCycleLuaAppliedOffset = 0x01334C05;
+constexpr u64 NativeCycleEventAppliedOffset = 0x017C045A;
 constexpr u64 CandidateLocalStatePointerOffset = 0x0553E878;
 constexpr u64 SummonManagerRootPointerOffset = 0x0553B120;
 constexpr u64 CurrentMapListPointerOffset = 0x0553B148;
@@ -372,6 +375,14 @@ constexpr auto Sites = std::to_array<TraceSite>({
     // Start after the RIP-relative root lookup: the native trampoline only copies absolute code.
     {"BBSC.Cycle.EventIncrement", NativeCycleEventIncrementOffset, TraceKind::SaveLifecycle,
      {0x8B, 0x50, 0x68, 0x31, 0xC9, 0x89, 0xD6}, 7},
+    {"BBSC.Cycle.Applied", NativeCycleAppliedOffset, TraceKind::SaveLifecycle,
+     {0x48, 0x8B, 0x00, 0x48, 0x3B, 0x45, 0xF8}, 7},
+    // The Lua guard also reaches this epilogue; register validation rejects its skipped path.
+    {"BBSC.Cycle.LuaApplied", NativeCycleLuaAppliedOffset, TraceKind::SaveLifecycle,
+     {0x48, 0x8B, 0x00, 0x48, 0x3B, 0x45, 0xF8}, 7},
+    // Shared command epilogue; only command21 with the increment's registers qualifies.
+    {"BBSC.Cycle.EventApplied", NativeCycleEventAppliedOffset, TraceKind::SaveLifecycle,
+     {0x49, 0x8B, 0x45, 0x00, 0x48, 0x3B, 0x45, 0xD0}, 8},
     // CSMultiPlayMan::RemoveMember(member_id): sets the exit flag on that member's insert task.
     // Traced with caller chain to find what drops the guest on the host when the host dies.
     {"BBSC.RemoveMember", 0x01E54DB0, TraceKind::MatchingLeaveDecision, StandardR15Prologue, 6},
@@ -879,6 +890,14 @@ struct HostPlacementRewriteRecord {
 };
 
 thread_local HostPlacementRewriteRecord host_placement_rewrite{};
+std::mutex bbsc_party_inbox_mutex;
+std::vector<Core::Bbsc::Party::Peer> bbsc_party_expected_peers;
+std::vector<BbscPartyPacket> bbsc_party_inbox;
+std::optional<BbscPartyRoom> bbsc_party_room;
+constexpr size_t BbscPartyInboxPerPeer =
+    Libraries::Np::NpSignaling::kBbscPartyMaxCatalogEvents +
+    Libraries::Np::NpSignaling::kBbscPartyMaxChunks + 4;
+
 std::mutex seamless_placement_mutex;
 std::optional<SummonPlacementDescriptor> seamless_host_placement;
 std::optional<SummonPlacementDescriptor> seamless_received_host_placement;
@@ -3198,6 +3217,12 @@ void ApplyBbscGuestLootView(u32 packed_map, std::string_view why); // see "Guest
 void KeepBbscOwnWorldGroup(u32 key, const u8* live); // see "Own world journal"
 void CaptureBbscOwnWorldBeforeJoin();
 void WriteBbscOwnWorldFile();
+std::optional<Core::Bbsc::Party::CharacterKey> ReadBbscPartyCharacterKey();
+#ifndef _WIN32
+std::filesystem::path BbscPartyHomePath(const Core::Bbsc::Party::CharacterKey& key);
+bool BbscHomeForOwnWorld();
+Core::Bbsc::Party::ReturnSaveTracker bbsc_managed_return_save_tracker;
+#endif
 void NoteBbscOwnDreamRestored(u32 key, const u8* live);
 s32 GetSessionState();
 u32 GetCurrentPackedMap();
@@ -3230,11 +3255,6 @@ void WriteLuaSessionEvent(std::ostream& out, const GuestRegisterSnapshot& regist
                      ReadValue<float>(global, 0x14A4), ReadValue<float>(global, 0x14A8),
                      ReadValue<float>(global, 0x14B4), ReadValue<s32>(global, 0x1528));
         }
-        CaptureBbscOwnWorldBeforeJoin(); // first: the load resets the map's item flags
-        StartBbscLoadCover("summon");
-    }
-    if (name == "OnLeaveMagic" || name == "OnLeaveMenu_Yes") {
-        BbscLeaveItemUsed(name);
     }
 }
 
@@ -4239,7 +4259,7 @@ struct BbscNativeCharacterIdentity {
     bool operator==(const BbscNativeCharacterIdentity&) const = default;
 };
 
-std::optional<BbscNativeCharacterIdentity> ReadBbscNativeCharacterIdentity() {
+std::optional<BbscNativeCharacterIdentity> ReadBbscLiveCharacterIdentity() {
     namespace fs = std::filesystem;
     if (image_base == 0) return std::nullopt;
     const u64 global = GetGlobalState();
@@ -4263,6 +4283,15 @@ std::optional<BbscNativeCharacterIdentity> ReadBbscNativeCharacterIdentity() {
     const fs::path dir = fs::canonical(configured, ec);
     if (ec) return std::nullopt;
     const fs::path file = dir / fmt::format("userdata{:04}", slot);
+    return BbscNativeCharacterIdentity{file, slot, user, character, cycle, -1, {}};
+}
+
+std::optional<BbscNativeCharacterIdentity> ReadBbscNativeCharacterIdentity() {
+    namespace fs = std::filesystem;
+    auto identity = ReadBbscLiveCharacterIdentity();
+    if (!identity) return std::nullopt;
+    const auto& file = identity->save_file;
+    std::error_code ec;
     if (fs::is_symlink(file, ec) || ec) return std::nullopt;
     std::ifstream input(file, std::ios::binary | std::ios::ate);
     if (!input || input.tellg() != 0x140000) return std::nullopt;
@@ -4270,10 +4299,32 @@ std::optional<BbscNativeCharacterIdentity> ReadBbscNativeCharacterIdentity() {
     std::vector<u8> bytes(0x140000);
     if (!input.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) return std::nullopt;
     const auto persisted = ReadBbscSerializedSnapshot(bytes);
-    if (!persisted || persisted->server_user != user || persisted->server_character != character)
-        return std::nullopt;
-    return BbscNativeCharacterIdentity{file, slot, user, character, cycle,
-                                       persisted->capped_cycle, persisted->sha256};
+    if (!persisted || persisted->server_user != identity->server_user ||
+        persisted->server_character != identity->server_character) return std::nullopt;
+    identity->persisted_capped_cycle = persisted->capped_cycle;
+    identity->snapshot_sha256 = persisted->sha256;
+    return identity;
+}
+
+Core::Bbsc::Party::CharacterKey BbscPartyCharacterKey(const BbscNativeCharacterIdentity& identity) {
+    Core::Bbsc::Party::CharacterKey key;
+    key.save_dir = identity.save_file.parent_path().string();
+    key.user = std::to_string(identity.server_user);
+    key.slot = static_cast<u8>(identity.slot);
+    key.cycle = static_cast<u32>(identity.capped_cycle);
+    for (size_t i = 0; i < 8; ++i) {
+        key.character[i] = static_cast<u8>(identity.server_user >> (i * 8));
+        key.character[i + 8] = static_cast<u8>(identity.server_character >> (i * 8));
+    }
+    return key;
+}
+
+std::optional<Core::Bbsc::Party::CharacterKey> ReadBbscPartyCharacterKey() {
+    const auto identity = ReadBbscNativeCharacterIdentity();
+    // shortcut: capped 7 needs the managed cycle epoch before journal admission can use it.
+    if (!identity || identity->capped_cycle == 7 ||
+        identity->capped_cycle != identity->persisted_capped_cycle) return std::nullopt;
+    return BbscPartyCharacterKey(*identity);
 }
 
 void TraceBbscNativeCharacterIdentity() {
@@ -4331,12 +4382,13 @@ void TraceBbscSelectedSaveReceipt() {
     BbNetSaveReceipt receipt{};
     const int32_t result = ReadBbscSelectedSaveReceipt(receipt);
     if (result == last_result && receipt.generation == last.generation &&
-        receipt.error == last.error && !std::strcmp(receipt.path, last.path)) return;
+        receipt.error == last.error && receipt.bytes == last.bytes &&
+        !std::strcmp(receipt.sha256, last.sha256) && !std::strcmp(receipt.path, last.path)) return;
     last_result = result;
     last = receipt;
     ++lines;
-    LOG_INFO(Debug, "[BBSC-save-receipt] query {}, generation {}, close error {}, path {}",
-             result, receipt.generation, receipt.error, receipt.path);
+    LOG_INFO(Debug, "[BBSC-save-receipt] query {}, generation {}, close error {}, path {} [bytes {}, sha256 {}]",
+             result, receipt.generation, receipt.error, receipt.path, receipt.bytes, receipt.sha256);
 }
 
 struct BbscNativeSaveEvidence {
@@ -4348,6 +4400,7 @@ struct BbscNativeSaveEvidence {
     bool own_world = false;
     s32 success = -1;
     s32 live_capped_cycle = -1;
+    s32 previous_capped_cycle = -1;
     std::optional<BbscSerializedSnapshot> snapshot;
 };
 
@@ -4398,12 +4451,33 @@ std::optional<BbscNativeSaveEvidence> ReadBbscNativeSaveEvidence(
         out.stage = "slot-reserved"; // Allocation can still be cancelled; not a character identity.
         out.slot = static_cast<s32>(registers.rdi);
     } else if (offset == NativeCycleIncrementOffset || offset == NativeCycleLuaIncrementOffset ||
-               offset == NativeCycleEventIncrementOffset) {
+               offset == NativeCycleEventIncrementOffset || offset == NativeCycleAppliedOffset ||
+               offset == NativeCycleLuaAppliedOffset || offset == NativeCycleEventAppliedOffset) {
         const u64 slots = ReadValue<u64>(image_base + PlayerSlotManagerPointerOffset, 0);
         if (!ReadablePointer(slots, 0x6C)) return std::nullopt;
         out.live_capped_cycle = ReadValue<s32>(slots, 0x68);
         if (out.live_capped_cycle < 0 || out.live_capped_cycle > 7) return std::nullopt;
         out.stage = "cycle-increment-entry"; // Intent observation, never execution/commit proof.
+        if (offset == NativeCycleAppliedOffset || offset == NativeCycleLuaAppliedOffset ||
+            offset == NativeCycleEventAppliedOffset) {
+            const bool event = offset == NativeCycleEventAppliedOffset;
+            const u64 previous = event ? registers.rdx : registers.rsi;
+            if (previous > 7) return std::nullopt;
+            const u64 next = std::min<u64>(previous + 1, 7);
+            if (out.live_capped_cycle != static_cast<s32>(next)) return std::nullopt;
+            if (event) {
+                if (registers.rax != slots + 0x68 || registers.rcx != next ||
+                    registers.rsi != previous + 1 || (registers.r14 & 0xFF) != 1 ||
+                    !ReadablePointer(registers.rbx, 0xB8)) return std::nullopt;
+                const u64 instruction = ReadValue<u64>(registers.rbx, 0xB0);
+                if (!ReadablePointer(instruction, 8) || ReadValue<u32>(instruction, 4) != 21)
+                    return std::nullopt;
+            } else if (registers.rcx != slots + 0x68 || registers.rdi != previous + 1 ||
+                       registers.rdx != next) return std::nullopt;
+            out.previous_capped_cycle = static_cast<s32>(previous);
+            out.success = 1;
+            out.stage = "cycle-increment-applied"; // Native store observed, not a saved cycle.
+        }
     } else return std::nullopt;
     if (out.slot < 0 || out.slot >= 10 ||
         (out.bytes && !ReadablePointer(out.buffer, out.bytes))) return std::nullopt;
@@ -4430,10 +4504,10 @@ void TraceBbscNativeSaveEvidence(u64 offset, const GuestRegisterSnapshot& regist
         const u32 seq = sequence.fetch_add(1, std::memory_order_relaxed);
         if (seq >= 128) return;
         LOG_INFO(Debug, "[BBSC-save-native] seq {} stage {} slot {} own {} mode {} success {} "
-                        "buffer {:#x} bytes {} site {:#x} live clear count {}",
+                        "buffer {:#x} bytes {} site {:#x} live clear count {} previous clear count {}",
                  seq, evidence->stage, evidence->slot, evidence->own_world, evidence->mode,
                  evidence->success, evidence->buffer, evidence->bytes, offset,
-                 evidence->live_capped_cycle);
+                 evidence->live_capped_cycle, evidence->previous_capped_cycle);
         if (evidence->snapshot) {
             const auto& snapshot = *evidence->snapshot;
             LOG_INFO(Debug, "[BBSC-save-snapshot] seq {} stage {} slot {} own {} server user {} "
@@ -4446,6 +4520,79 @@ void TraceBbscNativeSaveEvidence(u64 offset, const GuestRegisterSnapshot& regist
         // Read-only diagnostics must never unwind through a native save operation.
     }
 }
+
+bool IsBbscPostRestoreSaveSite(u64 offset) {
+    return offset == NativeSaveSerializeOffset || offset == NativeSaveSerializeEndOffset;
+}
+
+#ifndef _WIN32
+void ObserveBbscManagedReturnSerialization(u64 offset, const GuestRegisterSnapshot& registers) {
+    using namespace Core::Bbsc::Party;
+    if (!bbsc_managed_return_save_tracker.Armed() ||
+        (offset != NativeSaveSerializeOffset && offset != NativeSaveSerializeEndOffset)) return;
+    try {
+        const auto evidence = ReadBbscNativeSaveEvidence(offset, registers);
+        if (!evidence || !evidence->own_world || !BbscHomeForOwnWorld()) {
+            bbsc_managed_return_save_tracker.AbortSerialization();
+            return;
+        }
+        const auto live_key = ReadBbscPartyCharacterKey();
+        if (!live_key || evidence->slot != live_key->slot) {
+            bbsc_managed_return_save_tracker.AbortSerialization();
+            return;
+        }
+        if (offset == NativeSaveSerializeOffset) {
+            BbNetSaveReceipt receipt{};
+            const s32 receipt_result = ReadBbscSelectedSaveReceipt(receipt);
+            u64 current_generation = 0;
+            if (receipt_result == 0) {
+                const auto expected_save = (std::filesystem::path{live_key->save_dir} /
+                                            ("userdata000" + std::to_string(live_key->slot))).string();
+                if (receipt.path != expected_save) {
+                    bbsc_managed_return_save_tracker.AbortSerialization();
+                    return;
+                }
+                current_generation = receipt.generation;
+            } else if (receipt_result != ENOENT) {
+                bbsc_managed_return_save_tracker.AbortSerialization();
+                return;
+            }
+            if (evidence->stage != "serialize-begin" || evidence->bytes != 0x140000 ||
+                !bbsc_managed_return_save_tracker.SerializeBegin(*live_key, evidence->slot,
+                    static_cast<std::uintptr_t>(evidence->buffer), current_generation)) {
+                bbsc_managed_return_save_tracker.AbortSerialization();
+            }
+            return;
+        }
+        if (evidence->stage != "serialize-end" || !evidence->snapshot) {
+            bbsc_managed_return_save_tracker.AbortSerialization();
+            return;
+        }
+        const auto identity = ReadBbscLiveCharacterIdentity();
+        if (!identity || identity->server_user != evidence->snapshot->server_user ||
+            identity->server_character != evidence->snapshot->server_character ||
+            identity->capped_cycle != evidence->snapshot->capped_cycle) {
+            bbsc_managed_return_save_tracker.AbortSerialization();
+            return;
+        }
+        auto serialized_identity = *identity;
+        serialized_identity.server_user = evidence->snapshot->server_user;
+        serialized_identity.server_character = evidence->snapshot->server_character;
+        serialized_identity.capped_cycle = evidence->snapshot->capped_cycle;
+        const auto serialized_key = BbscPartyCharacterKey(serialized_identity);
+        if (!bbsc_managed_return_save_tracker.SerializeEnd(
+                *live_key, serialized_key, evidence->slot,
+                static_cast<std::uintptr_t>(evidence->buffer), evidence->success == 1,
+                evidence->snapshot->sha256)) {
+            bbsc_managed_return_save_tracker.AbortSerialization();
+        } else {
+            LOG_INFO(Debug, "BBSC managed return: native serialize completed after verified own-world restore; awaiting matching save receipt");
+        }
+    } catch (...) {
+        bbsc_managed_return_save_tracker.AbortSerialization();
+    }
+}
+#endif
 
 void TickBbscSaveIdentityEvidence() {
     if (!BbscSaveIdentityTraceEnabled() || image_base == 0) {
@@ -4741,10 +4888,9 @@ void TickBbscJoinTeleport(s64 now) {
     }
     // The host, not just any living partner: with 3+ hunters the first one found can be another
     // guest, who may be anywhere (2026-10-06).
-    const u64 real_host = FindRemoteHostCharacter();
-    const u64 host = real_host != 0 && GetCharacterHp(real_host) > 0 ? real_host
-                                                                     : FindLivingPartnerCharacter();
-    if (!ReadablePointer(player, 0x410) || GetCharacterHp(player) <= 0 || host == 0) {
+    const u64 host = FindRemoteHostCharacter();
+    if (!ReadablePointer(player, 0x410) || GetCharacterHp(player) <= 0 || host == 0 ||
+        GetCharacterHp(host) <= 0) {
         stable_since_ms = 0;
         return;
     }
@@ -5993,6 +6139,7 @@ constexpr u32 BbscOwnWorldMagic = 0x574F4242; // "BBOW"
 constexpr s64 BbscOwnWorldRecoverMs = 15'000;
 std::map<u32, std::array<u8, BbscWorldGroupBytes>> bbsc_own_world; // game thread only
 std::optional<BbscSaveSlot> bbsc_own_world_slot;
+std::optional<Core::Bbsc::Party::CharacterKey> bbsc_own_world_key;
 bool bbsc_own_world_dirty = false;
 
 std::filesystem::path BbscOwnWorldPath(const BbscSaveSlot& slot) {
@@ -6026,12 +6173,15 @@ void CaptureBbscOwnWorldBeforeJoin() {
     if (image_base == 0 || !bbsc_own_world.empty()) {
         return; // a copy is kept already (an earlier session that has not got home yet)
     }
+    const auto key = ReadBbscPartyCharacterKey();
+    if (!key) return; // Never bind captured world state to an unverified selected character.
     const u64 global = GetGlobalState();
     if (!ReadablePointer(global, 0x1598) || ReadValue<u8>(global, 0x1592) == 0) {
         return; // not in our own world
     }
     const u64 man = ReadValue<u64>(image_base + WorldFlagManPointerOffset, 0);
-    if (!ReadablePointer(man, 0x40)) {
+    if (!ReadablePointer(man, 0x40) || ReadValue<u32>(man, 0x1C) != 1000 ||
+        ReadValue<u32>(man, 0x20) != BbscWorldGroupBytes) {
         return;
     }
     const u64 head = ReadValue<u64>(man, 0x38);
@@ -6076,6 +6226,8 @@ void CaptureBbscOwnWorldBeforeJoin() {
             }
         }
     }
+    if (bbsc_own_world.empty()) return;
+    bbsc_own_world_key = *key;
     LOG_INFO(Debug,
              "BBSC own world: kept before the join load - {} map flag group(s) of {} in the table, "
              "{} item(s) taken in our own world",
@@ -6133,6 +6285,52 @@ void WriteBbscOwnWorldFile() {
     }
 }
 
+std::optional<std::vector<u8>> SerializeBbscOwnWorldSnapshot() {
+    if (bbsc_own_world.empty() || bbsc_own_world.size() > BbscWorldGroupCount ||
+        12 + bbsc_own_world.size() * (4 + BbscWorldGroupBytes) > 2 * 1024 * 1024) {
+        return std::nullopt;
+    }
+    std::vector<u8> out;
+    const auto put32 = [&out](u32 value) {
+        for (unsigned i = 0; i < 4; ++i) out.push_back(static_cast<u8>(value >> (i * 8)));
+    };
+    put32(BbscOwnWorldMagic);
+    put32(static_cast<u32>(BbscWorldGroupBytes));
+    put32(static_cast<u32>(bbsc_own_world.size()));
+    for (const auto& [key, bytes] : bbsc_own_world) {
+        if (!BbscIsMapFlagGroup(key)) return std::nullopt;
+        put32(key);
+        out.insert(out.end(), bytes.begin(), bytes.end());
+    }
+    return out;
+}
+
+std::optional<std::map<u32, std::array<u8, BbscWorldGroupBytes>>> DeserializeBbscOwnWorldSnapshot(
+    std::span<const u8> bytes) {
+    if (bytes.size() < 12) return std::nullopt;
+    const auto get32 = [&bytes](size_t at) {
+        return static_cast<u32>(bytes[at]) | (static_cast<u32>(bytes[at + 1]) << 8) |
+               (static_cast<u32>(bytes[at + 2]) << 16) | (static_cast<u32>(bytes[at + 3]) << 24);
+    };
+    const u32 count = get32(8);
+    if (get32(0) != BbscOwnWorldMagic || get32(4) != BbscWorldGroupBytes || count == 0 ||
+        count > BbscWorldGroupCount || bytes.size() != 12 + count * (4 + BbscWorldGroupBytes)) {
+        return std::nullopt;
+    }
+    std::map<u32, std::array<u8, BbscWorldGroupBytes>> groups;
+    size_t at = 12;
+    for (u32 i = 0; i < count; ++i) {
+        const u32 key = get32(at);
+        at += 4;
+        if (!BbscIsMapFlagGroup(key)) return std::nullopt;
+        std::array<u8, BbscWorldGroupBytes> group{};
+        std::copy_n(bytes.begin() + at, group.size(), group.begin());
+        at += group.size();
+        if (!groups.emplace(key, group).second) return std::nullopt;
+    }
+    return groups;
+}
+
 bool LoadBbscOwnWorldFile(const BbscSaveSlot& slot) {
     std::ifstream file(BbscOwnWorldPath(slot), std::ios::binary);
     u32 magic = 0, group_bytes = 0, count = 0;
@@ -6152,6 +6350,7 @@ bool LoadBbscOwnWorldFile(const BbscSaveSlot& slot) {
         bbsc_own_world.try_emplace(key, bytes); // what is in memory already is newer
     }
     bbsc_own_world_slot = slot;
+    bbsc_own_world_key.reset(); // Legacy slot files have no trustworthy native-character binding.
     return !bbsc_own_world.empty();
 }
 
@@ -6163,6 +6362,87 @@ bool BbscHomeForOwnWorld() {
            ReadValue<u8>(global, 0x1592) != 0 &&
            ReadValue<u64>(image_base + WorldFlagManPointerOffset, 0) != 0;
 }
+
+#ifndef _WIN32
+struct BbscManagedOwnWorldRecovery {
+    std::map<u32, std::array<u8, BbscWorldGroupBytes>> groups;
+    Core::Bbsc::Party::CharacterLease lease;
+    u64 baseline_generation{};
+    Core::Bbsc::Party::Destination destination;
+    bool native_return_selected{};
+};
+
+enum class BbscManagedHomeState { Missing, Prepared, Pending, Complete, Unverifiable };
+
+BbscManagedHomeState InspectBbscManagedHome(const Core::Bbsc::Party::CharacterKey& key) {
+    using namespace Core::Bbsc::Party;
+    const auto path = BbscPartyHomePath(key);
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(path, ec);
+    if (ec == std::errc::no_such_file_or_directory ||
+        (!ec && status.type() == std::filesystem::file_type::not_found))
+        return BbscManagedHomeState::Missing;
+    if (ec || status.type() != std::filesystem::file_type::regular)
+        return BbscManagedHomeState::Unverifiable;
+    auto lease = CharacterLease::Acquire(path, ec);
+    if (!lease) return BbscManagedHomeState::Unverifiable;
+    auto record = LoadJournal(path, key, ec);
+    if (!record) return BbscManagedHomeState::Unverifiable;
+    if (record->phase == Phase::Prepared) return BbscManagedHomeState::Prepared;
+    if (record->phase == Phase::Visiting || record->phase == Phase::Returning)
+        return BbscManagedHomeState::Pending;
+    return BbscManagedHomeState::Complete;
+}
+
+bool BbscManagedHomeBlocksLegacyReturn() {
+    const auto key = ReadBbscPartyCharacterKey();
+    if (!key) return false;
+    const auto state = InspectBbscManagedHome(*key);
+    return state == BbscManagedHomeState::Prepared || state == BbscManagedHomeState::Pending ||
+           state == BbscManagedHomeState::Unverifiable;
+}
+
+std::optional<BbscManagedOwnWorldRecovery> LoadBbscManagedOwnWorldRecovery(
+    const Core::Bbsc::Party::CharacterKey& key) {
+    using namespace Core::Bbsc::Party;
+    if (!BbscHomeForOwnWorld()) return std::nullopt;
+    const auto path = BbscPartyHomePath(key);
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(path, ec);
+    if (ec == std::errc::no_such_file_or_directory ||
+        (!ec && status.type() == std::filesystem::file_type::not_found) || ec ||
+        status.type() != std::filesystem::file_type::regular) return std::nullopt;
+    auto lease = CharacterLease::Acquire(path, ec);
+    if (!lease) return std::nullopt;
+    auto record = LoadJournal(path, key, ec);
+    if (!record || (record->phase != Phase::Visiting && record->phase != Phase::Returning) ||
+        record->world_snapshot.bytes == 0) return std::nullopt;
+    const auto payload = LoadWorldSnapshot(path, key, record->party, record->world_snapshot, ec);
+    if (!payload) return std::nullopt;
+    auto groups = DeserializeBbscOwnWorldSnapshot(*payload);
+    if (!groups) return std::nullopt;
+    // RestoreBbscOwnWorld clears its in-memory copy after iterating. Preflight the whole target
+    // table first so a not-ready manager or a missing group cannot turn a partial write into loss.
+    if (groups->empty() || std::ranges::any_of(*groups, [](const auto& entry) {
+            return BbscFlagGroupStorage(entry.first) == 0;
+        })) return std::nullopt;
+    BbNetSaveReceipt receipt{};
+    const s32 receipt_result = ReadBbscSelectedSaveReceipt(receipt);
+    u64 baseline_generation = 0;
+    const auto expected_save = (std::filesystem::path{key.save_dir} /
+                                ("userdata000" + std::to_string(key.slot))).string();
+    if (receipt_result == 0) {
+        if (receipt.path != expected_save) return std::nullopt;
+        baseline_generation = receipt.generation;
+    } else if (receipt_result != ENOENT) {
+        return std::nullopt;
+    }
+    if (!BeginReturnSaveFence(*record, baseline_generation) ||
+        !StoreJournal(*lease, *record, ec)) return std::nullopt;
+    return BbscManagedOwnWorldRecovery{std::move(*groups), std::move(*lease), baseline_generation,
+                                       record->fallback, record->native_return_selected};
+}
+#endif
 
 // Our own groups back into the live table. Returns the groups written (0 = nothing kept).
 size_t RestoreBbscOwnWorld(std::string_view why) {
@@ -6205,6 +6485,7 @@ size_t RestoreBbscOwnWorld(std::string_view why) {
              "from the host's, {} groups not in the table)",
              why, restored, bits, missing);
     bbsc_own_world.clear();
+    bbsc_own_world_key.reset();
     bbsc_own_world_dirty = false;
     if (bbsc_own_world_slot.has_value()) {
         std::error_code ec;
@@ -6231,6 +6512,56 @@ bool RecoverBbscOwnWorldFile(const BbscSaveSlot& slot) {
     return true;
 }
 
+#ifndef _WIN32
+std::optional<BbscTransform> ResolveLampPoint(s32 point_id);
+
+void TickBbscManagedReturnSaveReceipt() {
+    using namespace Core::Bbsc::Party;
+    if (!bbsc_managed_return_save_tracker.Armed()) return;
+    const auto key = ReadBbscPartyCharacterKey();
+    if (!key || !BbscHomeForOwnWorld()) return;
+    const auto identity = ReadBbscNativeCharacterIdentity();
+    if (!identity || identity->save_file.parent_path().string() != key->save_dir ||
+        identity->slot != key->slot || identity->persisted_capped_cycle != identity->capped_cycle) return;
+    if (!bbsc_managed_return_save_tracker.Saved()) {
+        BbNetSaveReceipt receipt{};
+        if (ReadBbscSelectedSaveReceipt(receipt) == 0 && receipt.error == 0 &&
+            receipt.bytes == 0x140000 && receipt.path[0] && receipt.sha256[0] &&
+            bbsc_managed_return_save_tracker.ObserveReceipt(
+                *key, receipt.path, receipt.generation, receipt.bytes,
+                receipt.sha256, identity->snapshot_sha256)) {
+            LOG_INFO(Debug, "BBSC managed return: ABI3 receipt matches post-restore native serialization");
+        }
+    }
+    const u64 player = GetLocalPlayerCharacter();
+    SummonPlacementDescriptor live{};
+    std::string_view placement_result;
+    if (player != 0 && GetCharacterHp(player) > 0 &&
+        ReadLocalSummonPlacement(live, placement_result)) {
+        const Destination observed{live.packed_region, live.x, live.y, live.z, live.heading, -1};
+        if (const auto expected = bbsc_managed_return_save_tracker.ExpectedDestination();
+            expected && expected->map == live.packed_region) {
+            if (const auto resolved = ResolveLampPoint(expected->lamp)) {
+                const Destination native_point{live.packed_region, resolved->position[0],
+                    resolved->position[1], resolved->position[2], resolved->rotation[1], expected->lamp};
+                bbsc_managed_return_save_tracker.ConfirmDestination(
+                    *key, observed, native_point, true, true);
+            }
+        }
+    }
+    const auto proof = bbsc_managed_return_save_tracker.ProofFor(*key, identity->snapshot_sha256);
+    if (!proof) return;
+    const auto path = BbscPartyHomePath(*key);
+    std::error_code ec;
+    auto lease = CharacterLease::Acquire(path, ec);
+    if (!lease) return;
+    auto record = LoadJournal(path, *key, ec);
+    if (!record || !ConfirmReturnedSave(*record, *proof) || !StoreJournal(*lease, *record, ec)) return;
+    bbsc_managed_return_save_tracker.Disarm();
+    LOG_INFO(Debug, "BBSC managed return: native home placement and selected-character post-restore save are confirmed; journal completed");
+}
+#endif
+
 void TickBbscOwnWorld() {
     static s64 last_ms = 0;
     static s64 recover_checked_ms = 0;
@@ -6247,7 +6578,21 @@ void TickBbscOwnWorld() {
     if (ReadValue<u8>(global, 0x08) != 0) {
         return; // loading: the load's own hooks put it back
     }
+#ifndef _WIN32
+    TickBbscManagedReturnSaveReceipt();
+    if (const auto key = ReadBbscPartyCharacterKey(); key) {
+        const auto state = InspectBbscManagedHome(*key);
+        if (state == BbscManagedHomeState::Prepared || state == BbscManagedHomeState::Pending ||
+            state == BbscManagedHomeState::Unverifiable) {
+            return; // Managed recovery owns the flags; never fall back to a slot-only sidecar.
+        }
+    }
+#endif
     if (!bbsc_own_world.empty()) {
+        if (bbsc_own_world_key) {
+            const auto key = ReadBbscPartyCharacterKey();
+            if (!key || *key != *bbsc_own_world_key) return;
+        }
         RestoreBbscOwnWorld("home");
         return;
     }
@@ -6263,8 +6608,42 @@ void TickBbscOwnWorld() {
 
 // The load home: as early as the load's respawn point / character creation, before the map's
 // events read the flags (and before shared progress merges the host's into them).
-void RestoreBbscOwnWorldAtLoad() {
+void RestoreBbscOwnWorldAtLoad(bool managed_recovery_boundary = false) {
+    if (!BbscHomeForOwnWorld()) return;
+    const auto key = ReadBbscPartyCharacterKey();
+#ifndef _WIN32
+    const auto managed_state = key ? InspectBbscManagedHome(*key) : BbscManagedHomeState::Missing;
+    if (key && managed_state == BbscManagedHomeState::Pending) {
+        if (managed_recovery_boundary) {
+            if (auto recovery = LoadBbscManagedOwnWorldRecovery(*key)) {
+                bbsc_own_world = std::move(recovery->groups);
+                bbsc_own_world_key = *key;
+                bbsc_own_world_slot.reset(); // A managed snapshot is never retired as a legacy sidecar.
+                bbsc_own_world_dirty = false;
+                LOG_WARNING(Debug, "BBSC managed recovery: restoring {} own-world flag groups before home load",
+                            bbsc_own_world.size());
+                const size_t expected_groups = bbsc_own_world.size();
+                const size_t restored = RestoreBbscOwnWorld("managed restart recovery");
+                if (expected_groups != 0 && restored == expected_groups) {
+                    bbsc_managed_return_save_tracker.Arm(*key, recovery->baseline_generation,
+                        recovery->destination, recovery->native_return_selected);
+                }
+            }
+        }
+        return; // Defer until the native respawn resolver; never apply legacy bytes over managed state.
+    }
+    if (managed_state == BbscManagedHomeState::Prepared ||
+        managed_state == BbscManagedHomeState::Unverifiable) {
+        return;
+    }
+#else
+    (void)managed_recovery_boundary;
+#endif
     if (!bbsc_own_world.empty()) {
+        if (bbsc_own_world_key && (!key || *bbsc_own_world_key != *key)) return;
+#ifndef _WIN32
+        if (!bbsc_own_world_key && managed_state == BbscManagedHomeState::Unverifiable) return;
+#endif
         RestoreBbscOwnWorld("during the home load");
     }
 }
@@ -6660,6 +7039,18 @@ std::optional<BbscTransform> ResolveLampPoint(s32 point_id) {
     return transform;
 }
 
+// Native map selector 0x01332BC0 resolves global+0x1528 through this ABI before loading a map.
+// 1.09 code at 0x013CA100 takes (out packed-map pointer, point ID) and writes -1 on failure.
+std::optional<u32> ResolveBbscRespawnPointMap(s32 point_id) {
+    if (image_base == 0 || point_id < 0) return std::nullopt;
+    u32 packed_map = 0;
+    using ResolvePointMap = u32* PS4_SYSV_ABI (*)(u32* output, s32 point_id);
+    const auto resolve = reinterpret_cast<ResolvePointMap>(image_base + 0x013CA100);
+    if (resolve(&packed_map, point_id) != &packed_map ||
+        !Core::Bbsc::Party::IsSupportedStoryMap(packed_map)) return std::nullopt;
+    return packed_map;
+}
+
 // The nearest lamp of the loaded map to `near`. A guest's own last lamp belongs to their world:
 // after following the host through the Hunter's Dream it is the Dream's lamp (point 2102961),
 // which Old Yharnam does not contain, and the respawn fell back to "beside the partner"
@@ -6723,6 +7114,114 @@ std::optional<BbscTransform> ResolveLastLampTransform() {
     }
     return transform;
 }
+
+#ifndef _WIN32
+struct BbscPreparedPartyHome {
+    Core::Bbsc::Party::Journal record;
+    Core::Bbsc::Party::CharacterLease lease;
+};
+
+std::filesystem::path BbscPartyHomePath(const Core::Bbsc::Party::CharacterKey& key) {
+    std::string id;
+    for (auto byte : key.character) id += fmt::format("{:02x}", byte);
+    return std::filesystem::path{key.save_dir} / ".bbsc-party" /
+           fmt::format("home-{}-{}.bin", key.slot, id);
+}
+
+// The caller still needs capability, backup and native admission checks before it may proceed.
+std::optional<BbscPreparedPartyHome> PrepareBbscNativePartyHome(
+    Core::Bbsc::Party::PartyId party, std::error_code& ec) {
+    using namespace Core::Bbsc::Party;
+    ec.clear();
+    const auto key = ReadBbscPartyCharacterKey();
+    SummonPlacementDescriptor origin{};
+    std::string_view reason;
+    if (!key || !bbsc_own_world_key || *bbsc_own_world_key != *key || GetSessionState() == 3 ||
+        !std::ranges::any_of(party, [](auto byte) { return byte != 0; }) ||
+        !ReadLocalSummonPlacement(origin, reason) || !IsSupportedStoryMap(origin.packed_region)) {
+        ec = std::make_error_code(std::errc::invalid_argument);
+        return std::nullopt;
+    }
+    const s32 point = ReadValue<s32>(GetGlobalState(), 0x1528);
+    const auto fallback_map = ResolveBbscRespawnPointMap(point);
+    if (!fallback_map) {
+        ec = std::make_error_code(std::errc::invalid_argument);
+        return std::nullopt;
+    }
+    const Destination home{origin.packed_region, origin.x, origin.y, origin.z, origin.heading, -1};
+    Destination lamp{*fallback_map, 0, 0, 0, 0, point};
+    if (*fallback_map == GetCurrentPackedMap()) {
+        if (const auto resolved = ResolveLampPoint(point)) {
+            lamp.x = resolved->position[0];
+            lamp.y = resolved->position[1];
+            lamp.z = resolved->position[2];
+            lamp.heading = resolved->rotation[1];
+        }
+    }
+    const auto path = BbscPartyHomePath(*key);
+    auto lease = CharacterLease::Acquire(path, ec);
+    if (!lease) return std::nullopt;
+    const auto previous = LoadJournal(path, *key, ec);
+    Journal record;
+    if (previous) {
+        if (previous->phase != Phase::Complete) {
+            ec = std::make_error_code(std::errc::operation_in_progress);
+            return std::nullopt;
+        }
+        const auto next = PrepareNextParty(*previous, party, home, lamp);
+        if (!next) {
+            ec = std::make_error_code(std::errc::invalid_argument);
+            return std::nullopt;
+        }
+        record = *next;
+    } else {
+        if (ec != std::errc::no_such_file_or_directory) return std::nullopt;
+        record.key = *key;
+        record.party = party;
+        record.origin = home;
+        record.fallback = lamp;
+    }
+    const auto payload = SerializeBbscOwnWorldSnapshot();
+    if (!payload ||
+        !StoreWorldSnapshot(*lease, *key, party, *payload, record.world_snapshot, ec)) {
+        if (!ec) ec = std::make_error_code(std::errc::no_message_available);
+        return std::nullopt;
+    }
+    if (!StoreJournal(*lease, record, ec)) return std::nullopt;
+    return BbscPreparedPartyHome{std::move(record), std::move(*lease)};
+}
+
+bool ApplyBbscPartyRecoveryJoinGuard(const GuestRegisterSnapshot& registers) {
+    if (ReadGuestAscii(registers.rsi, 64) != "JoinSession_White") return false;
+    const auto identity = ReadBbscLiveCharacterIdentity();
+    if (!identity) return false; // No managed character binding; the existing join path is unchanged.
+    const auto key = BbscPartyCharacterKey(*identity); // Lookup only; never authorizes cycle adoption.
+    const auto path = BbscPartyHomePath(key);
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(path, ec);
+    if (ec == std::errc::no_such_file_or_directory ||
+        (!ec && status.type() == std::filesystem::file_type::not_found)) return false;
+    bool blocked = true;
+    const auto persisted = !ec && std::filesystem::is_regular_file(status)
+        ? ReadBbscNativeCharacterIdentity() : std::nullopt;
+    if (persisted && persisted->capped_cycle < 7 &&
+        persisted->capped_cycle == persisted->persisted_capped_cycle &&
+        BbscPartyCharacterKey(*persisted) == key) {
+        auto lease = Core::Bbsc::Party::CharacterLease::Acquire(path, ec);
+        if (lease) {
+            const auto record = Core::Bbsc::Party::LoadJournal(path, key, ec);
+            blocked = !record || record->phase != Core::Bbsc::Party::Phase::Complete;
+        }
+    }
+    if (!blocked) return false;
+    // 01339898 branches on a null name to the native zero-return epilogue at 01339B22.
+    const_cast<GuestRegisterSnapshot&>(registers).rsi = 0;
+    LOG_WARNING(Debug, "BBSC join blocked: character recovery is pending or its journal is unreadable ({})",
+                ec ? ec.message() : "recovery not complete or character/cycle not verified");
+    return true;
+}
+
+#endif
 
 // ---- Map changes after a kept death (2026-09-25) ------------------------------------------------
 // Every map change after a kept death stalled: the host's lamp travel froze and the guest's trip
@@ -8488,6 +8987,41 @@ bool BbscOwnWorldNonGuest(u64 global) {
            ReadValue<u8>(global, 0x1592) != 0;
 }
 
+#ifndef _WIN32
+std::optional<Core::Bbsc::Party::Destination> BeginBbscManagedReturnSelection() {
+    using namespace Core::Bbsc::Party;
+    const u64 global = GetGlobalState();
+    if (!HasMemoryAccess(global + 0x1528, sizeof(s32), MemoryProt::CpuReadWrite))
+        return std::nullopt;
+    const auto key = ReadBbscPartyCharacterKey();
+    if (!key) return std::nullopt;
+    const auto path = BbscPartyHomePath(*key);
+    std::error_code ec;
+    auto lease = CharacterLease::Acquire(path, ec);
+    if (!lease) return std::nullopt;
+    auto record = LoadJournal(path, *key, ec);
+    if (!record || (record->phase != Phase::Visiting && record->phase != Phase::Returning) ||
+        record->world_snapshot.bytes == 0 || record->fallback.map == 0 ||
+        !IsSupportedStoryMap(record->fallback.map) || record->fallback.lamp < 0) return std::nullopt;
+    BbNetSaveReceipt receipt{};
+    const s32 result = ReadBbscSelectedSaveReceipt(receipt);
+    u64 generation = 0;
+    const auto expected_save = (std::filesystem::path{key->save_dir} /
+                                ("userdata000" + std::to_string(key->slot))).string();
+    if (result == 0) {
+        if (receipt.path != expected_save) return std::nullopt;
+        generation = receipt.generation;
+    } else if (result != ENOENT) {
+        return std::nullopt;
+    }
+    if (!BeginReturnSaveFence(*record, generation)) return std::nullopt;
+    record->native_return_selected = true;
+    if (!StoreJournal(*lease, *record, ec))
+        return std::nullopt;
+    return record->fallback;
+}
+#endif
+
 void GuardBbscStrayForcedWarp(const GuestRegisterSnapshot& registers) {
     const u64 global = registers.rcx; // 0x01332C14: mov rcx, [0x05556678]
     if (image_base == 0 || global != GetGlobalState() || !ReadablePointer(global, 0x1598) ||
@@ -8508,32 +9042,59 @@ void GuardBbscStrayForcedWarp(const GuestRegisterSnapshot& registers) {
     // host still fell (the position is the summon placement's, not his). Not a guest = no forced warp.
     const bool clear = BbscOwnWorldNonGuest(global);
     if (!clear && offset(caller) == 0x0138A51C &&
-        ReadValue<u8>(global, 0x1592) == 0 && GetLocalPlayerType() == 1 &&
-        bbsc_return_origin.has_value() && bbsc_return_origin->global == global) {
-        const auto& home = bbsc_return_origin->placement;
-        const u32 home_map = home.packed_region;
-        const std::array<float, 4> position{home.x, home.y, home.z, 1.0f};
-        const std::array<float, 4> rotation{0.0f, home.heading, 0.0f, 0.0f};
-        const auto finite = [](const auto& values) {
-            return std::ranges::all_of(values, [](float value) { return std::isfinite(value); });
-        };
-        // The engine rewrites the sign block during joining too (p73142 trace). Restore both
-        // the selector's forced block and the later own-world restore source from our copy.
-        if (Core::Bbsc::Party::IsSupportedStoryMap(home_map) && finite(position) && finite(rotation) &&
-            HasMemoryAccess(global + 0x14A0, 0x80, MemoryProt::CpuReadWrite)) {
-            WriteValue(global, 0x14A0, position);
-            WriteValue(global, 0x14B0, rotation);
-            WriteValue(global, 0x14C0, home_map);
-            WriteValue(global, 0x1500, position);
-            WriteValue(global, 0x1510, rotation);
-            WriteValue(global, 0x14F0, home_map);
-            LOG_INFO(Debug, "BBSC native return: forced map {:#x} -> own map {:#x} at "
-                            "({:.2f}, {:.2f}, {:.2f}), heading {:.3f}",
-                     forced_map, home_map, position[0], position[1], position[2], rotation[1]);
-            forced_map = home_map;
-        } else {
-            LOG_WARNING(Debug, "BBSC native return: home placement invalid or not writable; "
-                               "native selector unchanged");
+        ReadValue<u8>(global, 0x1592) == 0 && GetLocalPlayerType() == 1) {
+#ifndef _WIN32
+        const bool can_select_native_point =
+            HasMemoryAccess(global + 0x1528, sizeof(s32), MemoryProt::CpuReadWrite);
+        const auto managed_home = can_select_native_point
+                                      ? BeginBbscManagedReturnSelection()
+                                      : std::optional<Core::Bbsc::Party::Destination>{};
+        const bool managed_blocks_legacy = BbscManagedHomeBlocksLegacyReturn();
+#else
+        const std::optional<Core::Bbsc::Party::Destination> managed_home;
+        const bool can_select_native_point = false;
+        const bool managed_blocks_legacy = false;
+#endif
+        if (managed_home && !can_select_native_point) {
+            LOG_WARNING(Debug, "BBSC managed return: native respawn point field is not writable; "
+                               "selection token withheld");
+        }
+        if (managed_home && can_select_native_point) {
+            WriteValue<s32>(global, 0x1528, managed_home->lamp);
+            WriteValue<u8>(global, 0x1520, 0); // native last-lamp branch resolves its own map/placement
+            forced_map = managed_home->map;
+            LOG_INFO(Debug, "BBSC managed return: selected captured native respawn point {} for map {:#x}; "
+                            "native selector resolves its placement",
+                     managed_home->lamp, managed_home->map);
+        } else if (!managed_blocks_legacy && bbsc_return_origin &&
+                   bbsc_return_origin->global == global) {
+            const auto& home = bbsc_return_origin->placement;
+            const u32 home_map = home.packed_region;
+            const std::array<float, 4> position{home.x, home.y, home.z, 1.0f};
+            const std::array<float, 4> rotation{0.0f, home.heading, 0.0f, 0.0f};
+            const auto finite = [](const auto& values) {
+                return std::ranges::all_of(values, [](float value) { return std::isfinite(value); });
+            };
+            // Legacy sessions retain their existing process-local native placement correction.
+            if (Core::Bbsc::Party::IsSupportedStoryMap(home_map) && finite(position) && finite(rotation) &&
+                HasMemoryAccess(global + 0x14A0, 0x80, MemoryProt::CpuReadWrite)) {
+                WriteValue(global, 0x14A0, position);
+                WriteValue(global, 0x14B0, rotation);
+                WriteValue(global, 0x14C0, home_map);
+                WriteValue(global, 0x1500, position);
+                WriteValue(global, 0x1510, rotation);
+                WriteValue(global, 0x14F0, home_map);
+                LOG_INFO(Debug, "BBSC native return: legacy forced map {:#x} -> own map {:#x} at "
+                                "({:.2f}, {:.2f}, {:.2f}), heading {:.3f}",
+                         forced_map, home_map, position[0], position[1], position[2], rotation[1]);
+                forced_map = home_map;
+            } else {
+                LOG_WARNING(Debug, "BBSC native return: home placement invalid or not writable; "
+                                   "native selector unchanged");
+            }
+        } else if (managed_blocks_legacy) {
+            LOG_WARNING(Debug, "BBSC managed return: pending journal blocks legacy raw-coordinate fallback; "
+                               "native return destination not changed");
         }
     }
     if (clear) {
@@ -9949,6 +10510,11 @@ s64 bbsc_progress_home_ms = 0;  // home and settled since
 bool bbsc_progress_merged_at_load = false; // merged during the trip home (checked once settled)
 bool bbsc_progress_backed_up = false;      // saves backed up for this trip home
 
+template <size_t N>
+void ForEachProgressFlag(const std::array<u32, N>& list, auto&& fn) {
+    for (const u32 flag : list) fn(flag);
+}
+
 // OR the collected host progress into the live flag table (own world). Returns the boss flags and
 // world flags it newly set, or {-1, 0} when there was nothing to merge. Keeps what it merged, so a
 // second call only reports what did not stick. Game thread.
@@ -9994,13 +10560,6 @@ std::pair<s64, size_t> MergeBbscSharedProgress(std::string_view when) {
              "{} the host has), {} world flag(s) newly set in {} group(s); saves backed up first: {}",
              when, bosses, flags.size(), bits, group_count, bbsc_progress_backed_up);
     return {bosses, bits};
-}
-
-template <size_t N>
-void ForEachProgressFlag(const std::array<u32, N>& list, auto&& fn) {
-    for (const u32 flag : list) {
-        fn(flag);
-    }
 }
 
 // Host: tell the guests which boss flags we have on.
@@ -14058,6 +14617,9 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
 
     const auto& site = Sites[tag];
     if (site.kind == TraceKind::SaveLifecycle) {
+#ifndef _WIN32
+        ObserveBbscManagedReturnSerialization(site.offset, *registers);
+#endif
         TraceBbscNativeSaveEvidence(site.offset, *registers);
         return;
     }
@@ -14100,7 +14662,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         ApplyBbscGuestLootViewAtLoad();
     }
     if (site.offset == 0x01938F65) { // Warp.RespawnPoint.Resolve: a load picks its spawn point
-        RestoreBbscOwnWorldAtLoad();
+        RestoreBbscOwnWorldAtLoad(true); // managed restart snapshots bind here, before map events run
         ApplyBbscSharedProgressAtLoad();
     }
     if (site.offset == 0x01332C1B) { // SummonedPlacement.SelectMap: a load picks its map
@@ -14211,7 +14773,20 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         // Only session-relevant Lua events; the dispatcher also runs gameplay events.
         const std::string name = ReadGuestAscii(registers->rsi, 64);
         if (name == "JoinSession_White") {
+#ifndef _WIN32
+            if (ApplyBbscPartyRecoveryJoinGuard(*registers)) {
+                BbscAnnounce(u"Co-op blocked: finish character recovery first.", "pending recovery");
+                return;
+            }
+#endif
             CaptureBbscNativeReturnOrigin(); // before sampling: every join needs its own origin
+            if (GetSessionState() != 3) {
+                CaptureBbscOwnWorldBeforeJoin(); // The native join load resets item flags.
+                StartBbscLoadCover("summon");
+            }
+        }
+        if (name == "OnLeaveMagic" || name == "OnLeaveMenu_Yes") {
+            BbscLeaveItemUsed(name);
         }
         static constexpr std::array<std::string_view, 8> Interesting{
             "Session", "Kick", "Room", "Match", "Multiplay", "Summon", "Reload", "Leave"};
@@ -14781,7 +15356,8 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
 bool VerifySites() {
     const auto image_size = MemoryPatcher::g_eboot_image_size;
     for (const auto& site : Sites) {
-        if (site.kind == TraceKind::SaveLifecycle && !BbscSaveIdentityTraceEnabled()) continue;
+        if (site.kind == TraceKind::SaveLifecycle && !BbscSaveIdentityTraceEnabled() &&
+            !IsBbscPostRestoreSaveSite(site.offset)) continue;
         if ((summon_build_host_placement_hook_installed && site.offset == SummonBuildEntryOffset) ||
             (cross_map_guest_handoff_hook_installed && site.offset == CrossMapGuestHandoffOffset) ||
             (summon_reload_state_hook_installed &&
@@ -14833,6 +15409,95 @@ bool BbscConnectFirstPlacementFresh() {
 }
 
 } // namespace
+
+void OnBbscPartyRoomState(BbscPartyRoom room) {
+    std::scoped_lock lock{bbsc_party_inbox_mutex};
+    if (bbsc_party_room && bbsc_party_room->context != room.context) return;
+    bool valid = room.context > 0 && room.room != 0 && room.members.size() <= BbscMaxGuests &&
+                 Core::Bbsc::Party::ValidPeer({room.owner, 1});
+    for (size_t i = 0; i < room.members.size() && valid; ++i) {
+        valid = Core::Bbsc::Party::ValidPeer({room.members[i], 1});
+        for (size_t j = 0; j < i; ++j) valid = valid && room.members[i] != room.members[j];
+    }
+    const bool owner_listed = std::ranges::find(room.members, room.owner) != room.members.end();
+    valid = valid && (room.is_host ? !owner_listed : owner_listed);
+    if (!valid) {
+        bbsc_party_room.reset();
+        bbsc_party_expected_peers.clear();
+        bbsc_party_inbox.clear();
+        return;
+    }
+    if (!bbsc_party_room || bbsc_party_room->room != room.room ||
+        bbsc_party_room->owner != room.owner || bbsc_party_room->is_host != room.is_host) {
+        bbsc_party_expected_peers.clear();
+        bbsc_party_inbox.clear();
+    } else {
+        std::erase_if(bbsc_party_expected_peers, [&](const auto& peer) {
+            return std::ranges::find(room.members, peer.online_id) == room.members.end();
+        });
+        std::erase_if(bbsc_party_inbox, [](const auto& packet) {
+            return std::ranges::find(bbsc_party_expected_peers, packet.peer) == bbsc_party_expected_peers.end();
+        });
+    }
+    bbsc_party_room = std::move(room);
+}
+
+std::optional<BbscPartyRoom> GetBbscPartyRoomState() {
+    std::scoped_lock lock{bbsc_party_inbox_mutex};
+    return bbsc_party_room;
+}
+
+bool SetBbscPartyPeers(std::span<const Core::Bbsc::Party::Peer> peers) {
+    bool valid = peers.size() <= BbscMaxGuests;
+    for (size_t i = 0; i < peers.size() && valid; ++i) {
+        valid = Core::Bbsc::Party::ValidPeer(peers[i]);
+        for (size_t j = 0; j < i; ++j)
+            valid = valid && peers[i].connection != peers[j].connection &&
+                    peers[i].online_id != peers[j].online_id;
+    }
+    std::scoped_lock lock{bbsc_party_inbox_mutex};
+    valid = valid && (peers.empty() || bbsc_party_room.has_value());
+    if (bbsc_party_room) {
+        for (const auto& peer : peers) {
+            valid = valid && std::ranges::find(bbsc_party_room->members, peer.online_id) !=
+                             bbsc_party_room->members.end() &&
+                    (bbsc_party_room->is_host || peer.online_id == bbsc_party_room->owner);
+        }
+    }
+    if (!valid) {
+        bbsc_party_expected_peers.clear();
+        bbsc_party_inbox.clear();
+        return false;
+    }
+    bbsc_party_expected_peers.assign(peers.begin(), peers.end());
+    std::erase_if(bbsc_party_inbox, [](const auto& queued) {
+        return std::ranges::find(bbsc_party_expected_peers, queued.peer) == bbsc_party_expected_peers.end();
+    });
+    return true;
+}
+
+void OnBbscPartyPacket(const Core::Bbsc::Party::Peer& peer, const void* packet, std::uint32_t size) {
+    if (!packet || !Core::Bbsc::Party::ValidPeer(peer)) return;
+    auto message = Core::Bbsc::Party::DecodeMessage({static_cast<const u8*>(packet), size});
+    if (!message) return;
+    std::scoped_lock lock{bbsc_party_inbox_mutex};
+    if (std::ranges::find(bbsc_party_expected_peers, peer) == bbsc_party_expected_peers.end()) return;
+    size_t count = 0;
+    for (const auto& queued : bbsc_party_inbox) {
+        if (queued.peer != peer) continue;
+        if (queued.message == *message) return;
+        ++count;
+    }
+    if (count >= BbscPartyInboxPerPeer) return; // Sender retains unacknowledged packets for retry.
+    bbsc_party_inbox.push_back({peer, std::move(*message)});
+}
+
+std::vector<BbscPartyPacket> TakeBbscPartyPackets() {
+    std::scoped_lock lock{bbsc_party_inbox_mutex};
+    std::vector<BbscPartyPacket> pending;
+    pending.swap(bbsc_party_inbox);
+    return pending;
+}
 
 void OnBbscHostBossPacket(std::int32_t boss) {
     bbsc_host_boss_id = boss;
@@ -15790,7 +16455,8 @@ void InstallReverseEngineeringTrace() {
     size_t hook_count = 0, expected_count = 0;
     for (size_t index = 0; index < Sites.size(); ++index) {
         const auto& site = Sites[index];
-        if (site.kind == TraceKind::SaveLifecycle && !BbscSaveIdentityTraceEnabled()) continue;
+        if (site.kind == TraceKind::SaveLifecycle && !BbscSaveIdentityTraceEnabled() &&
+            !IsBbscPostRestoreSaveSite(site.offset)) continue;
         ++expected_count;
         if ((summon_build_host_placement_hook_installed && site.offset == SummonBuildEntryOffset) ||
             (cross_map_guest_handoff_hook_installed && site.offset == CrossMapGuestHandoffOffset) ||

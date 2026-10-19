@@ -1715,3 +1715,427 @@ targets are up to date and `git diff --check` passes. The earlier full native
 build and this live snapshot trial remain applicable to the unchanged production
 sources. Local save/log/image artifacts are ignored; the existing FSR submodule
 working edits are not part of this checkpoint commit.
+
+
+### ABI3 committed-copy receipts (2026-10-19 16:15 +07)
+
+The runtime now binds canonical path, process-local generation, byte count and
+full SHA256 to one successful committed temporary copy. It opens the actual
+copy read-only, checks its inode against the closing writer, streams it through
+the existing OpenSSL EVP implementation and checks the byte count. The receipt
+mutex covers hashing, rename, directory durability and publication; queries
+cannot observe a partly published tuple. This is historical copy evidence,
+not a claim that a later externally edited file still contains those bytes.
+
+A close/durability failure or hash failure clears bytes/hash and retains the
+previous generation with an error. A hash diagnostic failure still allows the
+normal atomic game save to complete. Generations advance only with successful
+hash and durable close. The receipt struct grew, so BBNET_ABI_VERSION is3;
+actual loader tests reject ABI1/2 before reading their callback fields. Runtime
+and module must be rebuilt together. build.sh links libcrypto, already supplied
+by the project's OpenSSL dependency and bbport-dev; no packages were installed.
+
+TDD: the real file-operation fixture first failed the expected new hash/length
+assertion (exit134, receipt-hash-red.log), then passed. Independent hashlib golden
+values cover a three-byte save and a100003-byte streamed payload. Tests exercise
+interrupted reads, lock ownership at rename, a later external edit retaining the
+historical receipt, hash-read failure without losing the game save, a subsequent
+successful new generation, and all existing file/directory flush, rename, write,
+mount/remap and unwritten-close failures. The actual dlopen host callback returns
+the expected four-byte SHA256/length; the selected-slot adapter forwards both.
+
+Verification in bbport-dev:
+- BB_PGO=off BB_LTO=OFF bash build.sh --test: PASS, including actual runtime loader.
+- Rebuilt final native module/fixtures after the diagnostic log-format change;
+  all six native suites PASS, including the real RX9060XT dma-buf test and actual
+  HTTP worker. Final logs: receipt-hash-native-build.log / native-suite.log.
+- guest --check: four endpoints reachable, relay frames verified both ways;
+  current executable/module dependencies pass, no game started.
+- git diff --check: PASS. Pre-existing FSR submodule changes were preserved.
+
+The receipt trace preserves its original path prefix and appends
+`[bytes <n>, sha256 <hex>]`. Existing accepted identity/provenance captures remain
+valid. New live checkpoint uses the same copied guest BBSCTrace: move/wait for
+saves, quit to title, wait for saving, close normally. Compare positive ABI3
+receipt hashes with native successful serialize/copy pairs and successful closes;
+check the final file separately if further saves followed a receipt. Verify other
+slots against native-snapshot-correlated. No join, recreation, ending or server
+image update is needed. The user runs gameplay; no live ABI3 result is claimed.
+Actual NG transition/7→7 replay evidence is unavailable. CharacterKey, durable
+recovery, admission and earned-event consumers remain incomplete/off.
+
+
+### Live ABI3 generation/hash correlation accepted (2026-10-19 16:23 +07)
+
+The user completed the existing copied guest BBSCTrace checkpoint. Under the
+profile lock, bbport-dev validation verified every prior archived save/raw hash
+before checking and archiving this new capture as native-receipt-correlated.
+Raw log SHA256:
+`54477f526e06deb5053f94bbf9b8f674d33a5295364300bac6ec710fc303440e`.
+
+Deserialize seq0 equals the prior accepted final userdata0001 hash
+`a5d00c3bcdb3a3a6dc5a223586487dd067d4205d19a321cedd08d5bd7446aa68`.
+Three successful own-world native serialize/copy pairs retain slot1,
+ServerUserId4127, ServerChrId2723151752040083 and capped count0:
+
+| Serialize/copy seq | Full snapshot SHA256 | Successful commit line |
+| --- | --- | --- |
+| 3/4 | c67d3bc342570756b880fce38d802de9ae5314e7ebba153c86451cb07dcad04e | 1231 |
+| 7/8 | 269a8e27e0dcd48843d10d579b14c88e9d09af20ca0dc3197d493a5337f20840 | 1392 |
+| 11/12 | ef99a2dd63b6670e887c3793462bcd90e0d8d4170f635bf1eee03f596e71cade | 1808 |
+
+At raw line1453, ABI3 query0/generation2/error0 reports the exact canonical guest
+userdata0001 path,1310720 bytes and the second pair's SHA256. Native file identity
+at line1454 independently reports that same second hash. This confirms the new
+receipt binding in gameplay; it does not relabel the later third save as
+generation2. The final userdata0001 equals the third pair's hash. Current and
+backup native IDs/count agree. All nine other character userdata files remain
+byte-identical to the prior accepted snapshot, including BBSCProbe slot0.
+
+The process closes normally, with no failed character commit, clear, reserve or
+cycle entry observed. The same six pre-existing RE hook installation failures
+match the prior capture exactly; this is not an all-hooks-pass claim. Full saves,
+raw bytes, filtered evidence and a provenance/hash manifest are archived without
+overwriting previous captures. The completed identity/snapshot/ABI3 receipt
+checks need no repeat. Actual NG transition and interrupted/replayed7→7 remain
+unverified; the saturated field is still evidence only. No recovery, admission
+or event consumer was enabled, and no original saves were written by the agent.
+
+
+### Native increment applied seam (2026-10-19 16:38 +07)
+
+Three additional SaveLifecycle observers remain under the existing identity-trace
+opt-in. Sites0131D2A8 and01334C05 are after the final clamp/store, with seven
+absolute instruction bytes `488b00483b45f8`. Site017C045A is the shared event
+handler epilogue, with eight absolute bytes `498b4500483b45d0`. The existing
+provider verifies and replays each whole-instruction span without relocation.
+
+Engine/Lua observations require the retained previous count0..7, incremented
+register=previous+1, final register=min(previous+1,7), root+68 pointer and matching
+live memory. Lua's guarded skip reaches01334C05 too; it fails these checks. The
+native01334C03 store was deliberately excluded because its five-byte span would
+cover01334C05, a separate guard branch target. The event epilogue additionally
+requires the original command21 descriptor at task+ B0, its successful r14b,
+root+68 pointer, previous/incremented/final registers and matching memory. Other
+commands and invalid pointers cannot create an applied observation. Logs append
+previous count and stage `cycle-increment-applied`/success1. This denotes an
+observed native store, never a successful save or durable cycle identity.
+
+TDD real adapter: missing post-store evidence first failed the new assertion
+(exit134, cycle-applied-red.log), then passed. Fixtures cover0→1,6→7,7→7,
+wrong registers, skipped guard, other event commands, bad pointers and changed
+memory; observers leave fixture memory unchanged. A separate replay fixture
+executes the actual captured arithmetic through the production
+bbport_guest_code_hooks.cpp and common/decoder.cpp provider, rather than a hook
+stub. All three patched spans install and execute correctly; the skipped Lua
+path enters the patched epilogue but produces no applied evidence. The frame
+setup/guard/return are test scaffolding, not the original whole game function.
+This does not simulate an ending, native save, interruption or process restart.
+
+Source provenance: initial inspection mistakenly compared the decoded ELF with
+the original SELF hash and stopped before extracting bytes. Corrected validation
+reads the original eboot.bin, verifies SELF SHA256
+`d65f0b4f01d59166aed16f8604196d8b7dd805abbf0758b356e8f1354c9429f9`,
+reuses scripts/prepare.py:parse_self and checks the decoded bytes equal the cached
+ELF. Decoded ELF SHA256 is
+`cec1b276e7f9e4db978e57f524f41fbaac594530a3437b002e23f3fab14b4f86`.
+All three new hook signatures match. Captured engine0131D280..2A8 and
+Lua01334BDD..4C05 arithmetic bytes are identical. Source proof and extracted bytes
+are retained in cycle-applied-sites.json/log. No game files were modified.
+
+Further read-only inspection of root+6C confirms direct assignments1/2/3 at
+0193FEC5/0193FEDB/0193FEF0, selected by nearby bit checks21/22/23. These writes
+provide no support for an uncapped monotonic cycle counter; its full semantics
+remain unclaimed. Do not reinterpret the serializer's opaque second word as an
+exact cycle. Runtime Windows target also now explicitly finds/links
+OpenSSL::Crypto, required by the ABI3 receipt code; Windows build/runtime remains
+unverified. No package or server-image change is implied.
+
+Verification: bbport-dev full `BB_PGO=off BB_LTO=OFF bash build.sh --test`
+PASS; the final six native suites PASS (including actual RX9060XT dma-buf,
+13 join-adapter checks and real HTTP worker). Whitespace check PASS. Logs:
+cycle-applied-full-build.log, cycle-applied-native-build.log/native-suite.log,
+cycle-applied-replay-build.log/replay.log. No Python production changes; no
+redundant Python-suite rerun. No game launched, save edited or new manual
+checkpoint requested. Actual ending/restart remains unverified and recovery
+consumers remain off. No fresh whole-branch review or Windows build is claimed.
+
+
+### Task5 party message codec, routing still disabled (2026-10-19 16:48 +07)
+
+Read Task5 brief before work. The included SHAD signaling sender, receiver,
+Matching2 classifier and BBR1 relay paths were checked before reserving0x28.
+ClassifyInternal routes only0x21 to Matching2 and0x10 to Control; other signaling
+payloads already use the signaling queue. BBR1 forwards opaque frame payloads.
+No packet-type conflict was found; no relay/classifier change is needed for the
+codec. Existing0x22 presentation snapshots and0x26 legacy progress packets are
+rejected by this decoder rather than converted to new events.
+
+Wire definitions live beside np_signaling_bbsc.h; the policy header shares the
+kind enum instead of mirroring numeric values. Layout, little endian:
+magic4/type1/version1/kind1/reserved-zero1/party16/admission8/sequence8/chunk2/
+chunks2/event-count2, followed by4-byte IDs. The header is46 bytes. Packets are
+bounded at1024 bytes;244 IDs occupy1022 bytes. Baseline chunk indices/counts are
+bounded to5 chunks for the1024-event storage envelope; aggregate/catalog checks
+belong to the admission consumer. Events require a positive sequence and nonempty
+list; controls have no event payload or chunking. An empty single-chunk baseline
+is valid. All messages require nonzero party/admission, nonzero unique event IDs,
+supported kind/version/type and exact lengths. No untrusted struct-layout casts
+or allocations based on an unchecked event count are used.
+
+TDD real party target: after correcting a range-loop copy warning under-Werror,
+the stub codec fails the independent50-byte golden packet assertion at line60
+(exit134, party-codec-red.log). Implemented codec passes golden encode/decode,
+all truncated prefixes, extra bytes, oversize input/counts, reserved/version/type/
+kind corruption, zero identity/admission/events, duplicate events, control payload
+rejection, baseline chunk bounds and the244/245-ID limit. Maximum u64 counters
+and u32 ID round-trip without truncation. Policy, return and real journal tests
+also pass. This is framing validation only: positive IDs are not proof of release
+catalog membership or of events earned after admission.
+
+Final bbport-dev verification: rebuilt bbnet and all six native suites PASS,
+including codec/journal and actual increment-hook replay. Actual ABI3 dlopen save
+callback, rejected-module behavior and online-import/trophy isolation PASS.
+Logs: party-codec-native-build.log/native-suite.log/online-suite.log. No new Python
+production changes; no redundant Python-suite rerun. git diff --check PASS.
+
+Task5 is not complete: no new send/receive branch, peer selection, admission
+state machine, retransmission or durable Ack consumer is enabled. No party packet
+or new event/reward was emitted, and no private server/image change or gameplay
+checkpoint was requested. Cycle-store/save/restart binding, native admission and
+recovery remain open. These tests do not replace the real two-player acceptance
+matrix or Windows validation.
+
+
+## 2026-10-19 — Ordered admission, peer routing and durable intent delivery
+
+User prioritizes feature implementation toward Linux/Windows pre-release before
+broad gameplay validation. No new gameplay checkpoint was requested in this batch.
+
+Implemented `Admission` with host account plus connection binding, party/admission
+identity, ordered Hello/Ready/baseline/Ack setup, independently chunked late-guest
+baselines, bounded reordered event delivery and departure cutoff. Old baseline
+events do not become earned events. Four guest admissions are tested independently.
+`Delivery` retains baseline and event packets for retry until peer-bound cumulative
+Ack; rejects duplicate, stale and future acknowledgements. Caller retry cadence and
+actual native first-playable boundary remain integration work.
+
+The actual signaling helper routes type0x28 only to the selected established peer;
+source address/port resolves uniquely to that account/connection before queueing.
+Unknown/inactive/ambiguous peers and malformed messages are rejected. Matching2
+publishes owned copies of room owner and membership after create/join, membership
+changes, leave, kick and context teardown. Game-thread inbox selection is restricted
+to that room; a guest accepts only its actual owner. Room/owner changes purge stale
+selection/messages. The receive callback copies and deduplicates bounded messages;
+it performs no game-memory mutation. Native initial arrival also waits for the
+actual host character rather than selecting another living guest as a fallback.
+This last adjustment is built/fixture-checked, not newly gameplay-confirmed.
+
+`PersistEarnedEvents` merges earned intent into the real atomic journal and returns
+Ack only after successful StoreJournal. Flush failure returns no Ack and leaves the
+caller's record unchanged; retry is idempotent even if rename already installed the
+candidate. This is intent durability, not native inventory/save completion.
+
+Ruling: a single current-party pending list could relabel an unfinished claim when
+the next party began. Journal version2 retains event/party/admission/commit status
+for earlier claims, carries them from Complete to a new Prepared record, and permits
+binding the new host identity after origin capture. Earlier proof cannot be erased,
+retargeted, duplicated or moved from committed back to pending. Version1 decodes
+without retained claims and upgrades on successful write; corrupt/unknown records
+are preserved and rejected. Maximum1024 total distinct claims and65536 bytes remain.
+
+Focused bbport-dev results: bbnet module build PASS; bbsc-party-test,
+bbsc-party-transport-test and bbsc-join-test PASS. Coverage includes actual helper
+routing and actual Core inbox/snapshot callbacks, reordered/late admission,
+retry retirement, journal fsync faults, successive-party provenance, v1 upgrade,
+malformed retained status/admission and monotonic commit. Initial retained-claim
+check build failed at the missing PrepareNextParty linker symbol before its
+implementation; that is not a behavioral RED test. Earlier admission, delivery,
+inbox and durable-Ack behavioral failures and subsequent passes are retained in
+party-*-red/green logs. Final logs: party-retained-build.log,
+party-retained-checks.log and party-retained-final-{build,checks}.log.
+
+Task5 remains partial: the native coordinator does not consume this new inbox or
+emit the new party protocol yet. No new event grant, production journal or private
+server mutation was performed. Restart recovery, fallback validation, native save
+fence, managed cycle binding, complete boss/story/item catalog and Windows journal
+implementation remain release work. No Linux AppImage or Windows EXE from this
+batch is claimed feature-complete, and no fresh whole-branch review is claimed.
+
+
+## 2026-10-19 — Native home capture and pending-recovery join rejection
+
+Task6 started for its independent home/admission seam while Task5's native protocol
+coordinator remains partial. The identity adapter now constructs a CharacterKey
+from the canonical selected save folder, native ServerUserId/ServerChrId encoded
+as16 deterministic little-endian bytes, slot and saved/live cycle0..6. Capped7 or a
+counter mismatch cannot authorize a journal capture. The live identity lookup is
+separate from persisted snapshot validation; a damaged/missing userdata file must
+not hide an existing recovery record from the join guard. Lookup alone never
+adopts a cycle or applies a journal.
+
+`PrepareBbscNativePartyHome` captures actual local placement and the current own-world
+native respawn point resolved by0154AFC0 before load, writes them through the existing
+atomic journal writer and returns its held character lease. Files live beside the
+selected userdata in `.bbsc-party/home-<slot>-<native-ids>.bin`; the filename excludes
+cycle so an unresolved earlier journey cannot be silently bypassed. Invalid/foreign
+cycle records are preserved. Pending recovery cannot be replaced by a new origin;
+Complete records may start another party while retaining earned provenance.
+This stores destinations only: finite original coordinates are not collision proof,
+and a resolved native respawn point is not a separately proven unlocked-lamp catalog.
+The complete admission caller must additionally establish own-world snapshot durability,
+backup, capability and safe fallback policy. It is not yet enabled for normal joins.
+
+Verified reject-capable seam: cached1.09 ELF SHA256
+`cec1b276e7f9e4db978e57f524f41fbaac594530a3437b002e23f3fab14b4f86`.
+The Lua dispatcher entry01339870 moves RSI(name) into R12 and tests it at01339898.
+A null name jumps to01339B22, returns EAX0 and runs the native canary/stack cleanup
+without event dispatch. The new Linux guard checks only JoinSession_White: an
+existing pending, locked, symlinked, malformed or unverifiable managed record sets
+RSI0 in the provider's register snapshot, and the caller displays a recovery notice.
+The actual provider restores that modified RSI. Existing absent-record joins and
+unrelated Lua names/character IDs remain unaffected. Files native-lua-join-entry
+and native-lua-null-return retain extracted bytes/disassembly. Initial objdump of
+PS4-typed ELF was rejected by the tool; file-backed PT_LOAD extraction followed by
+binary x86-64 disassembly succeeded. No unsupported offsets were substituted.
+
+A small executable predicate fixture through the actual hook provider verifies
+rejection suppresses the action and returns0; Complete permits the action after
+lease release. It does not execute the complete game's Lua handler body. Native
+home fixtures call the real capture adapter, actual journal/lease/fsync and a native
+respawn resolver ABI adapter. RED key assertion, RED home capture, RED pending gate
+and RED damaged-userdata bypass are recorded, then focused GREEN results. Tests
+cover saved/live identity binding, deleted-slot replacement, capped7 rejection,
+origin/fallback round trip, held lease, pending origin preservation, complete record,
+corrupt/symlink journal, invalid userdata, unrelated character and counter mismatch.
+
+Found runtime work inside sampled diagnostic formatting: own-world pre-join capture,
+load curtain and Blank leave handling were called only by WriteLuaSessionEvent.
+Moved those existing calls to TraceEntry's unsampled Lua handling, after the pending
+recovery guard and before trace filtering. Formatting now observes rather than
+initiating those operations. The move is compiled and inspected; no gameplay run
+or complete-TraceEntry executable fixture is claimed.
+
+bbport-dev final module plus join/party/transport builds and all three suites PASS
+in party-home-final-{build,checks}.log. Earlier red/green artifacts use party-home-*
+(including party-home-key-red and party-home-invalid-save-red). No agent game launch,
+original save write, production managed journal, server/image change, commit, push
+or package in this batch. Full first-playable protocol, managed cycles, own-world
+snapshot durability, restart warp/save confirmation and Windows journal remain open.
+No new manual checkpoint is required to continue independent implementation.
+
+### Identity-bound prepared own-world snapshot adapter (2026-10-19)
+
+The prepared-home journal now references a separately stored, immutable own-world
+payload. The existing map-group capture is bound in memory to the verified native
+`CharacterKey`; legacy slot-only files intentionally have no such binding and cannot
+be adopted by this adapter. `PrepareBbscNativePartyHome` serializes the captured map
+groups with a 2 MiB limit, writes a party-specific `BBWS` envelope containing the
+full character key and party, fsyncs the temporary file, atomically renames it and
+flushes its directory. Journal version3 records the payload byte count and CRC32;
+the writer refuses to persist that reference unless the exact snapshot validates.
+The adapter returns no prepared home when the capture is missing, belongs to another
+character, exceeds the bound or cannot be durably written. Snapshot files are
+immutable per party ID; retries with identical content are idempotent, and changed
+content for the same ID is rejected.
+
+Focused regressions pass for correct native identity/party binding, wrong-character
+and wrong-party reads, truncation and reference mismatch, same-party overwrite,
+missing referenced data, write failure preservation, existing unresolved-journal
+preservation and all preexisting native join/journal behavior. Built `bbnet`,
+`bbsc-join-test` and `bbsc-party-test` in `bbport-dev`; both focused executables pass.
+This is still an adapter slice: normal joins do not call the prepared-home adapter,
+and the new payload is not yet loaded by restart recovery. Backup/capability gates,
+recovery restore/warp/save confirmation, native admission coordination, managed
+cycle transition handling and the Windows journal remain incomplete. CRC32 detects
+accidental damage and binds content to the journal reference; this is not a
+cryptographic authenticity check.
+
+### 2026-10-19 — Managed own-world recovery at the native home-load boundary
+
+The managed payload now enters the existing game-thread own-world restore path at
+the verified native respawn-point resolver hook `0x01938F65`. The earlier generic
+load hook remains a defer-only boundary for managed records. A pending `Visiting`
+or `Returning` journal restores only when the selected live and persisted native
+identity still matches its `CharacterKey`, the game is back in its own world, the
+payload envelope/reference/CRC and map groups validate, and every target group has
+live storage in a ready flag manager. The restore reuses the existing group merge
+rules. It leaves the managed journal and snapshot unchanged because native save
+confirmation is not yet connected.
+
+`Prepared`, `Complete`, corrupt/unverifiable records, foreign selected characters,
+host-world state, truncated snapshots, missing storage, and malformed flag managers
+do not enter managed restoration. The 15-second legacy sidecar fallback is held
+while the current identity has a prepared, pending or unverifiable managed record;
+identity-bound in-memory recovery is also rejected if the selected key changes.
+Legacy slot-only bytes remain unbound and are never imported into the managed
+payload.
+
+Focused `bbsc-join-test` fixture coverage checks empty/not-ready capture rejection,
+the `Prepared` and host-world phase/world guards, defer to the native resolver,
+correct character restore, foreign identity rejection, truncated-payload and
+missing/malformed-manager preservation, and the journal/payload remaining intact
+after restore. The focused `bbnet bbsc-join-test` build and join fixture pass in
+`bbport-dev`; logs are `managed-home-recovery-{build,checks}.log` under the ignored
+`.superpowers/sdd/2026-10-18-bbsc-anywhere-coop/` directory.
+
+This connects only restart load recovery. It does not enable normal-join admission,
+offline loading/warp, a completion transition or native-save confirmation. Pending
+recovery can consequently be reapplied on later verified home loads until a future
+save-confirmation implementation safely retires it. CRC32 remains accidental-damage
+detection, not cryptographic authenticity.
+
+### Win32 prepared-home persistence adapter (2026-10-19)
+
+The native journal and own-world snapshot storage no longer unconditionally use
+POSIX file APIs. The `_WIN32` path uses an exclusive, reparse-point-checked lock
+handle for the character lease; bounded reads open the reparse point itself and
+reject directories/reparse entries; writes use a unique same-directory temporary,
+`FlushFileBuffers`, and `MoveFileExW(MOVEFILE_WRITE_THROUGH)` for publication.
+Immutable snapshot publication omits `MOVEFILE_REPLACE_EXISTING`, so a raced
+same-party writer cannot replace the first payload. Snapshot path suffixes use the
+native wide path representation. POSIX retains `flock`, `fsync`, and atomic rename;
+immutable snapshot publication now uses same-directory `link` to refuse replacement.
+
+The Linux `bbport-dev` build of `bbnet`, `bbsc-party-test`, and `bbsc-join-test`
+passes, as do the party journal/protocol and native join fixtures. Logs are
+`windows-journal-linux-build.log`, `windows-journal-party-checks.log`, and
+`windows-journal-join-checks.log`. This environment has no MinGW or clang cross
+compiler, so this is source-level portability work only: no Windows compile,
+filesystem/runtime test, or EXE/package validation is claimed. Windows ACL,
+sharing-violation, crash-durability and replacement behavior still require a real
+Windows build and focused runtime fault tests. This adapter does not enable normal
+join capture, admission, event application, offline warp or journal retirement.
+
+### 2026-10-19 — Return destination/save fence v4 checkpoint
+
+Prepared-home journal v4 persists a monotone `native_return_selected` marker. The
+guest send-home caller selects the saved native respawn-point ID through the verified
+last-lamp branch; the native point-to-map resolver supplies an off-map target's map.
+An off-map destination's zero XYZ fields are unresolved metadata, never warp input.
+The older raw `native-selector-1.09.txt` artifact was disassembled with the wrong ELF
+mapping and is non-authoritative; `root-native-selector.{bin,txt}` uses corrected
+PT_LOAD extraction. Legacy raw process-local origin coordinates remain restricted to
+records without managed pending/unverifiable state and do not authorize managed return.
+
+The production return tracker accepts SerializeBegin only after a durable selection
+marker and exact post-load destination confirmation. It resolves the recorded native
+point after its map loads, compares live position, and requires own-world/player-ready
+state. First destination confirmation invalidates any earlier in-flight hash/receipt.
+Only a successful later SerializeEnd hash matching a newer ABI3 selected-file receipt
+can complete the Returning journal. Failed or unresolved checks preserve it.
+
+Focused party unit coverage passes for correct/foreign key, native point/map/position,
+world/player readiness, pre-destination rejection, generation/hash/path matching and
+completion proof. The native join fixture exercises durable v4 marker reload and
+fail-closed destination mismatch: despite a newer receipt it retains Returning and its
+snapshot. A matching synthetic destination is covered by the tracker unit fixture; a
+successful production native resolver return has not been demonstrated by this fixture
+or gameplay. `bbnet`, party/join/transport targets and their focused executables pass
+inside `bbport-dev`; logs are `checkpoint-v4-final-{build,party,join,transport}.log`.
+
+This checkpoint still does not establish a full return coordinator: destination
+selection/confirmation and receipt handling are wired, but restart/offline module
+activation and return warp/retry behavior are unfinished. Normal-join admission,
+capability/backup policy, event catalog/application, exact NG7 isolation, Windows
+compile/runtime and broad gameplay remain open; no package was built.

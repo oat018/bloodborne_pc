@@ -5,8 +5,16 @@
 static int fail_save_flush; /* 1: file, 2: directory */
 static int failed_write_fd=-1;
 static int fail_save_rename;
+static int check_receipt_commit_lock,fail_hash_read,interrupt_hash_read;
+ssize_t read(int fd,void *buffer,size_t size) {
+    if (interrupt_hash_read) { interrupt_hash_read=0; errno=EINTR; return -1; }
+    if (fail_hash_read) { errno=EIO; return -1; }
+    return syscall(SYS_read,fd,buffer,size);
+}
 static int interrupted_fd=-1,interrupted_kind;
 int rename(const char *from,const char *to) {
+    if (check_receipt_commit_lock && strstr(from,".bbtmp"))
+        assert(pthread_mutex_trylock(&receipt_lock)==EBUSY);
     if (fail_save_rename && strstr(from,".bbtmp")) { errno=EACCES; return -1; }
     return syscall(SYS_rename,from,to);
 }
@@ -48,6 +56,8 @@ static void check_atomic_save_failures(const char *root) {
     assert(runtime_file_save_receipt(path,&before)==ENOENT);
     assert(do_write(fd,"old",3)==3 && !do_close(fd));
     assert(!runtime_file_save_receipt(path,&before) && before.generation>0 && !before.error);
+    assert(before.bytes==3 && !strcmp(before.sha256,
+        "cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4"));
     assert(!runtime_file_save_receipt("/savedata0/userdata0000",&after));
     assert(after.generation==before.generation && !strcmp(after.path,before.path));
     for (int failure=1;failure<=2;++failure) {
@@ -58,6 +68,7 @@ static void check_atomic_save_failures(const char *root) {
         fail_save_flush=0;
         assert(result==-EIO); /* a directory flush must not be reported as a committed save */
         assert(!runtime_file_save_receipt(path,&after));
+        assert(!after.bytes && !after.sha256[0]);
         assert(after.generation==before.generation && after.error==EIO);
         fd=(int)do_open("/savedata0/userdata0000",0,0); assert(fd>=3);
         char content[4]={0}; assert(do_read(fd,content,3)==3 && !do_close(fd));
@@ -70,6 +81,7 @@ static void check_atomic_save_failures(const char *root) {
         failed_write_fd=-1;
         assert(do_close(fd)==-ENOSPC);
         assert(!runtime_file_save_receipt(path,&after));
+        assert(!after.bytes && !after.sha256[0]);
         assert(after.generation==before.generation && after.error==ENOSPC);
         fd=(int)do_open("/savedata0/userdata0000",0,0); assert(fd>=3);
         char content[4]={0}; assert(do_read(fd,content,3)==3 && !do_close(fd));
@@ -90,6 +102,7 @@ static void check_atomic_save_failures(const char *root) {
         assert(do_close(fd)==-expected);
         fail_save_rename=0;
         assert(!runtime_file_save_receipt(path,&after));
+        assert(!after.bytes && !after.sha256[0]);
         assert(after.generation==before.generation && after.error==expected);
         fd=(int)do_open("/savedata0/userdata0000",0,0); assert(fd>=3);
         char content[4]={0}; assert(do_read(fd,content,3)==3 && !do_close(fd));
@@ -174,6 +187,47 @@ static void check_save_receipts(const char *root) {
     assert(!rmdir(first) && !rmdir(second));
     puts("PASS: save receipts survive unmount, isolate remapped roots/slots/users, exclude non-save closes");
 }
+static void check_bound_receipt(const char *root) {
+    char folder[1024],path[1100];
+    snprintf(folder,sizeof(folder),"%s/receipt-bound",root);
+    snprintf(path,sizeof(path),"%s/userdata0001",folder);
+    assert(!mkdir(folder,0755) && !runtime_file_mount("/savedata0",folder));
+    unsigned char payload[100003];
+    for (size_t i=0;i<sizeof(payload);++i) payload[i]=(unsigned char)i;
+    int fd=(int)do_open("/savedata0/userdata0001",0x602,0600); assert(fd>=3);
+    assert(do_write(fd,payload,sizeof(payload))==sizeof(payload));
+    interrupt_hash_read=1;
+    check_receipt_commit_lock=1;
+    assert(!do_close(fd) && !interrupt_hash_read);
+    check_receipt_commit_lock=0;
+    BbNetSaveReceipt first={0},next={0};
+    assert(!runtime_file_save_receipt(path,&first) && !first.error);
+    assert(first.bytes==sizeof(payload) && !strcmp(first.sha256,
+        "cec3a8fe244db4929c2213d28d360391c86c847e5083efa2000597fb8671dc74"));
+    /* A later host edit must not be silently relabelled with the old generation. */
+    int host=open(path,O_WRONLY|O_TRUNC); assert(host>=0);
+    assert(write(host,"other",5)==5 && !close(host));
+    assert(!runtime_file_save_receipt(path,&next));
+    assert(next.generation==first.generation && !strcmp(next.sha256,first.sha256));
+    fd=(int)do_open("/savedata0/userdata0001",0x602,0600); assert(fd>=3);
+    assert(do_write(fd,"new",3)==3);
+    fail_hash_read=1;
+    assert(!do_close(fd)); // Diagnostic failure cannot prevent the game's save.
+    fail_hash_read=0;
+    assert(!runtime_file_save_receipt(path,&next));
+    assert(next.generation==first.generation && next.error==EIO && !next.bytes && !next.sha256[0]);
+    fd=(int)do_open("/savedata0/userdata0001",0,0); assert(fd>=3);
+    char content[4]={0}; assert(do_read(fd,content,3)==3 && !do_close(fd));
+    assert(!strcmp(content,"new"));
+    fd=(int)do_open("/savedata0/userdata0001",0x602,0600); assert(fd>=3);
+    assert(do_write(fd,"new",3)==3 && !do_close(fd));
+    assert(!runtime_file_save_receipt(path,&next));
+    assert(next.generation>first.generation && !next.error && next.bytes==3 &&
+        !strcmp(next.sha256,"11507a0e2f5e69d5dfa40a62a1bd7b6ee57e6bcd85c67c9b8431b36fff21c437"));
+    runtime_file_unmount("/savedata0");
+    assert(!unlink(path) && !rmdir(folder));
+    puts("PASS: receipts bind durable generations to exact copy hashes and invalidate failed hash proof");
+}
 static void check_first_save_failure(const char *root) {
     char folder[1024],path[1100];
     snprintf(folder,sizeof(folder),"%s/receipt-first",root);
@@ -233,6 +287,7 @@ int main(void) {
     runtime_file_configure(game,user);
     check_atomic_save_failures(root);
     check_save_receipts(root);
+    check_bound_receipt(root);
     check_first_save_failure(root);
     check_interrupted_save(root);
     for (int i=0;i<3;++i) {
