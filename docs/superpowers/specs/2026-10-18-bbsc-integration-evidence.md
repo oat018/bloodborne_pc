@@ -1,4 +1,51 @@
-# BBSC integration evidence and checkpoint 1
+# BBSC integration evidence and checkpoints
+
+## Current checkpoint summary (2026-10-19)
+
+Implementation checkpoint `45e4d022b33244045bf2b881a00e07b068899f84` is on
+branch `pre`. It includes the source, tests and three updated tracked documents
+(`docs/BBSC.md`, the implementation plan and this evidence document). It does not
+mean the full anywhere-co-op feature is complete. Earlier sections below preserve
+chronological observations; this summary and the final v4 section supersede their
+older statements about missing restore/save consumers.
+
+- Implemented: ABI3 committed-copy receipts; ordered, peer-bound protocol and
+  durable-intent policy; selected-character identity/home snapshot adapters;
+  managed own-world restore hooks; journal v4 native-point selection and
+  post-destination SerializeBegin/End/hash/receipt completion fence.
+- Still disconnected or unfinished: normal-join preparation/admission/capability
+  and backup policy, live protocol/event consumer coordination, complete offline
+  recovery loading/warp/retry, explicit safe boss/story/item catalog/application,
+  exact managed NG7 cycle isolation, and Windows target integration/verification.
+- Win32 journal APIs exist in source, but `gpu/bbnet/CMakeLists.txt` still includes
+  the journal in `bbnet` only inside `if (NOT WIN32)`. The source adapter is not
+  proof of Windows linkage, compilation or working recovery.
+- Focused `bbport-dev` module build, party, join and transport checks passed.
+  The native join fixture confirms destination mismatch preserves recovery;
+  successful exact-point return is covered only by the pure tracker unit fixture.
+  No new gameplay run, Windows build or AppImage/EXE packaging was performed.
+
+Raw logs, copied saves, disassembly and `progress.md` under
+`.superpowers/sdd/2026-10-18-bbsc-anywhere-coop/` are intentionally gitignored and
+remain local. They were not pushed; game/save binaries must not be added to Git.
+The tracked source, focused tests and this summary carry the portable checkpoint.
+The local final logs are `checkpoint-v4-final-{build,party,join,transport}.log`;
+the module link is recorded in `checkpoint-v4-build.log` and the final incremental
+build recompiles the corrected join fixture. To rerun in `bbport-dev`:
+
+```sh
+ninja -C out/gpu bbnet bbsc-party-test bbsc-join-test bbsc-party-transport-test
+out/gpu/bbsc-party-test
+out/gpu/bbsc-join-test
+out/gpu/bbsc-party-transport-test
+```
+
+These commands require the existing configured build/dependencies; they are not
+a clean-machine or full gameplay acceptance result. The next session stops before
+packaging. The pre-existing dirty `gpu/third_party/fsr-vulkan` working tree is
+excluded from the checkpoint commit and must be preserved.
+
+## Historical checkpoint 1
 
 Date: 2026-10-18. Execution method: Native.
 

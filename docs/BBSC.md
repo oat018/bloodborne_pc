@@ -6,6 +6,15 @@ hunters. It is written for shadp2p (a shadPS4 fork); the port carries it in its 
 
 ## Development checkpoint: 2026-10-19
 
+**Current status:** This is a saved implementation checkpoint, not a feature-complete
+pre-release. The party transport, identity-bound snapshot storage, managed restore
+hooks and post-destination native-save fence are implemented in source. Normal joins
+do not create managed home records, and the protocol's admission/event consumers are
+not activated. Offline restart loading/warp, the explicit event/item catalog and exact
+NG7 cycle isolation remain unfinished. The latest return-fence details are below.
+The next development session must stop before AppImage/EXE packaging unless the user
+requests otherwise. The subsequent push request pauses development at this checkpoint.
+
 Native cross-map co-op has been confirmed with the BBSC Kit on the configured
 private servers: one join load, original Parting Blank menu/animation, host and
 guest departure, and return to the guest's captured pre-join position during the
@@ -84,14 +93,17 @@ failure path. Own-world capture and Blank leave handling run before trace sampli
 The normal join path does not yet create these new home records: durable own-world
 snapshot/capability checks and the recovery coordinator must be connected first.
 The game-thread coordinator still needs to connect these components to first-playable
-admission, event capture, recovery and the native save fence. No new event rewards are enabled yet.
+admission, event capture and complete recovery. A managed return save fence is now
+connected, as described below. No new event rewards are enabled yet.
 
 Development now prioritizes completing the pre-release feature paths before the
 broad gameplay matrix. Keep focused compilation, journal durability, wrong-peer
 and duplicate-reward checks; defer repeated manual checkpoints and long sessions.
-Linux AppImage and Windows EXE packaging follow the runtime integration. Windows
-journal I/O still needs a native implementation: the current POSIX journal is
-excluded from the Windows target. Neither package is feature-complete today.
+Linux AppImage and Windows EXE packaging are deferred. Windows journal I/O has a
+guarded Win32 source implementation, but CMake still adds the journal source only
+under `NOT WIN32`; the native managed adapters also retain platform guards. Windows
+target integration, compilation and runtime validation remain unfinished. Neither
+package is feature-complete today.
 See the [plan](superpowers/plans/2026-10-18-bbsc-anywhere-coop.md),
 [design](superpowers/specs/2026-10-18-bbsc-anywhere-coop-design.md) and
 [evidence](superpowers/specs/2026-10-18-bbsc-integration-evidence.md).

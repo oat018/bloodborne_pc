@@ -4,6 +4,24 @@
 
 **Goal:** Let password-matched friends join across story maps or the Dream, earn only new shared progress, and return safely to their own world after leaving or restarting.
 
+**Current handoff (2026-10-19; supersedes historical status below):** Development
+is paused at the user's requested checkpoint on branch `pre`. Do not package
+AppImage/EXE. On resumption, complete the agreed source features first and stop
+immediately before packaging. Implemented source includes ABI3 save receipts,
+ordered/targeted party protocol foundations, native character-bound home snapshots,
+managed restore hooks and the journal-v4 post-destination save fence. Normal joins
+do not create managed records; admission/event consumers are not enabled. Resume
+with native admission/capability/backup binding, offline module loading and return
+warp/retry, explicit event/item catalog and application, exact managed NG cycle
+isolation, then Windows integration. Win32 journal APIs exist in source, but its
+CMake source inclusion remains under `NOT WIN32`; no Windows build is verified.
+Focused Linux module/party/join/transport checks passed. Exact-point return success
+is unit-tested only; the native join fixture checks mismatch refusal, not a complete
+successful native return. See the current summary in the evidence document.
+
+Earlier dated paragraphs and unchecked plan steps are historical design/progress,
+not an authoritative statement that every integration seam remains unchanged.
+
 **Release priority (user, 2026-10-19):** Complete the requested feature paths first,
 then produce Linux AppImage and Windows EXE pre-releases with explicit untested
 areas. Continue implementation without repeated gameplay checkpoint pauses. Keep
