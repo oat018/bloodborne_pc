@@ -22,8 +22,9 @@ commit generation and close error, including after the native save mount is
 removed. These are file facts, not a stable character ID or proof of newly earned
 progress. Runtime and online module must be rebuilt together.
 
-The party policy and durable journal code remain foundations. Stable character
-incarnation, uncapped cycle identity, durable restart/disconnect recovery, safe
+The party policy and durable journal code remain foundations. Runtime integration
+of the verified native character discriminator, uncapped cycle identity, durable
+restart/disconnect recovery, safe
 lamp fallback, admission gates and the joined-event/reward catalog are unfinished.
 The legacy `SHADPS4_BBSC_SHARED_PROGRESS` whole-group merge remains present;
 controlled checkpoints explicitly set it to0. The requested event-only sync is
@@ -32,6 +33,28 @@ not enabled. Do not treat this checkpoint as the completed anywhere-co-op featur
 Build and automated checks use distrobox `bbport-dev`. Gameplay uses copied
 profiles and is run by the user. The verified create/load/delete/reuse sequence
 needs no repeat; resume with the identity binding and remaining integration gates.
+Further native inspection identifies persisted `ServerUserId`/`ServerChrId` and
+the game's character-ID allocation request. The repository gameserver now issues
+durably reserved IDs instead of an empty list; local server tests pass. The user
+has installed the new Unraid image and its private allocation endpoint now returns
+a positive ID. The first native BBSCTrace load now persists a positive ID in its
+current and backup saves, and the same ID survives a new game process. Normal
+deletion/recreation in the same slot now produces a distinct positive ID while
+preserving the other character. These controlled identity checks pass.
+The live reader also matches the native IDs and canonical selected file before
+the first character save of a new process. Cycle binding and restart recovery
+remain unfinished. Preserve the server's `<--data path>.characters.sqlite3` on
+persistent storage.
+The opt-in native identity trace also reports the saved capped NG count beside
+the live value. A mismatch is diagnostic evidence; matching values, particularly
+7, do not establish a committed new cycle or permit restart recovery.
+The same diagnostic now records full snapshot SHA256 at native load, completed
+serialization and copy input, and at the selected saved file. Three opt-in
+pre-increment observers identify potential NG transitions without changing the
+count. ABI2 receipt semantics are unchanged.
+The copied-character provenance trial now confirms three native serialize/copy
+hash matches and a final saved file matching the last snapshot. An atomic
+generation/hash receipt and real NG transition evidence are still missing.
 See the [plan](superpowers/plans/2026-10-18-bbsc-anywhere-coop.md),
 [design](superpowers/specs/2026-10-18-bbsc-anywhere-coop-design.md) and
 [evidence](superpowers/specs/2026-10-18-bbsc-integration-evidence.md).

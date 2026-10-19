@@ -1,0 +1,2 @@
+FROM localhost/bbsc-gameserver:0.6-pre1
+COPY bbsc_gameserver.py /opt/bbsc-gameserver/bbsc_gameserver.py

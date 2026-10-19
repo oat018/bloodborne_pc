@@ -330,10 +330,256 @@ static void TestNativeSaveEvidence() {
     regs.rsp = reinterpret_cast<u64>(frame.data());
     evidence = ReadBbscNativeSaveEvidence(NativeSaveSerializeEndOffset, regs);
     assert(evidence && evidence->success == 1 && evidence->buffer == frame[5]);
+    const u64 data = reinterpret_cast<u64>(buffer.data());
+    WriteValue<u32>(data, 0, 0x41);
+    WriteValue<u32>(data, 0x14, 0x54);
+    WriteValue<u32>(data, 0x18, 0x200);
+    WriteValue<u64>(data, 0x244, 4127);
+    WriteValue<u64>(data, 0x24C, 2723151752040083ULL);
+    WriteValue<u32>(data, 0x2C, 0x254);
+    WriteValue<u32>(data, 0x30, 8);
+    WriteValue<s32>(data, 0x254, 7);
+    const auto buffer_before = buffer;
+    evidence = ReadBbscNativeSaveEvidence(NativeSaveSerializeEndOffset, regs);
+    assert(evidence && evidence->snapshot && evidence->snapshot->capped_cycle == 7);
+    assert(!evidence->own_world); // Cached guest snapshot is still labelled as visiting.
+    const auto serialized_hash = evidence->snapshot->sha256;
+    regs.rcx = 2;
+    evidence = ReadBbscNativeSaveEvidence(NativeSaveCopyOffset, regs);
+    assert(evidence && evidence->slot == 2 && evidence->snapshot->sha256 == serialized_hash);
+    buffer.back() = 1;
+    evidence = ReadBbscNativeSaveEvidence(NativeSaveCopyOffset, regs);
+    assert(evidence->snapshot->sha256 != serialized_hash); // Changed copy input cannot match old output.
+    buffer = buffer_before;
+    regs.rdi = state;
+    regs.rsi = data;
+    regs.rdx = buffer.size();
+    evidence = ReadBbscNativeSaveEvidence(NativeSaveLoadOffset, regs);
+    assert(evidence && evidence->snapshot->sha256 == serialized_hash);
+    evidence = ReadBbscNativeSaveEvidence(NativeSaveSerializeOffset, regs);
+    assert(evidence && !evidence->snapshot); // Output bytes at begin are not a completed snapshot.
+    regs.rbx = 0;
+    evidence = ReadBbscNativeSaveEvidence(NativeSaveSerializeEndOffset, regs);
+    assert(evidence && !evidence->snapshot); // Failure cannot inherit previous successful output.
+    regs.rbx = 1;
+    assert(buffer == buffer_before);
     WriteValue<s32>(state, 0x1490, 10);
     assert(!ReadBbscNativeSaveEvidence(NativeSaveSerializeEndOffset, regs));
     image_base = 0;
     std::puts("PASS: read-only native save lifecycle decodes slots/buffers and rejects invalid evidence");
+}
+
+static void TestNativeCycleIncrementEvidence() {
+    using namespace Core::Bloodborne;
+    std::vector<u8> image(0x05600000);
+    std::array<u8, 0x1800> global{};
+    std::array<u8, 0x90> slots{};
+    const u64 state = reinterpret_cast<u64>(global.data());
+    const u64 manager = reinterpret_cast<u64>(slots.data());
+    image_base = reinterpret_cast<u64>(image.data());
+    MemoryPatcher::g_eboot_image_size = image.size();
+    WriteValue<u64>(image_base, GlobalStatePointerOffset, state);
+    WriteValue<u64>(image_base, PlayerSlotManagerPointerOffset, manager);
+    WriteValue<s32>(state, 0x1490, 1);
+    WriteValue<u8>(state, 0x1592, 1);
+    Core::GuestRegisterSnapshot regs{};
+    for (const u64 offset : {u64{0x0131D260}, u64{0x01334BB0}, u64{0x017C0FD2}}) {
+        for (s32 cycle : {0, 6, 7}) {
+            WriteValue<s32>(manager, 0x68, cycle);
+            const auto before = slots;
+            const auto evidence = ReadBbscNativeSaveEvidence(offset, regs);
+            assert(evidence && evidence->stage == "cycle-increment-entry" &&
+                   evidence->slot == 1 && evidence->own_world && evidence->live_capped_cycle == cycle);
+            assert(evidence->success == -1 && !evidence->snapshot && evidence->buffer == 0);
+            assert(slots == before); // The observer never executes or confirms the increment.
+        }
+        const auto site = std::find_if(Sites.begin(), Sites.end(),
+                                      [=](const TraceSite& value) { return value.offset == offset; });
+        assert(site != Sites.end() && site->kind == TraceKind::SaveLifecycle);
+        for (s32 invalid : {-1, 8}) {
+            WriteValue<s32>(manager, 0x68, invalid);
+            assert(!ReadBbscNativeSaveEvidence(offset, regs));
+        }
+        WriteValue<s32>(manager, 0x68, 7);
+        WriteValue<u8>(state, 0x1592, 0);
+        assert(!ReadBbscNativeSaveEvidence(offset, regs)->own_world);
+        WriteValue<u8>(state, 0x1592, 1);
+    }
+    WriteValue<u64>(image_base, PlayerSlotManagerPointerOffset, 0);
+    assert(!ReadBbscNativeSaveEvidence(0x017C0FD2, regs));
+    image_base = 0;
+    MemoryPatcher::g_eboot_image_size = 0;
+    std::puts("PASS: all three NG increment observers retain pre-increment count without mutations");
+}
+
+static void TestSerializedSnapshot() {
+    using namespace Core::Bloodborne;
+    std::vector<u8> bytes(0x140000);
+    bytes.reserve(bytes.size() + 1);
+    const u64 data = reinterpret_cast<u64>(bytes.data());
+    WriteValue<u32>(data, 0, 0x41);
+    WriteValue<u32>(data, 0x14, 0x54);
+    WriteValue<u32>(data, 0x18, 0x200);
+    WriteValue<u64>(data, 0x244, 4127);
+    WriteValue<u64>(data, 0x24C, 2723151752040083ULL);
+    WriteValue<u32>(data, 0x2C, 0x254);
+    WriteValue<u32>(data, 0x30, 8);
+    const auto baseline = bytes;
+    const auto snapshot = ReadBbscSerializedSnapshot(bytes);
+    assert(snapshot && snapshot->server_user == 4127 &&
+           snapshot->server_character == 2723151752040083ULL && snapshot->capped_cycle == 0);
+    assert(snapshot->sha256 == "784549a4d1d963aff045cb64b9a38ceaf0b358993310b8dad3d61fb131cbc390");
+    bytes.back() = 1; // Same IDs/count, different snapshot: timestamps cannot establish provenance.
+    const auto newer = ReadBbscSerializedSnapshot(bytes);
+    assert(newer && newer->sha256 != snapshot->sha256);
+    bytes = baseline;
+    assert(ReadBbscSerializedSnapshot(bytes)->sha256 == snapshot->sha256);
+    assert(bytes == baseline); // Reading never stamps the native snapshot.
+    for (const size_t size : {size_t{0}, size_t{0x54}, size_t{0x13FFFF}})
+        assert(!ReadBbscSerializedSnapshot(std::span<const u8>{bytes.data(), size}));
+    bytes.push_back(0);
+    assert(!ReadBbscSerializedSnapshot(bytes));
+    bytes.pop_back();
+    for (const auto [offset, value] : std::array<std::pair<u32, u32>, 11>{
+             {{0, 0x42}, {0x14, 0x50}, {0x18, 15}, {0x18, 0xFFFFFFFF},
+              {0x2C, 0x24C}, {0x2C, 0xFFFFFFFF}, {0x30, 4}, {0x30, 0xFFFFFFFF},
+              {0x254, 0xFFFFFFFF}, {0x254, 8}, {0x244, 0}}}) {
+        const auto original = ReadValue<u32>(data, offset);
+        WriteValue<u32>(data, offset, value);
+        assert(!ReadBbscSerializedSnapshot(bytes));
+        WriteValue<u32>(data, offset, original);
+    }
+    for (const u64 invalid : {0ULL, 0x8000000000000000ULL, 9007199254740992ULL}) {
+        WriteValue<u64>(data, 0x24C, invalid);
+        assert(!ReadBbscSerializedSnapshot(bytes));
+    }
+    bytes = baseline;
+    WriteValue<u32>(data, 0x254, 7);
+    WriteValue<u32>(data, 0x258, 0xDEADBEEF);
+    assert(ReadBbscSerializedSnapshot(bytes)->capped_cycle == 7);
+    std::puts("PASS: serialized native snapshot validates identity/cycle bounds and hashes all bytes");
+}
+
+static void TestNativeCharacterIdentity() {
+    using namespace Core::Bloodborne;
+    namespace fs = std::filesystem;
+    char temporary[] = "/tmp/bbsc-native-identity-XXXXXX";
+    assert(mkdtemp(temporary));
+    const fs::path folder{temporary}, file = folder / "userdata0001";
+    const char* configured = std::getenv("BBSC_SAVE_DIR");
+    const std::optional<std::string> previous_dir = configured
+        ? std::optional<std::string>{configured} : std::nullopt;
+    setenv("BBSC_SAVE_DIR", folder.c_str(), 1);
+    std::vector<u8> image(0x05600000), bytes(0x140000);
+    std::array<u8, 0x1800> global{};
+    std::array<u8, 0x90> slots{};
+    std::array<u8, 0x698> local{};
+    const auto address = [](auto& data) { return reinterpret_cast<u64>(data.data()); };
+    image_base = address(image);
+    MemoryPatcher::g_eboot_image_size = image.size();
+    WriteValue<u64>(image_base, GlobalStatePointerOffset, address(global));
+    WriteValue<u64>(image_base, PlayerSlotManagerPointerOffset, address(slots));
+    WriteValue<u64>(address(slots), 8, address(local));
+    WriteValue<s32>(address(global), 0x1490, 1);
+    WriteValue<u8>(address(global), 0x1592, 1);
+    WriteValue<u64>(address(local), 0x688, 4127);
+    WriteValue<u64>(address(local), 0x690, 2723151752040083ULL);
+    WriteValue<u32>(address(bytes), 0, 0x41);
+    WriteValue<u32>(address(bytes), 0x14, 0x54);
+    WriteValue<u32>(address(bytes), 0x18, 0x200);
+    WriteValue<u64>(address(bytes), 0x244, 4127);
+    WriteValue<u64>(address(bytes), 0x24C, 2723151752040083ULL);
+    WriteValue<u32>(address(bytes), 0x2C, 0x254);
+    WriteValue<u32>(address(bytes), 0x30, 8);
+    const auto save = [&] {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        out.close();
+        fs::last_write_time(file, bbsc_run_started - std::chrono::hours(24));
+    };
+    save();
+    const auto baseline = local;
+    auto identity = ReadBbscNativeCharacterIdentity();
+    assert(identity && identity->slot == 1 && identity->server_user == 4127);
+    assert(identity->server_character == 2723151752040083ULL);
+    assert(identity->save_file == fs::canonical(file) && identity->capped_cycle == 0);
+    assert(identity->persisted_capped_cycle == 0);
+    assert(identity->snapshot_sha256 ==
+           "784549a4d1d963aff045cb64b9a38ceaf0b358993310b8dad3d61fb131cbc390");
+    assert(local == baseline); // Reading identity never repairs or stamps a save.
+    WriteValue<s32>(address(slots), 0x68, 7);
+    assert(ReadBbscNativeCharacterIdentity()->capped_cycle == 7); // evidence, not an uncapped key
+    assert(ReadBbscNativeCharacterIdentity()->persisted_capped_cycle == 0);
+    WriteValue<s32>(address(bytes), 0x254, 7);
+    WriteValue<u32>(address(bytes), 0x258, 0xDEADBEEF); // adjacent serialized field is not a cycle
+    save();
+    assert(ReadBbscNativeCharacterIdentity()->persisted_capped_cycle == 7);
+    for (s32 persisted_cycle : {-1, 8}) {
+        WriteValue<s32>(address(bytes), 0x254, persisted_cycle);
+        save();
+        assert(!ReadBbscNativeCharacterIdentity());
+    }
+    WriteValue<s32>(address(bytes), 0x254, 0);
+    save();
+    for (s32 cycle : {-1, 8}) {
+        WriteValue<s32>(address(slots), 0x68, cycle);
+        assert(!ReadBbscNativeCharacterIdentity());
+    }
+    WriteValue<s32>(address(slots), 0x68, 0);
+    for (u64 id : {0ULL, 0x8000000000000000ULL, 9007199254740992ULL}) {
+        WriteValue<u64>(address(local), 0x690, id);
+        assert(!ReadBbscNativeCharacterIdentity());
+    }
+    WriteValue<u64>(address(local), 0x690, 2723151752040083ULL);
+    for (u64 user : {0ULL, 0x8000000000000000ULL}) {
+        WriteValue<u64>(address(local), 0x688, user);
+        assert(!ReadBbscNativeCharacterIdentity());
+    }
+    WriteValue<u64>(address(local), 0x688, 4127);
+    WriteValue<s32>(address(local), 0xA4, 1);
+    assert(!ReadBbscNativeCharacterIdentity());
+    WriteValue<s32>(address(local), 0xA4, 0);
+    for (s32 slot : {-1, 0, 10}) {
+        WriteValue<s32>(address(global), 0x1490, slot);
+        assert(!ReadBbscNativeCharacterIdentity());
+    }
+    WriteValue<s32>(address(global), 0x1490, 1);
+    WriteValue<u8>(address(global), 8, 1);
+    assert(!ReadBbscNativeCharacterIdentity());
+    WriteValue<u8>(address(global), 8, 0);
+    WriteValue<u8>(address(global), 0x1592, 0);
+    assert(!ReadBbscNativeCharacterIdentity());
+    WriteValue<u8>(address(global), 0x1592, 1);
+    WriteValue<u64>(address(slots), 8, 0);
+    assert(!ReadBbscNativeCharacterIdentity());
+    WriteValue<u64>(address(slots), 8, address(local));
+    for (const auto [offset, value] : std::array<std::pair<u32, u32>, 11>{
+             {{0, 0x42}, {0x14, 0x50}, {0x18, 15}, {0x18, 0xFFFFFFFF}, {0x24C, 123},
+              {0x2C, 0x50}, {0x2C, 0x24C}, {0x2C, 0x13FFF9}, {0x2C, 0xFFFFFFFF},
+              {0x30, 4}, {0x30, 0xFFFFFFFF}}}) {
+        const auto original = ReadValue<u32>(address(bytes), offset);
+        WriteValue<u32>(address(bytes), offset, value);
+        save();
+        assert(!ReadBbscNativeCharacterIdentity());
+        WriteValue<u32>(address(bytes), offset, original);
+    }
+    save();
+    fs::resize_file(file, 0x100);
+    assert(!ReadBbscNativeCharacterIdentity());
+    save();
+    fs::rename(file, folder / "userdata0000");
+    assert(!ReadBbscNativeCharacterIdentity()); // another slot is never a fallback
+    fs::create_symlink(folder / "userdata0000", file);
+    assert(!ReadBbscNativeCharacterIdentity());
+    fs::remove(file);
+    fs::rename(folder / "userdata0000", file);
+    unsetenv("BBSC_SAVE_DIR");
+    assert(!ReadBbscNativeCharacterIdentity());
+    if (previous_dir) setenv("BBSC_SAVE_DIR", previous_dir->c_str(), 1);
+    image_base = 0;
+    MemoryPatcher::g_eboot_image_size = 0;
+    fs::remove_all(folder);
+    std::puts("PASS: native identity matches selected persisted slot without mtime; invalid/foreign evidence rejects");
 }
 
 static void TestIdentityEvidenceBounds() {
@@ -525,8 +771,11 @@ int main() {
     std::puts("PASS: cross-map prepare survives empty ACK, expires without refresh, same-map clears");
     TestNativeReturn();
     TestIdentityEvidenceBounds();
+    TestSerializedSnapshot();
+    TestNativeCharacterIdentity();
     TestSelectedSaveSlot();
     TestNativeSaveEvidence();
+    TestNativeCycleIncrementEvidence();
     TestSingleNativeJoinLoad();
     TestPartingBlankRow();
 }

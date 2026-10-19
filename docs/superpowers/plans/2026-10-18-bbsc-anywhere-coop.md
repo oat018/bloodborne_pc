@@ -19,14 +19,73 @@ hashes are recorded in the evidence document. Do not repeat these observations.
 Runtime ABI2 save receipts are implemented and live-confirmed across ephemeral
 mounts; they are filesystem facts, not native snapshot or incarnation proof.
 
-**Resume here:** Resolve stable per-character incarnation and uncapped cycle
-binding before enabling the durable journal or event/reward consumers. A deleted
+**Resume here:** Native character ID allocation, reload stability and same-slot
+replacement distinction now pass. Integrate that discriminator with the verified
+selected character/save path and resolve uncapped cycle binding before enabling
+the durable journal or event/reward consumers. A deleted
 slot retains its previous userdata payload; path, slot, name, timestamps or the
 mere presence of that file are insufficient. Tasks1 and4 remain partial; the
 policy/journal foundations do not complete admission, recovery, native safety
 fallback, broker capability binding or full boss/story reward coverage. The
 legacy whole-group merge stays disabled in controlled checkpoint launches.
 The opt-in save lifecycle hooks are read-only and do not create identity tokens.
+
+Verified native identity source: local-data+688/+690 are labelled ServerUserId /
+ServerChrId; the game requests CharaIdNum=1 and persists the returned PublishCharaId.
+The repository gameserver's empty-list stub is replaced with durable SQLite-backed
+allocation (see evidence). Local route/storage/HTTP/container checks pass. The user
+installed image0.6-pre1-native-id1 on Unraid with persistent/data storage, and the
+private allocation endpoint returns a positive ID. The exact previous test profile
+was backed up as native-id-before with BBSCTrace slot1 holding ID0. The first
+allocation trial is accepted as native-id-allocated: native slot1 load, own-world
+serialization/copy/commit/receipt, positive ID in current and backup, normal close,
+and unchanged slot0. The next process reload is accepted as native-id-reloaded,
+retaining the exact positive ID with successful commits and unchanged slot0.
+The replacement trial is accepted as native-id-reused: clear1, metadata commit,
+reserve1, successful native save and a different positive ID; BBSCProbe slot0 is
+unchanged. Preserve all accepted snapshots; these three identity trials need no
+repeat. Next resolve runtime key/cycle binding rather than guessing another UUID.
+Do not repeat the already-verified deletion observer experiment. Existing nonzero
+unset sentinels may bypass native allocation; do not silently clear or adopt them.
+The native module now correlates selected-slot memory IDs with the canonical
+BBSC_SAVE_DIR userdata file in the opt-in ready-own-world trace, without mtime
+selection. Native invalid/foreign/corrupt evidence tests and the full build/runtime,
+six native suites and131 Python tests pass. The live reader observation now passes
+as native-id-correlated: exact slot1 native IDs and canonical selected file match
+before the first current-process character commit; later save/receipt succeeds
+and slot0 stays unchanged. Do not repeat this reader/allocation/reuse experiment.
+Next resolve the uncapped-cycle transition/save contract before connecting the
+complete CharacterKey and offline recovery coordinator. No CharacterKey/recovery consumer is
+enabled, and the capped NG count is still evidence only.
+
+NG research resolves bank2003/command21 to the inlined increment in017C0420,
+alongside the Lua export and0131D260; all clamp at7. All27 original EMEVD files
+were checked: m21 events12100000/index43,12100002/index35 and12100180/index14
+contain the three matches. These observations do not prove a committed cycle.
+Nearby command28 targets CSTrophy, not a proven ending/save boundary. Resume at
+increment→selected native snapshot→successful commit correlation and interrupted
+7→7 replay handling; do not repeat completed identity gameplay trials.
+
+Serializer014EA560/reader014EAA80 establish a separate eight-byte cycle section
+at header+2C/+30. Its first word is the capped count; the second is not proven
+as an uncapped counter. Serialization can select cached global+159C via1598.
+The opt-in identity diagnostic now reports live/saved counts separately and tests
+invalid section bounds/counts plus valid disagreement. This is evidence only;
+matching counts and successful closes still do not authorize cycle recovery.
+
+Current checkpoint: shared bounded serialized-snapshot parser/SHA256 and three
+pre-increment observers are built/tested, opt-in and read-only. The user has no
+near-ending/NG+7 fixture. Existing guest BBSCTrace was used to compare
+load→successful serialize-end→copy-input→saved-file hashes/commits without joining
+or recreating characters. Actual cycle transition/replay and an atomic
+generation/hash contract remain unverified, so no recovery/event consumer is enabled.
+
+The live buffer-provenance checkpoint now passes as native-snapshot-correlated:
+three successful own serialize/copy pairs, final file equals last pair, loaded
+hash matches prior baseline and all other character slots unchanged. Do not
+repeat this trial. Generation2 observes the second commit, not the final third
+save. Resume at atomic runtime generation/hash binding; no actual NG transition
+has been exercised, and cycle/admission/recovery/event gates remain open.
 
 ## Development environment
 

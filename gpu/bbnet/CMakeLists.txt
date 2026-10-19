@@ -59,7 +59,7 @@ if (NOT WIN32)
     target_include_directories(bbsc-join-test PRIVATE include shadps4 .. ../shim)
     target_compile_options(bbsc-join-test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
     target_link_options(bbsc-join-test PRIVATE -Wl,--gc-sections)
-    target_link_libraries(bbsc-join-test PRIVATE fmt::fmt pthread)
+    target_link_libraries(bbsc-join-test PRIVATE fmt::fmt pthread OpenSSL::Crypto)
     set_target_properties(bbsc-join-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
     add_executable(bbsc-http-poll-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_http_poll.cpp)

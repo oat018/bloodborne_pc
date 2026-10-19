@@ -1249,3 +1249,469 @@ server connectivity; prior user gameplay captures provide that separate evidence
 No game was launched, and original saves were not modified. This is a checkpoint
 commit; unfinished identity, admission, recovery and event/reward integration
 remain gated as described above.
+
+### Native server-character identity lead and local allocator (2026-10-19)
+
+Resuming from the accepted lifecycle captures, a full aligned-word comparison of
+slot1 create/reload/recreate yields 961 words stable in the first pair and changed
+in the replacement. 951 lie before0x6740, in the serialized SprjGaitem prefix;
+three are at0x19ff4/19ff8/1a000, and seven at0x1035b4..104574. These are observations,
+not 961 possible UUIDs. The full list is retained in the ignored
+`identity-reuse-candidates-all.json`; no values are promoted into recovery keys.
+
+Native code provides a more useful interpretation of the trailing16 bytes of
+this capture's player section:
+
+- Writer014F23A0 calls SprjGaitem writer01A88440, then writes local-data+10/120
+  bytes and subsequent player sections. Its last two8-byte writes at014F2557 and
+  014F258E source local-data+688 and+690. The matching reader014F2660 restores
+  those fields. The captured header's player offset54 plus length19fb0 ends at
+  1a004; the final16 bytes therefore start at19ff4.
+- Constructor014F1510 initializes+688 to8000000000000000 and+690 to0 at014F1B2B /
+  014F1B32. Debug UI014F3E40 binds those exact fields to UTF-16 labels
+  `ServerUserId : %d` at049650B8 and `ServerChrId : %d` at049650DC. The previous
+  tentative item-reference interpretation of this tail is superseded by these
+  concrete native labels. These are network identities, not an uncapped NG count.
+- Native request builder01E8BE50 writes `CharaIdNum` (049A8254), numeric1, and
+  dispatches request kind2; the message-name relocation at05350B80 names
+  `SyncCharaIdRequest`. Reply decoder01E7F240 reads `PublishCharacterIdList` at
+  01E7FAC0 and the first object's `PublishCharaId` at01E81CBF; the parsed64-bit
+  result is placed at reply+10 by01E8815F.
+- Native caller01C43EE0 requests allocation only if local-data+690 is zero;
+  otherwise it copies the stored value to network manager+ A90. Callback01C440A0
+  stores reply+10 into local-data+690 at01C440E5 and copies it to that manager.
+  Callback01EA7570 also assigns the returned ID to both locations. This establishes
+  request/parse/save wiring statically, not successful allocation in a game.
+- The repository server previously returned a successful empty list. The native
+  reply default is8000000000000000; some old accepted snapshots contain it in
+  ServerChrId, whereas the latest recreate snapshot contains0. A nonzero sentinel
+  can bypass the native allocation request. Do not silently clear it, mistake it
+  for a valid identity, or reuse such a character for the first allocation trial.
+
+The local gameserver now reserves positive integer IDs, bounded by2^53-1 for exact
+JSON numeric representation, in `<--data path>.characters.sqlite3`. SQLite full
+synchronous transactions finish before IDs are returned. Successful allocations
+remain reserved across process restarts; retries can waste IDs but cannot return
+an already-reserved ID from this database. A uniqueness conflict or storage error
+returns ResKind1 with no IDs. Malformed counts reject, and corrupt database startup
+fails instead of silently resetting its contents. This uses Python's standard
+library and leaves the existing online-data JSON format unchanged.
+
+Test-first evidence: the original registered route fails the positive-ID assertion
+(0 entries instead of1) and incorrectly reports success without storage. The
+replacement passes eight focused tests covering native response shape/bounds,
+separate-process reuse of the persistent database, concurrent requests, invalid
+counts, unavailable storage, corruption preservation and actual loopback HTTP
+success/failure and integral JSON numeric counts (1 and1.0, excluding booleans,
+fractions and nonfinite values). The Python suite runs inside bbport-dev; the exact final result
+is recorded in the session ledger. No game or original save was launched/modified.
+
+Pending: identify the actual private-server deployment/source path, update that
+service, then observe a disposable character with ServerChrId0 obtaining a positive
+ID, saving, and retaining it across reload. A replacement in a reused slot must get
+a different positive ID. This server patch is not deployed by the local test and
+does not establish live per-character/cycle binding; durable recovery and earned
+progress consumers remain disabled. Previously verified deletion-hook captures do
+not need repetition. Retain this registry on persistent container storage/backups.
+
+### Unraid image prepared; deployment pending (2026-10-19)
+
+The user confirms Docker-loaded images `localhost/bbsc-gameserver:0.6-pre1` and
+`localhost/bbsc-shadnet:0.6-pre1`, both with `--init --pull=never`. The gameserver
+Host Path is `/mnt/app-data/appdata/bbsc/gameserver`, mapped to `/data`.
+
+The matching cached gameserver image is amd64/Linux, ID
+`7c2a52e066e42d91c4a9c98513573bafe29e0edfab6c3f2fa2a5ebd6ea9ec700`.
+Its `/opt/bbsc-container/server.py` starts the repository's Python server at
+`/opt/bbsc-gameserver/bbsc_gameserver.py` with `--data /data/online-data.json`.
+Inspection used stopped disposable containers; neither installed game was started.
+The image's old server script differs from current source only by the allocator
+patch, and its bbhost_service.py hash matches the repository exactly.
+
+`Containerfile.native-id` copies only that server script into the existing image.
+The resulting `localhost/bbsc-gameserver:0.6-pre1-native-id1` image ID is
+`bf1cc68f2025f1edceb6a735ee73c28fc2bac72553e8c15e65ab629cb162a660`.
+The complete image Config equals the original Config; the original tag/ID is
+unchanged. Build and verification were orchestrated inside bbport-dev, using
+`distrobox-host-exec` for the host's existing Podman; no substitute toolchain or
+packages were installed.
+
+Two isolated, network-disabled test containers exercised the real image entrypoint
+against a disposable volume. Both numeric1/1.0 requests succeeded, IDs were present
+in SQLite before the HTTP reply, HTTP/STUN health passed, and the registry was
+written as UID99. Removing the first container and creating another on the same
+volume retained both earlier IDs and added two distinct IDs (four reserved total).
+All test containers/volumes were removed afterward; private services/data were
+not touched. Result retained as ignored `container-update/smoke-result.json`.
+
+Export: `out/containers/bbsc-gameserver-0.6-pre1-native-id1.tar.gz` (137 MiB display),
+Docker archive SHA-256
+`a554dfd08f6ce0523c3114c984de8205e77a374bd42ae37fb539e5ef621ad924`.
+The archive manifest names the new tag, and its final-layer server bytes match the
+locally tested source. A portable companion checksum file is included. This is
+local image/packaging evidence, not proof that Docker load or native gameplay has
+run on Unraid. The README gives load/template/rollback instructions; next user
+checkpoint is installing the gameserver image while retaining the confirmed data
+mapping. ShadNet needs no image change. Native ID/save/reload correlation remains
+pending before any durable recovery consumer can be enabled.
+
+### Private deployment reachable; first native allocation trial ready
+
+The user reports completing the Unraid image update. A request to the private
+server's ss.info succeeds, and one SyncCharaIdRequest with CharaIdNum1 returns
+ResKind0 and one positive, exact integer PublishCharaId. This reserves a single
+unused test ID; it does not assign it to a game character or prove restart
+persistence on Unraid. The result is retained in ignored
+`container-update/private-deployment-check.json`.
+
+The existing guest launcher --check in bbport-dev passes for game HTTP, shadNet,
+WebAPI, bidirectional relay and executable/module dependencies. Taking the guest
+profile lock, every file matches the accepted recreate-after-delete manifest;
+slot1 BBSCTrace's native ServerChrId is still0. The complete disposable save
+folder and previous trace are copied to `character-identity-samples/native-id-before`
+before gameplay, with their baseline hashes and the native tail offset recorded.
+Slot0 BBSCProbe remains unchanged. No game was launched by the agent.
+
+Next user checkpoint: the existing checkpoint-3-character-a guest launcher, load
+only BBSCTrace, remain online for30seconds, move slightly, quit normally and close
+the window after saving. No join, deletion or creation is needed for this first
+allocation observation. Inspect the resulting trace/slot1 payload before asking
+for a second process reload. This remains an allocation experiment; recovery and
+progress consumers stay disabled.
+
+### First native character ID persisted (2026-10-19)
+
+After the user's allocation trial, BBSCTrace slot1 has a positive, exactly
+representable ServerChrId instead of the recorded0; its native ServerUserId is
+also assigned. The current userdata0001 and native backup0001 carry the same pair.
+The raw trace confirms slot1 deserialization, three own-world serializer/copy
+sequences and successful character commits, positive generation2/error0 receipt
+for the exact slot1 host path, and normal window closure. No slot reservation or
+clear event appears, and no failed commit is present. BBSCProbe userdata0000 is
+byte-identical to its pretrial baseline.
+
+The full save snapshot, raw trace, filtered evidence and provenance manifest are
+preserved at ignored `character-identity-samples/native-id-allocated` without
+replacing previous captures. Raw SHA-256:
+`082e15aba8763cda2b34953cc5999794db337825d06fc440860e86a43708a516`.
+userdata0001 SHA-256:
+`0b920441b6f1b741150da973b4a348d3807aa6de7dcfe4ee7796a2323faecd80`.
+Validation ran inside bbport-dev under the guest-profile lock and verified the
+prior snapshot hashes before acceptance. No game/save was modified by the agent.
+
+This verifies the first native allocation/save path. Next load BBSCTrace in a new
+process and save/close, then compare the recorded positive ID; do not repeat its
+first allocation, delete it, or create a replacement yet. Cross-process stability,
+reused-slot distinction, cycle binding and recovery consumers remain unverified.
+
+### Native ID survives a new game process (2026-10-19)
+
+The user's reload trial retains the exact ServerUserId/ServerChrId pair recorded
+in native-id-allocated. RE capture process61660 differs from the prior process56302;
+this is a real reload rather than another save in the same game process. The trace
+shows slot1 deserialization, own-world serialize-success/copy, successful commit
+and positive/error0 receipt for userdata0001, then normal closure. There are no
+clear/reservation events or failed commits. BBSCProbe userdata0000 is unchanged.
+
+Under the profile lock, validation checks every prior archived save hash and prior
+raw-log hash before accepting the new full snapshot, raw/filtered trace and
+provenance manifest at `character-identity-samples/native-id-reloaded`.
+Raw SHA-256:
+`669ed883c098f3bac3f60d9ef301501fa7789457449face93fc95a092041dc04`.
+userdata0001 SHA-256:
+`2670d9be8dbf60c327ffa1f83e178d7e7e6d889d71992f44403450dac3913ecc`.
+The check ran in bbport-dev; the agent did not launch a game or write to saves.
+
+Next verify that normal deletion/recreation of ONLY disposable BBSCTrace in slot1
+allocates a different positive ID. This is a new identity distinction test, not a
+repeat of the already-proven deletion observer. Keep BBSCProbe slot0 intact and
+preserve both current accepted identity snapshots. Reused-slot distinction,
+uncapped cycle binding and safe durable recovery remain open until their own
+checks pass; no recovery/event consumers have been enabled.
+
+### Reused slot gets a different native character ID (2026-10-19)
+
+The user's replacement trial passes the full native ordering: slot1 clear at
+01B45DFE, successful metadata commit, slot1 reservation at01B3E633, own-world
+serialize-success/copy, successful character commits and positive generations1/3/4
+with error0 for the exact userdata0001 path, then normal closure. The new character
+has the same name and same native user ID but a different positive ServerChrId.
+Current userdata0001 and backup0001 both carry this new identity. BBSCProbe slot0
+remains byte-identical to the baseline. No failed commits are present.
+
+Validation inside bbport-dev takes the profile lock and verifies all prior
+native-id-reloaded archive hashes before saving the full new snapshot, raw trace,
+filtered evidence and provenance manifest to `character-identity-samples/native-id-reused`.
+Raw SHA-256:
+`d9ddcf69fdff1b654bfad1fc27210173c76959b0009bdf8532ff5564085c2297`.
+userdata0001 SHA-256:
+`07e95ba3ba5232637388e5e80ee10e5dd58faa493338180afc6422231e7229d2`.
+No original saves were modified or game launched by the agent.
+
+The controlled native allocation→new-process reload→same-slot replacement checks
+are now complete. They establish the positive native character ID as a concrete
+incarnation discriminator for this server/capture path; they do not complete the
+runtime CharacterKey, uncapped cycle identity, visiting-world save ownership or
+recovery admission contracts. Existing zero/sentinel IDs remain ineligible; do not
+repair them silently. No further repetition of these three trials is requested.
+
+Follow-on static cycle inspection confirms why incrementing the saved clear-count
+alone is insufficient: AddClearCount01334BB0 has size106 and is registered by an
+indirect function pointer written at01341776→05548E78. A direct-call graph therefore
+finds no external E8/E9 callers; that does not mean the callback is unused. Its
+increment at01334BE4 and saturation at01334BF6..01334C03 cannot distinguish saved
+cycles beyond7. Fresh complete-function/access and registration disassemblies are
+retained as `native-cycle-1334b90.*` / `native-cycle-13416c0.*`, plus the graph.
+No NG transition hook, counter or cycle mutation has been enabled from this static
+observation; a transition/durable-identity contract remains to be established.
+
+### Native identity/file correlation adapter (2026-10-19)
+
+`ReadBbscNativeCharacterIdentity` now reads the selected slot from global+1490,
+positive ServerUserId/ServerChrId from `[0553B130]+8` local-data+688/+690, and
+compares those IDs with the selected userdata file's header-described player
+section tail. It requires an own-world, nonloading, local-type0 context and the
+explicit BBSC_SAVE_DIR provided by bbnet_glue. It canonicalizes that directory,
+rejects a symlink character file, and reads only userdata0000..0009 for the native
+selected slot. There is no newest-file selection or current-process mtime gate.
+A matching file from before process startup is valid evidence. Legacy callers of
+BbscActiveSaveSlot retain their previous behavior and write-time gate.
+
+The adapter rejects absent/unassigned/sentinel/out-of-range identities, invalid
+slots, visiting/loading/nonlocal state, unreadable native pointers, malformed1.09
+header/section ranges, wrong file size, mismatched persisted IDs and absent
+explicit directory. It reports the live capped clear count as evidence only;
+no CharacterKey is constructed from it. The opt-in identity trace polls at most
+once per second and logs at most64 changed valid tuples, including canonical save
+path, allowing assignment after the first ready tick to be observed. It runs only
+inside the existing ready-own-world identity trace and does not write native
+memory, files, flags or journals. Recovery/admission consumers remain disabled.
+
+Test-first native regression: the minimal reader stub fails the selected-slot /
+ServerUserId assertion at test_bbsc_join.cpp:377. The reader then passes fixtures
+for positive IDs, pre-run mtime, capped count7 as evidence, invalid counts/IDs,
+metadata/other slot, loading/visiting/nonlocal contexts, unreadable local data,
+corrupt format/offset/length/overflow, mismatched ID, truncation, missing selected
+file, symlink file and missing explicit profile. The native-data fixture remains
+byte-identical after reading. Existing native return/menu/slot/lifecycle tests
+continue passing.
+
+Fresh bbport-dev verification: full `BB_PGO=off BB_LTO=OFF bash build.sh --test`
+passes, as do all six explicit native memory/memscan/real-RX9060XT-dma-buf/party/
+join/HTTP-worker targets. Python unittest discovery passes131 tests in13.336s.
+The existing CMake CMP0167 and RADV conformance notices are informational. No game
+was running during the build; FSR reverse-patch checks passed before build.sh,
+so its reset fallback was not used. No container/server update is needed for this
+native module change.
+
+Further read-only NG research found the label EndingStep::STEP_GetGameClearItem
+at virtual049881E2 referenced at019572D4. The surrounding registration table stores
+that name at05573B70 and a callback01956F90 at05573B78. A nearest-preceding FDE entry
+at01956FB0 has size8 and does not cover the reference; it is not treated as this
+registration function's boundary. The extracted surrounding region is only a
+research lead, not proof of a committed new-cycle boundary. Literal-name searches
+in the unpacked script/talk bundles and common EMEDF found no AddClearCount or
+cycle call site; absence of those names is not proof no transition exists. No
+cycle hook or persistent counter has been enabled from these observations.
+
+Next controlled runtime check: load existing BBSCTrace in copied profile A and
+save/close, then verify `[BBSC-native-identity]` names the selected slot1, the
+already-recorded native IDs and exact canonical userdata0001 path. This checks the
+new live reader, not another allocation/recreation experiment. Do not delete or
+recreate the character. The uncapped-cycle, visiting snapshot ownership, offline
+startup and reject-capable admission contracts remain open.
+
+### Live selected native identity/file correlation confirmed (2026-10-19)
+
+The user's new-reader trial passes. The trace deserializes slot1 at line738,
+reports `[BBSC-native-identity]` at line1176 with the exact previously recorded
+native user/character IDs and canonical guest userdata0001 path, then makes the
+first current-process character commit at line1209. Receipt generation was still0
+before the identity line. This confirms correlation with a persisted save from
+before process startup, without waiting for a current-process character write.
+Later serialization/copy/commits succeed, a generation2/error0 receipt names that
+same path, and the game closes normally. No failed commits, clear or reservation
+events occur; BBSCProbe slot0 is unchanged and slot1 retains the same native IDs.
+
+Inside bbport-dev under the profile lock, validation verifies the prior reuse
+snapshot/raw hashes, the exact trace tuple/path and before-first-character-commit
+ordering, plus the current saved IDs and slot0 baseline. Full snapshot, raw log,
+filtered evidence and provenance manifest are preserved as
+`character-identity-samples/native-id-correlated`. Raw SHA-256:
+`396750e73583e0a27db2fac5b93b964733db0d31ebecefc970f22e7dd2b6619d`.
+userdata0001 SHA-256:
+`66ebb0bac13185611a84d3e155a41b55fb36e2a53847583a638fa8f23b2d679e`.
+No game was launched or save written by the agent. These native-reader trials
+need no repetition. Uncapped cycle binding, visiting snapshot ownership, offline
+startup/recovery and reject-capable admission remain separate open contracts;
+no journal mutation/recovery consumer has been enabled.
+
+### Native NG increment event sites identified (2026-10-19)
+
+Read-only inspection identifies three implementations: Lua-exported01334BB0,
+0131D260 and the inlined increment017C0FD9 inside017C0420. Each increments
+manager0553B130+68 and clamps to7. No external direct E8/E9 callers were found
+for the first two; indirect callers remain possible.
+
+Dispatcher017B93A0 subtracts2000 before bank table017B9544. Entry3 reaches
+017B9486 and calls017C0420. That handler subtracts1 before command table017C2C38;
+entry20 reaches017C0F9A and the increment. This identifies bank2003/command21
+without relying on absent script names. All27 original `event/*.emevd.dcx`
+files contain exactly three matches, each with argument bytes01000000, in
+`m21_00_00_00.emevd.dcx`:
+
+| Event ID | Zero-based instruction index |
+| --- | --- |
+| 12100000 | 43 |
+| 12100002 | 35 |
+| 12100180 | 14 |
+
+The scan validates decompressed size, table bounds,48-byte event/32-byte
+instruction records, argument bounds and unique owning event for each match.
+Two initial scratch scans rejected the zero-argument offset0xFFFFFFFF sentinel;
+the corrected scan and exact three-site self-check pass in bbport-dev.
+Scratch `native-cycle-event-increment-sites.json` SHA256:
+35090fb4f5dbbe78a84ef58e5f517e0fa329657fe796ce901c86b091c79e8631.
+Original m21 DCX SHA256:
+1edbb9cd5035822e9dee5eb33075a3b096ab050e865d625c5f49d37c86014de8.
+Callgraph, dispatcher and increment disassemblies are retained beside the report.
+
+Nearby command2003/28 targets manager055404E8, named **CSTrophy** by native string
+0493AE80. It is not a proven ending/save boundary; scratch filenames containing
+`ending-manager` predate this identification. Event instruction order does not
+prove a new-cycle snapshot committed. Next correlate increments with selected
+native serialization and successful commits, including interruption/replay and
+the saturated7→7 case. No hook, durable counter or save mutation was introduced;
+no new gameplay trial is requested.
+
+### Live versus serialized capped cycle evidence (2026-10-19)
+
+Serializer014EA560 records the cycle section's offset at header+2C and its length
+at header+30. At014EA6B5..6DC, global+1598 selects global+159C when set, otherwise
+manager0553B130+68. It writes four bytes at014EA6F0, then writes manager+6C as a
+separate four-byte field at014EA716. Reader014EAA80 restores the first word to
+manager+68 at014EAF0E and the second to manager+6C at014EAF3A. The second word is
+not established as an uncapped cycle and must not be adopted as one.
+Native01937D09..10 caches manager+68 into global+159C and sets1598 before
+01937D51 replaces the manager value. Thus serialization can deliberately retain
+the cached count; a successful file commit alone is insufficient cycle proof.
+
+Read-only copied profile inspection agrees with the header: userdata0000 has
+cycle section19EC6/8 and userdata0001 has1A09A/8, both with two zero words.
+Scanning762 root-reference regions found18 with +6C accesses; these include
+unrelated objects and do not prove an uncapped root counter. Disassemblies and
+`native-cycle-adjacent-accesses.json` remain in the plan workspace.
+
+The opt-in native identity trace now reports both live and saved capped counts.
+The existing reader validates the declared eight-byte section, rejects overlap
+with the player section, overflow/out-of-file offsets and saved counts outside
+0..7. Different valid live/saved values remain visible as separate observations;
+equality grants no recovery permission, especially7→7. The adjacent word is not
+interpreted. Existing ready-own-world gating, native ID checks and explicit
+canonical save ownership remain in force. No snapshot atomicity or committed
+transition is inferred from this diagnostic read.
+
+TDD: the minimal unimplemented saved-count field fails the new zero-count
+assertion (exit134); the reader then passes the actual adapter suite, including
+live7/saved0, saved7, negative/8, section overlap/overflow/wrong size and an
+arbitrary adjacent word. No native memory or save writes were added. Runtime
+trace presentation of this additional field has not been tested in gameplay;
+the prior identity trials remain accepted and need no repetition.
+
+### Native snapshot provenance checkpoint prepared (2026-10-19)
+
+The user has no near-ending or NG+7 fixture and asks to use the existing copied
+test save. Real ending transitions, especially saturated7→7 and interruption,
+remain a separate unverified gate. Do not ask the user to finish a fresh character
+or manufacture an ending by writing flags/counts.
+
+The shared read-only `ReadBbscSerializedSnapshot` now parses bounded format41
+native snapshots, extracts the positive user/character IDs and capped count, and
+hashes all140000 bytes with the module's existing OpenSSL dependency. The selected
+file reader uses that same parser and reports its hash. Native lifecycle evidence
+copies and parses buffers at deserialize, successful serialize-end and copy-input;
+serialize-begin and failed serialize-end never claim a completed snapshot.
+`[BBSC-save-snapshot]` binds each hash/IDs/count to its lifecycle sequence, stage,
+slot and own-world label. An unchanged ID/count with changed payload has a
+different hash. Cached visiting output retains its visiting label.
+
+Three additional opt-in SaveLifecycle sites observe pre-increment count:
+0131D260/01334BB0 use the byte-checked eight-byte stack prologue;017C0FD2 uses
+`8B506831C989D6`, after the RIP-relative lookup. The latter avoids unsupported
+RIP-relative instructions in the existing trampoline. Exact bytes at all three
+sites match the inspected1.09 ELF. No new trampoline implementation is needed.
+The stage is explicitly `cycle-increment-entry`, success remains unknown, and no
+counter or save is changed. Entry can still precede a native guard/no-op. All
+these hooks use the existing identity-trace opt-in and128-event bound; absence
+after the bound is not proof that no transition occurred. Hash work also stops
+after this bound.
+
+TDD evidence in bbport-dev: null parser RED, then independent Python hashlib
+fixture784549a4d1d963aff045cb64b9a38ceaf0b358993310b8dad3d61fb131cbc390
+and malformed/changed-payload checks GREEN; missing native-buffer snapshot RED
+then GREEN; missing cycle observer RED then all three paths GREEN. The actual
+adapter checks cover changed copy input, explicit copy slot, guest/cached output,
+failed/unfinished serialization, invalid counts and unchanged native buffers.
+Full `build.sh --test` and all six explicit native suites pass; actual RX9060XT
+dma-buf and real HTTP-worker tests remain green. Pre-build no-game/FSR checks and
+guest `--check` pass, including all four private services and bidirectional relay.
+
+Next human checkpoint uses only the existing guest BBSCTrace: load online, move,
+wait roughly30 seconds/save indicator, quit normally and close after saving.
+No join, character deletion/recreation or NG transition is required. Compare the
+loaded hash with accepted native-id-correlated, successful serialize-end hashes
+with copy-input and the final file hash/commits, and receipt path/generation.
+Preserve all raw bytes and the first-character baseline. If hashes differ between
+native stages, investigate that transformation instead of treating timing as
+snapshot proof. This new buffer-provenance observation is distinct from the
+completed native identity trials. It has not yet been run in gameplay.
+
+ABI2 receipts are unchanged and still do not atomically bind generation to a
+snapshot hash. This diagnostic checkpoint alone will not enable cycle identity,
+admission, event/reward writes or restart recovery.
+
+### Live native snapshot/file provenance confirmed (2026-10-19)
+
+The user's existing-BBSCTrace trial passes the new buffer-provenance checkpoint.
+The deserialize hash matches accepted native-id-correlated exactly. Three own-world
+successful serialize-end/copy-input pairs have identical hashes within each pair,
+followed by three successful userdata0001 commits:
+
+| Serialize/copy sequence | SHA256 | Commit log line |
+| --- | --- | --- |
+| 3/4 | 15a25bcef1906e13dd60b7a066de95969828faff5500f369d5454e32bac9649d | 1212 |
+| 7/8 | 6b7252fc245a604ff00c4562acf421dc5d9aee6354151eb5186ad769e99cff0e | 1372 |
+| 11/12 | a5d00c3bcdb3a3a6dc5a223586487dd067d4205d19a321cedd08d5bd7446aa68 | 1919 |
+
+The final saved userdata0001 hash equals the last pair. Native user4127 /
+character2723151752040083 and capped count0 remain consistent in current and
+backup saves. All nine other userdata character slots are byte-identical to the
+accepted prior baseline. No slot clear/reservation, failed commit or NG increment
+was observed; the window closed normally. Generation2/error0 names the exact
+canonical character path after the second commit; the ready-file diagnostic also
+reports the second pair's hash. That receipt precedes the third save, so it must
+not be described as the final snapshot's generation/hash receipt.
+
+The three new hooks install: total170/176 versus prior167/173. The same six older
+RE hooks fail in both captures (OnSummonResult.Move/OtherError, ForceSummonSuccess,
+ChrAction.UseItem.Inventory, Event.WarpNextStage, Warp.RespawnTransform.Resolve).
+This checkpoint does not establish that those unrelated trace sites work, nor
+does installing an NG observer prove an actual NG transition.
+
+Under the profile lock in bbport-dev, prior archive hashes and baseline raw log
+were verified, then full saves/raw log/filtered evidence/provenance manifest were
+preserved as `character-identity-samples/native-snapshot-correlated`, without
+overwriting prior samples. Raw log SHA256:
+470d86e54065e3dd7167988e86bcdaf6fd16da531e3c618c70080a46690ac83a.
+No game was launched or save modified by the agent. This buffer-provenance trial
+is complete and needs no repetition. Next establish an atomic snapshot/hash
+binding to the runtime receipt generation; ABI2 does not provide it. Real NG
+transitions/replay, offline recovery and admission/event consumers remain open.
+
+Checkpoint verification before commit (2026-10-19): fresh `python3 -m unittest
+discover -s tests` passes131 tests; all six explicit native suites pass in
+bbport-dev, including the actual GPU dma-buf and HTTP worker checks. Native test
+targets are up to date and `git diff --check` passes. The earlier full native
+build and this live snapshot trial remain applicable to the unchanged production
+sources. Local save/log/image artifacts are ignored; the existing FSR submodule
+working edits are not part of this checkpoint commit.

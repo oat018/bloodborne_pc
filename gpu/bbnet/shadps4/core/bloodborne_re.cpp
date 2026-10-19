@@ -28,6 +28,7 @@
 #include <thread>
 #include <tuple>
 #include <vector>
+#include <openssl/sha.h>
 
 #include "common/logging/log.h"
 #include "common/memory_patcher.h"
@@ -138,6 +139,9 @@ constexpr u64 NativeSlotReserveOffset = 0x01B3E633;
 constexpr u64 NativeSlotClearOffset = 0x01686708;
 constexpr u64 NativeSlotClearTaskOffset = 0x01B3F1BE;
 constexpr u64 NativeSlotClearOtherTaskOffset = 0x01B45DFE;
+constexpr u64 NativeCycleIncrementOffset = 0x0131D260;
+constexpr u64 NativeCycleLuaIncrementOffset = 0x01334BB0;
+constexpr u64 NativeCycleEventIncrementOffset = 0x017C0FD2;
 constexpr u64 CandidateLocalStatePointerOffset = 0x0553E878;
 constexpr u64 SummonManagerRootPointerOffset = 0x0553B120;
 constexpr u64 CurrentMapListPointerOffset = 0x0553B148;
@@ -361,6 +365,13 @@ constexpr auto Sites = std::to_array<TraceSite>({
      {0xC6, 0x44, 0x11, 0x10, 0x00}, 5},
     {"BBSC.Save.ReserveSlot", NativeSlotReserveOffset, TraceKind::SaveLifecycle,
      {0x89, 0xBA, 0x90, 0x14, 0x00, 0x00}, 6},
+    {"BBSC.Cycle.Increment", NativeCycleIncrementOffset, TraceKind::SaveLifecycle,
+     {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x10}, 8},
+    {"BBSC.Cycle.LuaIncrement", NativeCycleLuaIncrementOffset, TraceKind::SaveLifecycle,
+     {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x10}, 8},
+    // Start after the RIP-relative root lookup: the native trampoline only copies absolute code.
+    {"BBSC.Cycle.EventIncrement", NativeCycleEventIncrementOffset, TraceKind::SaveLifecycle,
+     {0x8B, 0x50, 0x68, 0x31, 0xC9, 0x89, 0xD6}, 7},
     // CSMultiPlayMan::RemoveMember(member_id): sets the exit flag on that member's insert task.
     // Traced with caller chain to find what drops the guest on the host when the host dies.
     {"BBSC.RemoveMember", 0x01E54DB0, TraceKind::MatchingLeaveDecision, StandardR15Prologue, 6},
@@ -4187,6 +4198,104 @@ u64 GetLocalPlayerCharacter() {
     return ReadablePointer(world_chr, 0x68) ? ReadValue<u64>(world_chr, 0x60) : 0;
 }
 
+struct BbscSerializedSnapshot {
+    u64 server_user{}, server_character{};
+    s32 capped_cycle{};
+    std::string sha256;
+};
+
+std::optional<BbscSerializedSnapshot> ReadBbscSerializedSnapshot(std::span<const u8> bytes) {
+    if (bytes.size() != 0x140000) return std::nullopt;
+    std::array<u32, 21> header{};
+    std::memcpy(header.data(), bytes.data(), sizeof(header));
+    const u32 offset = header[5], size = header[6];
+    if (header[0] != 0x41 || offset != 0x54 || size < 16 || size > bytes.size() - offset)
+        return std::nullopt;
+    const u32 cycle_offset = header[11], cycle_bytes = header[12];
+    if (cycle_bytes != 8 || cycle_offset < offset + size ||
+        cycle_offset > bytes.size() - cycle_bytes) return std::nullopt;
+    BbscSerializedSnapshot out{};
+    // 014F2557/258E write the IDs; 014EA6B1..736 describes the separate cycle section.
+    std::memcpy(&out.server_user, bytes.data() + offset + size - 16, sizeof(u64));
+    std::memcpy(&out.server_character, bytes.data() + offset + size - 8, sizeof(u64));
+    std::memcpy(&out.capped_cycle, bytes.data() + cycle_offset, sizeof(s32));
+    if (out.server_user == 0 || out.server_user >= (u64{1} << 63) ||
+        out.server_character == 0 || out.server_character > 9007199254740991ULL ||
+        out.capped_cycle < 0 || out.capped_cycle > 7) return std::nullopt;
+    std::array<u8, SHA256_DIGEST_LENGTH> digest{};
+    if (!SHA256(bytes.data(), bytes.size(), digest.data())) return std::nullopt;
+    out.sha256.reserve(64);
+    for (const u8 byte : digest) out.sha256 += fmt::format("{:02x}", byte);
+    return out;
+}
+
+struct BbscNativeCharacterIdentity {
+    std::filesystem::path save_file;
+    s32 slot{};
+    u64 server_user{}, server_character{};
+    s32 capped_cycle{};
+    s32 persisted_capped_cycle{-1};
+    std::string snapshot_sha256;
+    bool operator==(const BbscNativeCharacterIdentity&) const = default;
+};
+
+std::optional<BbscNativeCharacterIdentity> ReadBbscNativeCharacterIdentity() {
+    namespace fs = std::filesystem;
+    if (image_base == 0) return std::nullopt;
+    const u64 global = GetGlobalState();
+    if (!ReadablePointer(global, 0x1593) || ReadValue<u8>(global, 8) != 0 ||
+        ReadValue<u8>(global, 0x1592) == 0) return std::nullopt;
+    const s32 slot = ReadValue<s32>(global, 0x1490);
+    if (slot < 0 || slot >= 10) return std::nullopt;
+    const u64 slots = ReadValue<u64>(image_base + PlayerSlotManagerPointerOffset, 0);
+    if (!ReadablePointer(slots, 0x6C)) return std::nullopt;
+    const u64 local = ReadValue<u64>(slots, 8);
+    if (!ReadablePointer(local, 0x698) || ReadValue<s32>(local, 0xA4) != 0)
+        return std::nullopt;
+    const u64 user = ReadValue<u64>(local, 0x688);
+    const u64 character = ReadValue<u64>(local, 0x690);
+    const s32 cycle = ReadValue<s32>(slots, 0x68);
+    if (user == 0 || user >= (u64{1} << 63) || character == 0 ||
+        character > 9007199254740991ULL || cycle < 0 || cycle > 7) return std::nullopt;
+    const char* configured = std::getenv("BBSC_SAVE_DIR");
+    if (!configured || !configured[0]) return std::nullopt;
+    std::error_code ec;
+    const fs::path dir = fs::canonical(configured, ec);
+    if (ec) return std::nullopt;
+    const fs::path file = dir / fmt::format("userdata{:04}", slot);
+    if (fs::is_symlink(file, ec) || ec) return std::nullopt;
+    std::ifstream input(file, std::ios::binary | std::ios::ate);
+    if (!input || input.tellg() != 0x140000) return std::nullopt;
+    input.seekg(0);
+    std::vector<u8> bytes(0x140000);
+    if (!input.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) return std::nullopt;
+    const auto persisted = ReadBbscSerializedSnapshot(bytes);
+    if (!persisted || persisted->server_user != user || persisted->server_character != character)
+        return std::nullopt;
+    return BbscNativeCharacterIdentity{file, slot, user, character, cycle,
+                                       persisted->capped_cycle, persisted->sha256};
+}
+
+void TraceBbscNativeCharacterIdentity() {
+    static s64 last_ms = 0;
+    static unsigned lines = 0;
+    static std::optional<BbscNativeCharacterIdentity> last;
+    const s64 now = SteadyNowMs();
+    if (lines >= 64 || now - last_ms < 1'000) return;
+    last_ms = now;
+    const auto identity = ReadBbscNativeCharacterIdentity();
+    if (identity == last) return;
+    last = identity;
+    if (!identity) return;
+    ++lines;
+    LOG_INFO(Debug, "[BBSC-native-identity] persisted slot {} server user {} character {} "
+                    "live clear count (capped at 7) {} saved clear count (capped at 7) {} "
+                    "snapshot sha256 {} path {}",
+             identity->slot, identity->server_user, identity->server_character,
+             identity->capped_cycle, identity->persisted_capped_cycle, identity->snapshot_sha256,
+             identity->save_file.string());
+}
+
 // Diagnostic candidates only: these fields are not an established character identity.
 std::optional<std::vector<std::pair<u32, s32>>> ReadBbscIdentityCandidates(u64 object, size_t bytes) {
     if (bytes == 0 || bytes > 0x100 || bytes % sizeof(s32) != 0 || !ReadablePointer(object, bytes)) {
@@ -4238,6 +4347,8 @@ struct BbscNativeSaveEvidence {
     u8 mode = 0;
     bool own_world = false;
     s32 success = -1;
+    s32 live_capped_cycle = -1;
+    std::optional<BbscSerializedSnapshot> snapshot;
 };
 
 std::optional<BbscNativeSaveEvidence> ReadBbscNativeSaveEvidence(
@@ -4286,9 +4397,21 @@ std::optional<BbscNativeSaveEvidence> ReadBbscNativeSaveEvidence(
         if (registers.rdx != global || !ReadValue<u8>(global, 0x1578)) return std::nullopt;
         out.stage = "slot-reserved"; // Allocation can still be cancelled; not a character identity.
         out.slot = static_cast<s32>(registers.rdi);
+    } else if (offset == NativeCycleIncrementOffset || offset == NativeCycleLuaIncrementOffset ||
+               offset == NativeCycleEventIncrementOffset) {
+        const u64 slots = ReadValue<u64>(image_base + PlayerSlotManagerPointerOffset, 0);
+        if (!ReadablePointer(slots, 0x6C)) return std::nullopt;
+        out.live_capped_cycle = ReadValue<s32>(slots, 0x68);
+        if (out.live_capped_cycle < 0 || out.live_capped_cycle > 7) return std::nullopt;
+        out.stage = "cycle-increment-entry"; // Intent observation, never execution/commit proof.
     } else return std::nullopt;
     if (out.slot < 0 || out.slot >= 10 ||
         (out.bytes && !ReadablePointer(out.buffer, out.bytes))) return std::nullopt;
+    if (out.bytes && offset != NativeSaveSerializeOffset) {
+        std::vector<u8> snapshot(out.bytes);
+        std::memcpy(snapshot.data(), reinterpret_cast<const void*>(out.buffer), out.bytes);
+        out.snapshot = ReadBbscSerializedSnapshot(snapshot);
+    }
     return out;
 }
 
@@ -4299,16 +4422,26 @@ bool BbscSaveIdentityTraceEnabled() {
 
 void TraceBbscNativeSaveEvidence(u64 offset, const GuestRegisterSnapshot& registers) {
     if (!BbscSaveIdentityTraceEnabled()) return;
+    static std::atomic<u32> sequence{0};
+    if (sequence.load(std::memory_order_relaxed) >= 128) return;
     try {
         const auto evidence = ReadBbscNativeSaveEvidence(offset, registers);
         if (!evidence) return;
-        static std::atomic<u32> sequence{0};
         const u32 seq = sequence.fetch_add(1, std::memory_order_relaxed);
         if (seq >= 128) return;
         LOG_INFO(Debug, "[BBSC-save-native] seq {} stage {} slot {} own {} mode {} success {} "
-                        "buffer {:#x} bytes {} site {:#x}",
+                        "buffer {:#x} bytes {} site {:#x} live clear count {}",
                  seq, evidence->stage, evidence->slot, evidence->own_world, evidence->mode,
-                 evidence->success, evidence->buffer, evidence->bytes, offset);
+                 evidence->success, evidence->buffer, evidence->bytes, offset,
+                 evidence->live_capped_cycle);
+        if (evidence->snapshot) {
+            const auto& snapshot = *evidence->snapshot;
+            LOG_INFO(Debug, "[BBSC-save-snapshot] seq {} stage {} slot {} own {} server user {} "
+                            "character {} saved clear count {} sha256 {}",
+                     seq, evidence->stage, evidence->slot, evidence->own_world,
+                     snapshot.server_user, snapshot.server_character, snapshot.capped_cycle,
+                     snapshot.sha256);
+        }
     } catch (...) {
         // Read-only diagnostics must never unwind through a native save operation.
     }
@@ -4328,6 +4461,8 @@ void TickBbscSaveIdentityEvidence() {
         return;
     }
     TraceBbscSelectedSaveReceipt();
+    // Evidence only: this capped cycle is not a durable CharacterKey or recovery permission.
+    TraceBbscNativeCharacterIdentity();
     if (player == last_player) {
         return;
     }

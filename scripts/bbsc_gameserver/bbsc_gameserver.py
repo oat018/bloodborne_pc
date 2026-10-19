@@ -25,12 +25,15 @@ it runs on a stock Python, and it can retune the summon parameters on the way ou
 import argparse
 import base64
 import collections
+from contextlib import closing
 import datetime
 import hashlib
 import json
 import os
 
 import re
+import secrets
+import sqlite3
 import sys
 import threading
 import time
@@ -288,6 +291,39 @@ class OnlineStore:
 
 
 STORE = None  # OnlineStore, set up in main()
+CHARACTER_IDS = None
+
+
+class CharacterIdStore:
+    """Reserve native character IDs durably before publishing them to the game."""
+
+    def __init__(self, path):
+        self.path = path
+        with closing(sqlite3.connect(path)) as db, db:
+            db.execute('PRAGMA synchronous=FULL')
+            db.execute('CREATE TABLE IF NOT EXISTS character_ids '
+                       '(id INTEGER PRIMARY KEY CHECK(id > 0 AND id <= 9007199254740991))')
+
+    def allocate(self, count):
+        # Stay exact in the game's JSON numeric representation, excluding native unset values.
+        values = [secrets.randbelow(9007199254740991) + 1 for _ in range(count)]
+        with closing(sqlite3.connect(self.path)) as db, db:
+            db.execute('PRAGMA synchronous=FULL')
+            db.executemany('INSERT INTO character_ids(id) VALUES (?)',
+                           [(value,) for value in values])
+        return values
+
+
+def sync_chara_id(req):
+    count = _request(req).get('CharaIdNum')
+    if type(count) not in (int, float) or count not in range(1, 11) or CHARACTER_IDS is None:
+        return dict(ok('SyncCharaIdResponse', PublishCharacterIdList=[]), ResKind=1)
+    try:
+        values = CHARACTER_IDS.allocate(int(count))
+    except (sqlite3.Error, OSError):
+        return dict(ok('SyncCharaIdResponse', PublishCharacterIdList=[]), ResKind=1)
+    return ok('SyncCharaIdResponse',
+              PublishCharacterIdList=[{'PublishCharaId': value} for value in values])
 
 def _request(req):
     try:
@@ -671,7 +707,7 @@ ROUTES = {
     "/basic_utils/get_user_agreement": lambda req: ok("UserAgreementGetResponse", Agreements=[]),
     "/basic_utils/get_datetime":
         lambda req: ok("DateTimeResponse", Timestamp=int(time.time() * 1000)),
-    "/basic_utils/sync_chara_id": lambda req: ok("SyncCharaIdResponse", PublishCharacterIdList=[]),
+    "/basic_utils/sync_chara_id": sync_chara_id,
     "/penalty/check_user_priority_move_count":
         lambda req: ok("UserPropertiesMoveCountCheckResponse"),
     "/blood_messenger/exist_messages": blood_exist,
@@ -1109,8 +1145,9 @@ def main():
     print("BBSC game server - {} - log: {}".format(
         datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), log_path))
 
-    global STORE
+    global STORE, CHARACTER_IDS
     STORE = OnlineStore(ARGS.data)
+    CHARACTER_IDS = CharacterIdStore(ARGS.data + '.characters.sqlite3')
     print("messages and bloodstains: {} ({} messages, {} bloodstains)".format(
         ARGS.data, len(STORE.data["messages"]), len(STORE.data["tombs"])))
 
