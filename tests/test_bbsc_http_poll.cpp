@@ -109,6 +109,8 @@ static void TestHttpWorker() {
     const auto delivered_claim = GetBbscSummonObservationSnapshot().claim;
     assert(delivered_claim.valid && delivered_claim.matched_unique_candidate &&
            delivered_claim.candidate.session_id == "candidate-session");
+    assert(GetBbscSummonObservationSnapshot().private_attempt.state ==
+           BbscPrivateAttemptState::Ready);
     deliver = false;
     setenv("SHADPS4_BBSC_NO_FAST_SIGN", "1", 1);
     complete(send(mixed));
@@ -242,16 +244,28 @@ static void TestBbscSummonObserver() {
     successful_create();
     const std::array<u8, 32> empty_proof{};
     const auto own_only = observer.Proofs(challenge);
-    assert(own_only && own_only->selected == empty_proof);
+    assert(own_only && own_only->selected == empty_proof &&
+           own_only->observation.private_attempt.state == BbscPrivateAttemptState::Ready &&
+           own_only->observation.private_attempt.generation != 0);
+    const auto sign_generation = own_only->observation.private_attempt.generation;
+    const auto expired_sign = observer.Snapshot(std::chrono::steady_clock::now() +
+                                                std::chrono::minutes(16));
+    assert(expired_sign.private_attempt.state == BbscPrivateAttemptState::Expired &&
+           expired_sign.private_attempt.generation == sign_generation &&
+           !expired_sign.own_sign.valid);
+    successful_create();
     const auto search = search_plan("same-word");
     run_search(search, candidate_row("candidate-a", 222, 8, "same-word"));
     auto claim = claim_plan(222, 8);
     auto claim_ticket = observer.Begin(claim, context);
+    assert(!observer.Proofs(challenge));
     finish_claim(claim_ticket, claim);
     auto snapshot = observer.Snapshot();
     assert(snapshot.own_sign.valid && snapshot.own_sign.session_id == "own-session");
     assert(snapshot.claim.valid && snapshot.claim.candidate.session_id == "candidate-a");
     assert(snapshot.claim.password_matches_own_sign && snapshot.claim.token != 0);
+    assert(snapshot.private_attempt.state == BbscPrivateAttemptState::Ready &&
+           snapshot.private_attempt.generation > sign_generation);
     const auto proofs = observer.Proofs(challenge);
     assert(proofs && proofs->observation.own_sign.session_id == "own-session" &&
            proofs->observation.claim.candidate.session_id == "candidate-a");
@@ -266,6 +280,14 @@ static void TestBbscSummonObserver() {
     const auto other_nonce_proofs = observer.Proofs(other_challenge);
     assert(other_nonce_proofs && other_nonce_proofs->own != proofs->own &&
            other_nonce_proofs->selected != proofs->selected);
+
+    const auto claim_generation = snapshot.private_attempt.generation;
+    const auto expired_claim = observer.Snapshot(std::chrono::steady_clock::now() +
+                                                  std::chrono::seconds(31));
+    assert(expired_claim.private_attempt.state == BbscPrivateAttemptState::Expired &&
+           expired_claim.private_attempt.generation == claim_generation &&
+           !expired_claim.claim.valid);
+    assert(!observer.Proofs(challenge));
 
     BbscSummonObserver candidate_observer;
     auto candidate_sign = ObserverPlan(
@@ -296,8 +318,10 @@ static void TestBbscSummonObserver() {
     run_search(search, candidate_row("candidate-a", 222, 8, "same-word") + "," +
                            candidate_row("candidate-b", 222, 8, "same-word"));
     claim_ticket = observer.Begin(claim, context);
+    assert(observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::Pending);
     finish_claim(claim_ticket, claim);
-    assert(!observer.Snapshot().claim.valid);
+    assert(!observer.Snapshot().claim.valid &&
+           observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::Invalid);
 
     // A wrong password or invasion row cannot become a co-op selection.
     run_search(search, candidate_row("wrong-word", 222, 8, "other-word"));
@@ -336,14 +360,25 @@ static void TestBbscSummonObserver() {
     snapshot = observer.Snapshot();
     assert(latest_ticket.token > previous_attempt && snapshot.claim.token == latest_ticket.token);
     assert(snapshot.claim.candidate.session_id == "ordered-new");
+    assert(snapshot.private_attempt.state == BbscPrivateAttemptState::Ready &&
+           snapshot.private_attempt.generation == latest_ticket.attempt_generation);
 
     // Failed claims and explicit cancellation leave no usable selected attempt.
     claim_ticket = observer.Begin(claim, context);
     finish_claim(claim_ticket, claim, false);
-    assert(!observer.Snapshot().claim.valid);
+    assert(!observer.Snapshot().claim.valid &&
+           observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::Invalid);
     claim_ticket = observer.Begin(claim, context);
     observer.Cancel(claim_ticket);
-    assert(!observer.Snapshot().claim.valid);
+    assert(!observer.Snapshot().claim.valid &&
+           observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::Invalid);
+    auto malformed_claim = ObserverPlan("/summon_messenger/request", "broken");
+    claim_ticket = observer.Begin(malformed_claim, context);
+    assert(observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::Pending);
+    observer.Complete(claim_ticket, malformed_claim,
+                      ObserverResponse(R"({"MessageId":"SummonDataSummonResponse","ResKind":0})"),
+                      0);
+    assert(observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::Invalid);
 
     // Failed creates, malformed/oversized fields, and context destruction fail closed.
     auto bad_create = ObserverPlan("/summon_messenger/create",
@@ -352,7 +387,8 @@ static void TestBbscSummonObserver() {
     observer.Complete(bad_ticket, bad_create,
                       ObserverResponse(R"({"MessageId":"SummonDataCreateResponse","ResKind":1})"),
                       0);
-    assert(!observer.Snapshot().own_sign.valid);
+    assert(!observer.Snapshot().own_sign.valid &&
+           observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::Invalid);
     bad_ticket = observer.Begin(bad_create, context);
     observer.Complete(bad_ticket, bad_create,
                       ObserverResponse(R"({"MessageId":"SummonDataCreateResponse","ResKind":0})", 500),
@@ -371,8 +407,73 @@ static void TestBbscSummonObserver() {
     assert(!observer.Snapshot().claim.valid);
     observer.InvalidateContext(context);
     snapshot = observer.Snapshot();
-    assert(!snapshot.own_sign.valid && !snapshot.claim.valid);
+    assert(!snapshot.own_sign.valid && !snapshot.claim.valid &&
+           snapshot.private_attempt.state == BbscPrivateAttemptState::None);
     assert(!observer.Proofs(challenge));
+
+    BbscSummonObserver cancelled_sign_observer;
+    auto pending_private_sign = ObserverPlan(
+        "/summon_messenger/create",
+        R"({"SummonType":0,"SummonWord":"same-word"})");
+    auto pending_sign_ticket = cancelled_sign_observer.Begin(pending_private_sign, context);
+    assert(cancelled_sign_observer.Snapshot().private_attempt.state ==
+           BbscPrivateAttemptState::Pending);
+    assert(!cancelled_sign_observer.Proofs(challenge));
+    cancelled_sign_observer.Cancel(pending_sign_ticket);
+    assert(cancelled_sign_observer.Snapshot().private_attempt.state ==
+           BbscPrivateAttemptState::Invalid);
+
+    // An explicit public/non-co-op sign replaces prior private intent. A late old
+    // claim response cannot turn that replacement back into private-ready state.
+    BbscSummonObserver replacement_observer;
+    auto private_sign = ObserverPlan(
+        "/summon_messenger/create",
+        R"({"SessionId":"own-session","UserId":111,"CharaId":7,"SummonType":0,"SummonWord":"same-word"})");
+    auto private_sign_ticket = replacement_observer.Begin(private_sign, context);
+    replacement_observer.Complete(
+        private_sign_ticket, private_sign,
+        ObserverResponse(R"({"MessageId":"SummonDataCreateResponse","ResKind":0})"), 0);
+    auto public_sign = ObserverPlan(
+        "/summon_messenger/create",
+        R"({"SessionId":"own-session","UserId":111,"CharaId":7,"SummonType":2,"SummonWord":"public-word"})");
+    auto public_ticket = replacement_observer.Begin(public_sign, context);
+    assert(replacement_observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::None);
+    replacement_observer.Complete(
+        private_sign_ticket, private_sign,
+        ObserverResponse(R"({"MessageId":"SummonDataCreateResponse","ResKind":0})"), 0);
+    assert(replacement_observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::None);
+    replacement_observer.Complete(
+        public_ticket, public_sign,
+        ObserverResponse(R"({"MessageId":"SummonDataCreateResponse","ResKind":0})"), 0);
+    assert(replacement_observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::None);
+
+    for (const auto malformed_body : {R"({"SummonWord":""})",
+                                      R"({"SummonType":"0","SummonWord":""})"}) {
+        BbscSummonObserver malformed_create_observer;
+        private_sign_ticket = malformed_create_observer.Begin(private_sign, context);
+        malformed_create_observer.Complete(
+            private_sign_ticket, private_sign,
+            ObserverResponse(R"({"MessageId":"SummonDataCreateResponse","ResKind":0})"), 0);
+        const auto private_generation =
+            malformed_create_observer.Snapshot().private_attempt.generation;
+        auto malformed_create = ObserverPlan("/summon_messenger/create", malformed_body);
+        const auto malformed_ticket = malformed_create_observer.Begin(malformed_create, context);
+        auto malformed_snapshot = malformed_create_observer.Snapshot();
+        assert(malformed_snapshot.private_attempt.state == BbscPrivateAttemptState::Invalid &&
+               malformed_snapshot.private_attempt.generation == private_generation);
+        malformed_create_observer.Complete(
+            malformed_ticket, malformed_create,
+            ObserverResponse(R"({"MessageId":"SummonDataCreateResponse","ResKind":0})"), 0);
+        malformed_snapshot = malformed_create_observer.Snapshot();
+        assert(malformed_snapshot.private_attempt.state == BbscPrivateAttemptState::Invalid &&
+               malformed_snapshot.private_attempt.generation == private_generation);
+    }
+
+    auto empty_word_sign = ObserverPlan(
+        "/summon_messenger/create",
+        R"({"SummonType":0,"SummonWord":""})");
+    public_ticket = replacement_observer.Begin(empty_word_sign, context);
+    assert(replacement_observer.Snapshot().private_attempt.state == BbscPrivateAttemptState::None);
 }
 
 int main() {

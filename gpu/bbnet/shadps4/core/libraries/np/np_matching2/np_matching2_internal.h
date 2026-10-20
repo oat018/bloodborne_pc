@@ -331,10 +331,21 @@ bool IsBbscAdmissionArmed(OrbisNpMatching2ContextId context,
 bool HasBbscAdmissionPending(OrbisNpMatching2ContextId context);
 std::vector<BbscAdmissionTicket> GetPendingBbscAdmissionTickets();
 bool ResolveBbscAdmission(const BbscAdmissionTicket& ticket, bool admitted);
+bool BeginBbscAdmissionCleanup(OrbisNpMatching2ContextId context, u64 incarnation,
+                               OrbisNpMatching2RequestId request,
+                               OrbisNpMatching2RoomId room);
+bool ClaimBbscAdmissionFailureCallback(const BbscAdmissionTicket& ticket);
+void CompleteBbscAdmissionDelivery(const BbscAdmissionTicket& ticket);
+bool CompleteBbscAdmissionCleanup(OrbisNpMatching2ContextId context, u64 incarnation,
+                                  OrbisNpMatching2RequestId request,
+                                  OrbisNpMatching2RoomId room, u64 cleanup_nonce, bool success);
 void InvalidateBbscAdmission(OrbisNpMatching2ContextId context,
                              OrbisNpMatching2RoomId room = 0);
 void CancelBbscAdmissionRequest(OrbisNpMatching2ContextId context,
                                 OrbisNpMatching2RequestId request);
+bool CancelBbscAdmissionTicket(const BbscAdmissionTicket& ticket);
+void ClearCancelledBbscAdmissionRequest(OrbisNpMatching2ContextId context, u64 incarnation,
+                                        OrbisNpMatching2RequestId request);
 bool HoldBbscAdmissionResponse(ContextObject& ctx, OrbisNpMatching2RequestId request,
                                OrbisNpMatching2Event event,
                                OrbisNpMatching2RequestCallback callback, void* callback_arg,
@@ -421,11 +432,18 @@ struct PendingEvent {
     OrbisNpMatching2Event msg_event{};
     void* message_data = nullptr;
     BbscAdmissionTicket admission_ticket{};
+    u64 cleanup_nonce = 0;
 };
 
 struct BbscAdmissionState {
     BbscAdmissionTicket ticket;
     bool ready = false;
+    bool cancelled = false;
+    bool cleanup_pending = false;
+    bool delivery_pending = false;
+    bool failure_callback_queued = false;
+    bool cleanup_failed = false;
+    u64 cleanup_nonce = 0;
     OrbisNpMatching2Event req_event{};
     OrbisNpMatching2RequestCallback request_cb = nullptr;
     void* request_cb_arg = nullptr;
@@ -483,6 +501,7 @@ void InitEventDispatcher();
 void TermEventDispatcher();
 
 void ScheduleEvent(PendingEvent ev);
+bool TryScheduleAdmissionEvent(PendingEvent ev);
 
 PS4_SYSV_ABI void* EventDispatcherThreadMain(void* arg);
 

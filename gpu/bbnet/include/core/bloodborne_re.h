@@ -49,6 +49,9 @@ void OnBbscPartyPacket(const Core::Bbsc::Party::Peer& peer, const void* packet, 
 std::vector<BbscPartyPacket> TakeBbscPartyPackets();
 std::vector<BbscCapabilityPacket> TakeBbscCapabilityPackets();
 void TickBbscAdmissionCoordinator();
+// Game-thread first-playable delivery: the host samples a catalog boundary and the guest durably
+// records earned intent before acknowledging it. No inventory/event flags are applied here.
+void TickBbscPartyEventDelivery();
 // BBSC life state: another player says whether it is dead (spectating) or alive. Relay receive
 // thread; only stores it.
 void OnBbscLifePacket(std::uint32_t player, std::uint8_t dead, std::uint32_t sequence);

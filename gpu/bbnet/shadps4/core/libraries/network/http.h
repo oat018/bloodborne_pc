@@ -37,9 +37,17 @@ struct BbscSummonClaimSnapshot {
     BbscSummonSignSnapshot candidate;
 };
 
+enum class BbscPrivateAttemptState { None, Pending, Ready, Expired, Invalid };
+
+struct BbscPrivateAttemptSnapshot {
+    BbscPrivateAttemptState state = BbscPrivateAttemptState::None;
+    u64 generation = 0;
+};
+
 struct BbscSummonObservationSnapshot {
     BbscSummonSignSnapshot own_sign;
     BbscSummonClaimSnapshot claim;
+    BbscPrivateAttemptSnapshot private_attempt;
 };
 
 struct BbscSummonCapabilityProofSnapshot {

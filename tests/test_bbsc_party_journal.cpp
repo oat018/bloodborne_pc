@@ -2,12 +2,14 @@
 #include "core/bbsc_party.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <cerrno>
 #include <cstdio>
 #include <fcntl.h>
 #include <fstream>
 #include <limits>
+#include <openssl/sha.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -50,6 +52,18 @@ extern "C" int close(int fd) {
 static std::string Read(const fs::path& path) {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+static std::string Sha256(std::span<const std::uint8_t> bytes) {
+    std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+    assert(SHA256(bytes.data(), bytes.size(), digest.data()));
+    constexpr char hex[] = "0123456789abcdef";
+    std::string result(SHA256_DIGEST_LENGTH * 2, '0');
+    for (std::size_t i = 0; i < digest.size(); ++i) {
+        result[i * 2] = hex[digest[i] >> 4];
+        result[i * 2 + 1] = hex[digest[i] & 0x0f];
+    }
+    return result;
 }
 
 static void Replace(const fs::path& path, const std::string& bytes) {
@@ -185,6 +199,79 @@ static void TestJournalRoundTrip(const fs::path& root) {
     assert(!StoreJournal(*lease, illegal, ec));
     assert(!PrepareNextParty(*next, PartyId{8}, next->origin, next->fallback));
     std::puts("PASS: subsequent parties preserve earned-claim provenance and monotonic delivery");
+}
+
+static void TestUnadmittedRollback(const fs::path& root) {
+    const auto path = root / "unadmitted-rollback.bin";
+    auto previous = Record(root);
+    std::error_code ec;
+    auto lease = CharacterLease::Acquire(path, ec);
+    assert(lease && StoreJournal(*lease, previous, ec));
+    previous.phase = Phase::Visiting;
+    previous.pending.clear();
+    previous.committed = {2200};
+    assert(StoreJournal(*lease, previous, ec));
+    previous.phase = Phase::Returning;
+    assert(StoreJournal(*lease, previous, ec));
+    previous.phase = Phase::Complete;
+    assert(StoreJournal(*lease, previous, ec));
+    const auto previous_bytes = Read(path);
+
+    const PartyId next_party{20, 21, 22};
+    auto current = PrepareNextParty(previous, next_party, previous.origin, previous.fallback);
+    assert(current && StoreJournal(*lease, *current, ec));
+    current->admission = 88;
+    current->phase = Phase::Visiting;
+    assert(StoreJournal(*lease, *current, ec));
+    auto changed = *current;
+    changed.committed = {2201};
+    assert(!RollbackUnadmittedJournal(*lease, changed, previous, ec) && ec);
+    assert(LoadJournal(path, current->key, ec) == current && Read(path) != previous_bytes);
+
+    fail_rename = true;
+    assert(!RollbackUnadmittedJournal(*lease, *current, previous, ec) && ec);
+    fail_rename = false;
+    assert(LoadJournal(path, current->key, ec) == current);
+    assert(RollbackUnadmittedJournal(*lease, *current, previous, ec) && !ec);
+    assert(LoadJournal(path, previous.key, ec) == previous && Read(path) == previous_bytes);
+
+    const auto prepared_path = root / "unadmitted-prepared.bin";
+    auto prepared_lease = CharacterLease::Acquire(prepared_path, ec);
+    auto prepared_previous = previous;
+    prepared_previous.phase = Phase::Prepared;
+    assert(prepared_lease && StoreJournal(*prepared_lease, prepared_previous, ec));
+    prepared_previous.phase = Phase::Visiting;
+    assert(StoreJournal(*prepared_lease, prepared_previous, ec));
+    prepared_previous.phase = Phase::Returning;
+    assert(StoreJournal(*prepared_lease, prepared_previous, ec));
+    prepared_previous.phase = Phase::Complete;
+    assert(StoreJournal(*prepared_lease, prepared_previous, ec));
+    const auto prepared_previous_bytes = Read(prepared_path);
+    auto prepared_attempt = PrepareNextParty(prepared_previous, PartyId{23, 24, 25},
+                                             prepared_previous.origin, prepared_previous.fallback);
+    assert(prepared_attempt && StoreJournal(*prepared_lease, *prepared_attempt, ec));
+    auto failed_store_attempt = *prepared_attempt;
+    failed_store_attempt.admission = 90;
+    failed_store_attempt.phase = Phase::Visiting;
+    assert(RollbackUnadmittedJournal(*prepared_lease, failed_store_attempt,
+                                     prepared_previous, ec) && !ec);
+    assert(LoadJournal(prepared_path, previous.key, ec) == prepared_previous &&
+           Read(prepared_path) == prepared_previous_bytes);
+
+    const auto first_path = root / "unadmitted-first-join.bin";
+    auto first_lease = CharacterLease::Acquire(first_path, ec);
+    auto first = Record(root);
+    first.pending.clear();
+    first.party = next_party;
+    first.admission = 0;
+    first.phase = Phase::Prepared;
+    assert(first_lease && StoreJournal(*first_lease, first, ec));
+    first.admission = 89;
+    first.phase = Phase::Visiting;
+    assert(StoreJournal(*first_lease, first, ec));
+    assert(RollbackUnadmittedJournal(*first_lease, first, std::nullopt, ec) && !ec);
+    assert(!fs::exists(first_path));
+    std::puts("PASS: unadmitted rollback restores only the exact prior complete journal or durably removes a first-time record");
 }
 
 static void TestJournalRejectsCorruption(const fs::path& root) {
@@ -440,15 +527,33 @@ static void TestSelectedSaveBackup(const fs::path& root) {
     auto lease = CharacterLease::Acquire(journal_path, ec);
     assert(lease && !ec);
     std::vector<std::uint8_t> save(0x140000, 0x5a);
-    const std::string hash(64, 'a');
+    const auto hash = Sha256(save);
+    const auto legacy_backup = root / "selected-save-journal.selected-save-19.bin";
+    Replace(legacy_backup, "preserve legacy backup");
+    const auto backup = root / ("selected-save-journal.selected-save-19-" + hash + ".bin");
     assert(StoreSelectedSaveBackup(*lease, record.key,
         (root / "userdata0002").string(), 7, 8, 19, hash, save, ec) && !ec);
-    const auto backup = root / "selected-save-journal.selected-save-19.bin";
     const auto original = Read(backup);
     assert(original.size() > save.size());
     assert(StoreSelectedSaveBackup(*lease, record.key,
         (root / "userdata0002").string(), 7, 8, 19, hash, save, ec) && !ec);
     assert(Read(backup) == original);
+    assert(Read(legacy_backup) == "preserve legacy backup");
+    auto second_save = save;
+    second_save[0] ^= 1;
+    const auto second_hash = Sha256(second_save);
+    const auto second_backup = root /
+        ("selected-save-journal.selected-save-19-" + second_hash + ".bin");
+    assert(second_hash != hash);
+    assert(StoreSelectedSaveBackup(*lease, record.key,
+        (root / "userdata0002").string(), 7, 8, 19, second_hash, second_save, ec) && !ec);
+    assert(fs::is_regular_file(second_backup) && Read(second_backup) != original);
+    const auto wrong_hash = hash.front() == '0' ? "1" + hash.substr(1) : "0" + hash.substr(1);
+    const auto wrong_hash_backup = root /
+        ("selected-save-journal.selected-save-19-" + wrong_hash + ".bin");
+    assert(!StoreSelectedSaveBackup(*lease, record.key,
+        (root / "userdata0002").string(), 7, 8, 19, wrong_hash, save, ec) && ec);
+    assert(!fs::exists(wrong_hash_backup));
     auto changed = save;
     changed[0] ^= 1;
     assert(!StoreSelectedSaveBackup(*lease, record.key,
@@ -706,6 +811,7 @@ void TestJournal() {
     assert(made);
     const fs::path root = made;
     TestJournalRoundTrip(root);
+    TestUnadmittedRollback(root);
     TestJournalRejectsCorruption(root);
     TestWriteFailures(root);
     TestLeaseAndRestart(root);

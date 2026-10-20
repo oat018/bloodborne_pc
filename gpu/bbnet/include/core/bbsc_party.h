@@ -227,6 +227,8 @@ private:
     std::filesystem::path path_;
     std::intptr_t fd_{-1};
     friend bool StoreJournal(const CharacterLease&, const Journal&, std::error_code&);
+    friend bool RollbackUnadmittedJournal(const CharacterLease&, const Journal&,
+                                          const std::optional<Journal>&, std::error_code&);
     friend bool StoreWorldSnapshot(const CharacterLease&, const CharacterKey&, const PartyId&,
                                    std::span<const std::uint8_t>, SnapshotRef&, std::error_code&);
     friend bool StoreSelectedSaveBackup(const CharacterLease&, const CharacterKey&, std::string_view,
@@ -239,6 +241,10 @@ private:
 
 // One game thread owns updates; the lease excludes other processes, not other threads.
 bool StoreJournal(const CharacterLease& lease, const Journal& record, std::error_code& ec);
+// Restore the prior completed journal (or durably remove a first-time journal) only while the
+// exact Prepared/Visiting attempt is still unmodified and has no newly earned claims.
+bool RollbackUnadmittedJournal(const CharacterLease& lease, const Journal& expected_current,
+                               const std::optional<Journal>& previous, std::error_code& ec);
 bool StoreSelectedSaveBackup(const CharacterLease& lease, const CharacterKey& key,
                              std::string_view selected_path, std::uint64_t server_user,
                              std::uint64_t server_character, std::uint64_t generation,

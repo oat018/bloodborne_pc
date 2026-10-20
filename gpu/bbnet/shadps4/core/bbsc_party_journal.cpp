@@ -2,6 +2,7 @@
 #include "core/bbsc_party.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <charconv>
@@ -10,6 +11,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <openssl/sha.h>
 #include <span>
 #include <unordered_set>
 #include <utility>
@@ -1373,6 +1375,68 @@ bool StoreJournal(const CharacterLease& lease, const Journal& record, std::error
     return AtomicWrite(lease.path_, bytes, true, ec);
 }
 
+bool RollbackUnadmittedJournal(const CharacterLease& lease, const Journal& expected_current,
+                               const std::optional<Journal>& previous, std::error_code& ec) {
+    ec.clear();
+    const bool prepared_attempt = expected_current.phase == Phase::Prepared &&
+                                  expected_current.admission == 0;
+    const bool visiting_attempt = expected_current.phase == Phase::Visiting &&
+                                  expected_current.admission != 0;
+    if (lease.fd_ < 0 || !Valid(expected_current) ||
+        (!prepared_attempt && !visiting_attempt) || !expected_current.pending.empty() ||
+        !expected_current.committed.empty() || expected_current.native_return_selected) {
+        return Fail(ec, std::errc::invalid_argument);
+    }
+    auto prepared_current = expected_current;
+    prepared_current.admission = 0;
+    prepared_current.phase = Phase::Prepared;
+    if (expected_current.world_snapshot.bytes != 0 &&
+        !LoadWorldSnapshot(lease.path_, expected_current.key, expected_current.party,
+                           expected_current.world_snapshot, ec)) return false;
+    const auto current = LoadJournal(lease.path_, expected_current.key, ec);
+    if (!current || (*current != expected_current && *current != prepared_current)) {
+        if (!ec) Fail(ec, std::errc::state_not_recoverable);
+        return false;
+    }
+    if (previous) {
+        if (!Valid(*previous) || previous->key != expected_current.key ||
+            previous->phase != Phase::Complete) {
+            return Fail(ec, std::errc::invalid_argument);
+        }
+        auto prepared = PrepareNextParty(*previous, expected_current.party,
+                                         expected_current.origin, expected_current.fallback);
+        if (!prepared) return Fail(ec, std::errc::invalid_argument);
+        prepared->save_generation = expected_current.save_generation;
+        prepared->world_snapshot = expected_current.world_snapshot;
+        if (*prepared != prepared_current || !AllowedUpdate(*prepared, expected_current))
+            return Fail(ec, std::errc::invalid_argument);
+        const auto bytes = Encode(*previous);
+        return AtomicWrite(lease.path_, bytes, true, ec);
+    }
+    auto prepared = expected_current;
+    prepared.admission = 0;
+    prepared.phase = Phase::Prepared;
+    if (!expected_current.retained.empty() || !Valid(prepared_current) ||
+        !AllowedUpdate(prepared_current, expected_current)) {
+        return Fail(ec, std::errc::invalid_argument);
+    }
+#ifdef _WIN32
+    return Fail(ec, std::errc::operation_not_supported);
+#else
+    if (!fs::remove(lease.path_, ec)) {
+        if (!ec) ec = std::make_error_code(std::errc::no_such_file_or_directory);
+        return false;
+    }
+    const auto parent = lease.path_.parent_path().empty() ? fs::path{"."} : lease.path_.parent_path();
+    const int directory = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory < 0) return SystemError(ec);
+    bool ok = ::fsync(directory) == 0;
+    if (!ok) SystemError(ec);
+    if (::close(directory) != 0 && ok) ok = SystemError(ec);
+    return ok;
+#endif
+}
+
 bool StoreSelectedSaveBackup(const CharacterLease& lease, const CharacterKey& key,
                              std::string_view selected_path, std::uint64_t server_user,
                              std::uint64_t server_character, std::uint64_t generation,
@@ -1393,6 +1457,16 @@ bool StoreSelectedSaveBackup(const CharacterLease& lease, const CharacterKey& ke
         server_character == 0 || generation == 0 || bytes.size() != 0x140000 ||
         !ValidSha256(sha256) || !ids_match || fs::path{selected_path} != expected_path)
         return Fail(ec, std::errc::invalid_argument);
+    std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+    if (!SHA256(bytes.data(), bytes.size(), digest.data()))
+        return Fail(ec, std::errc::io_error);
+    constexpr char hex[] = "0123456789abcdef";
+    std::string actual_sha256(SHA256_DIGEST_LENGTH * 2, '0');
+    for (std::size_t i = 0; i < digest.size(); ++i) {
+        actual_sha256[i * 2] = hex[digest[i] >> 4];
+        actual_sha256[i * 2 + 1] = hex[digest[i] & 0x0f];
+    }
+    if (actual_sha256 != sha256) return Fail(ec, std::errc::invalid_argument);
     std::vector<std::uint8_t> body;
     PutString(body, key.save_dir);
     PutString(body, std::string{selected_path});
@@ -1410,7 +1484,8 @@ bool StoreSelectedSaveBackup(const CharacterLease& lease, const CharacterKey& ke
     Put(encoded, crc32(0, body.data(), static_cast<uInt>(body.size())), 4);
     encoded.insert(encoded.end(), body.begin(), body.end());
     const auto path = lease.path_.parent_path() /
-        (lease.path_.stem().string() + ".selected-save-" + std::to_string(generation) + ".bin");
+        (lease.path_.stem().string() + ".selected-save-" + std::to_string(generation) +
+         "-" + actual_sha256 + ".bin");
     std::error_code exists_error;
     const auto status = fs::symlink_status(path, exists_error);
     if (!exists_error && status.type() != fs::file_type::not_found) {

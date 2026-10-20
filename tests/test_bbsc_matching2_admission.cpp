@@ -3,6 +3,7 @@
 #include "core/libraries/np/np_error.h"
 #include "core/libraries/np/np_matching2/np_matching2_internal.h"
 #include "core/libraries/np/np_matching2/np_matching2_mm.h"
+#include "../gpu/bbnet/shadps4/core/libraries/np/np_matching2/np_matching2_mm.cpp"
 #include "common/logging/log.h"
 
 #include <atomic>
@@ -16,7 +17,7 @@
 using namespace Libraries::Np::NpMatching2;
 
 namespace {
-std::atomic<int> cleanup_calls = 0;
+std::atomic<u64> next_cleanup_pkt = 9000;
 
 struct CallbackState {
     std::mutex mutex;
@@ -55,6 +56,18 @@ void RoomMessageCallback(OrbisNpMatching2ContextId, OrbisNpMatching2RoomId,
     state.cv.notify_all();
 }
 
+void CompleteCurrentCleanup(OrbisNpMatching2ContextId context,
+                           OrbisNpMatching2RoomId room) {
+    const auto it = g_state.admission.find(context);
+    assert(it != g_state.admission.end() && it->second.cleanup_pending);
+    assert(it->second.cleanup_nonce != 0 && it->second.ticket.room == room);
+    shadnet::LeaveRoomReply reply;
+    reply.set_room_id(room);
+    OnMatchingReply(ShadNet::CommandType::LeaveRoom, next_cleanup_pkt.load(),
+                    ShadNet::ErrorType::NoError, MakeProtoPayload(reply));
+    assert(!HasBbscAdmissionPending(context));
+}
+
 void SetLiveRoom(ContextObject& ctx) {
     ctx.room_id = 55;
     ctx.my_member_id = 1;
@@ -84,12 +97,31 @@ namespace Core::Bloodborne {
 void OnBbscPartyRoomState(BbscPartyRoom) {}
 } // namespace Core::Bloodborne
 
-namespace Libraries::Np::NpMatching2 {
-s32 MmLeaveRoomForAdmission(OrbisNpMatching2ContextId, u64, OrbisNpMatching2RoomId) {
-    ++cleanup_calls;
+namespace Libraries::Net {
+u16 PS4_SYSV_ABI sceNetHtons(u16 value) {
+    return static_cast<u16>((value << 8) | (value >> 8));
+}
+} // namespace Libraries::Net
+
+namespace Libraries::Np::NpCommon {
+u32 PS4_SYSV_ABI sceNpJoinThread(Libraries::Kernel::PthreadT, void**) {
     return ORBIS_OK;
 }
+} // namespace Libraries::Np::NpCommon
+
+namespace Libraries::Np::NpMatching2 {
+void StartMatching2SignalingForRoomPeers(ContextObject&, OrbisNpMatching2RoomId) {}
+void QueueMatching2DeadForRoomPeers(ContextObject&, OrbisNpMatching2RoomId, s32) {}
 } // namespace Libraries::Np::NpMatching2
+
+namespace ShadNet {
+bool ShadNetClient::IsAuthenticated() const {
+    return true;
+}
+u64 ShadNetClient::SubmitRequest(CommandType, const std::vector<u8>&) {
+    return ++next_cleanup_pkt;
+}
+} // namespace ShadNet
 
 int main() {
     OrbisNpMatching2ContextId context = 0;
@@ -103,7 +135,43 @@ int main() {
     ctx->room_message_callback_arg = &room_message;
 
     g_state.dispatch_running.store(true);
+    g_mm.client = std::shared_ptr<ShadNet::ShadNetClient>(
+        reinterpret_cast<ShadNet::ShadNetClient*>(uintptr_t{1}), [](ShadNet::ShadNetClient*) {});
     std::thread dispatcher([] { EventDispatcherThreadMain(nullptr); });
+
+    OrbisNpMatching2ContextId stale_context = 0;
+    assert(manager.CreateContext(nullptr, 0, &stale_context) == ORBIS_OK);
+    assert(manager.Start(stale_context) == ORBIS_OK);
+    constexpr OrbisNpMatching2RequestId stale_request = 61;
+    assert(ArmBbscAdmission(stale_context, stale_request));
+    const u64 stale_incarnation = manager.Get(stale_context)->incarnation;
+    assert(manager.Destroy(stale_context));
+    std::array<OrbisNpMatching2ContextId, ContextManager::kMaxContexts - 2> occupied_contexts{};
+    for (auto& occupied_context : occupied_contexts) {
+        assert(manager.CreateContext(nullptr, 0, &occupied_context) == ORBIS_OK);
+    }
+    OrbisNpMatching2ContextId reused_context = 0;
+    assert(manager.CreateContext(nullptr, 0, &reused_context) == ORBIS_OK);
+    assert(reused_context == stale_context);
+    assert(manager.Start(reused_context) == ORBIS_OK);
+    constexpr u64 stale_join_packet = 7001;
+    PendingRequest stale_join{};
+    stale_join.ctx_id = stale_context;
+    stale_join.ctx_incarnation = stale_incarnation;
+    stale_join.admission_armed = true;
+    stale_join.req_id = stale_request;
+    stale_join.req_event = ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM;
+    {
+        std::lock_guard lock(g_mm.pending_mutex);
+        g_mm.pending.emplace(stale_join_packet, stale_join);
+    }
+    OnMatchingReply(ShadNet::CommandType::JoinRoom, stale_join_packet,
+                    ShadNet::ErrorType::RoomMissing, {});
+    assert(!HasBbscAdmissionPending(reused_context));
+    assert(ArmBbscAdmission(reused_context, stale_request + 1));
+    CancelBbscAdmissionRequest(reused_context, stale_request + 1);
+    assert(manager.Destroy(reused_context));
+    for (const auto occupied_context : occupied_contexts) assert(manager.Destroy(occupied_context));
 
     constexpr OrbisNpMatching2RequestId accepted_request = 71;
     CallbackState accepted;
@@ -150,7 +218,21 @@ int main() {
     assert(WaitForCallback(rejected));
     assert(rejected.calls == 1 && rejected.error == ORBIS_NP_MATCHING2_ERROR_ABORTED &&
            rejected.data == nullptr);
-    assert(cleanup_calls == 1);
+    assert(!ResolveBbscAdmission(rejected_tickets.front(), false));
+    assert(rejected.calls == 1);
+    assert(HasBbscAdmissionPending(context));
+    assert(!ArmBbscAdmission(context, 76));
+    const u64 first_cleanup_nonce = g_state.admission.at(context).cleanup_nonce;
+    const u64 context_incarnation = ctx->incarnation;
+    const u64 cleanup_submit_count = next_cleanup_pkt.load();
+    assert(BeginBbscAdmissionCleanup(context, context_incarnation, rejected_request, 55));
+    assert(g_state.admission.at(context).cleanup_nonce == first_cleanup_nonce);
+    assert(next_cleanup_pkt.load() == cleanup_submit_count);
+    CompleteCurrentCleanup(context, 55);
+    assert(ctx->room_id == 0 && !ctx->room_cache.contains(55));
+    assert(ArmBbscAdmission(context, 76));
+    CancelBbscAdmissionRequest(context, 76);
+    SetLiveRoom(*ctx);
 
     constexpr OrbisNpMatching2RequestId changed_owner_request = 73;
     CallbackState changed_owner;
@@ -165,7 +247,12 @@ int main() {
     assert(WaitForCallback(changed_owner));
     assert(changed_owner.calls == 1 && changed_owner.error == ORBIS_NP_MATCHING2_ERROR_ABORTED &&
            changed_owner.data == nullptr);
-    assert(cleanup_calls == 2);
+    assert(HasBbscAdmissionPending(context));
+    assert(!CompleteBbscAdmissionCleanup(context, context_incarnation, rejected_request, 55,
+                                          first_cleanup_nonce, true));
+    assert(ctx->room_id == 55 && ctx->room_cache.contains(55));
+    CompleteCurrentCleanup(context, 55);
+    SetLiveRoom(*ctx);
     SetNpId(ctx->room_cache.at(55).members.at(2).np_id, "host-online-id");
 
     constexpr OrbisNpMatching2RequestId timeout_request = 74;
@@ -191,7 +278,9 @@ int main() {
     assert(WaitForCallback(timed_out));
     assert(timed_out.calls == 1 && timed_out.error == ORBIS_NP_MATCHING2_ERROR_REQUEST_TIMEOUT &&
            timed_out.data == nullptr);
-    assert(cleanup_calls == 3);
+    assert(HasBbscAdmissionPending(context));
+    CompleteCurrentCleanup(context, 55);
+    SetLiveRoom(*ctx);
 
     constexpr OrbisNpMatching2RequestId stopped_request = 75;
     CallbackState stopped;
@@ -204,12 +293,53 @@ int main() {
     assert(manager.Stop(context) == ORBIS_OK);
     assert(!ResolveBbscAdmission(stopped_ticket, true));
     assert(GetPendingBbscAdmissionTickets().empty());
+    assert(HasBbscAdmissionPending(context));
+    CompleteCurrentCleanup(context, 55);
     assert(manager.Start(context) == ORBIS_OK);
     assert(stopped.calls == 0);
+    SetLiveRoom(*ctx);
+
+    OrbisNpMatching2ContextId failed_cleanup_context = 0;
+    assert(manager.CreateContext(nullptr, 0, &failed_cleanup_context) == ORBIS_OK);
+    assert(manager.Start(failed_cleanup_context) == ORBIS_OK);
+    ContextObject* failed_ctx = manager.Get(failed_cleanup_context);
+    SetLiveRoom(*failed_ctx);
+    constexpr OrbisNpMatching2RequestId failed_cleanup_request = 81;
+    CallbackState failed_cleanup_callback;
+    assert(ArmBbscAdmission(failed_cleanup_context, failed_cleanup_request));
+    assert(HoldBbscAdmissionResponse(*failed_ctx, failed_cleanup_request,
+                                     ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM,
+                                     RequestCallback, &failed_cleanup_callback, &response,
+                                     std::make_shared<CallbackPayload>()));
+    const auto failed_ticket = GetPendingBbscAdmissionTickets().front();
+    assert(!ResolveBbscAdmission(failed_ticket, false));
+    assert(WaitForCallback(failed_cleanup_callback));
+    const u64 failed_packet = next_cleanup_pkt.load();
+    OnMatchingReply(ShadNet::CommandType::LeaveRoom, failed_packet,
+                    ShadNet::ErrorType::RoomMissing, {});
+    assert(g_state.admission.at(failed_cleanup_context).cleanup_failed);
+    assert(!ArmBbscAdmission(failed_cleanup_context, failed_cleanup_request + 1));
+
+    manager.Destroy(failed_cleanup_context);
+
+    constexpr OrbisNpMatching2RequestId shutdown_request = 76;
+    CallbackState shutdown_callback;
+    auto shutdown_payload = std::make_shared<CallbackPayload>();
+    std::weak_ptr<CallbackPayload> shutdown_weak = shutdown_payload;
+    assert(ArmBbscAdmission(context, shutdown_request));
+    assert(HoldBbscAdmissionResponse(*ctx, shutdown_request,
+                                     ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM,
+                                     RequestCallback, &shutdown_callback, &response,
+                                     std::move(shutdown_payload)));
+    const auto shutdown_ticket = GetPendingBbscAdmissionTickets().front();
+    TermEventDispatcher();
+    dispatcher.join();
+    assert(!g_state.dispatch_running.load());
+    assert(shutdown_weak.expired());
+    assert(g_state.pending_events.empty());
+    assert(!ResolveBbscAdmission(shutdown_ticket, true));
+    assert(shutdown_callback.calls == 0);
 
     manager.Destroy(context);
-    g_state.dispatch_running.store(false);
-    g_state.queue_cv.notify_all();
-    dispatcher.join();
-    std::puts("PASS: admission hold preserves room messages, resolves once, and dispatches rejection/timeout cleanup");
+    std::puts("PASS: admission hold preserves room messages, resolves once, and gates retries through correlated cleanup");
 }

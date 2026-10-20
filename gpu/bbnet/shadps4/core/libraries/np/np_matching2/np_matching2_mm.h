@@ -63,7 +63,8 @@ s32 MmJoinRoomA(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_
 s32 MmLeaveRoom(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_id,
                 const OrbisNpMatching2LeaveRoomRequest& request);
 s32 MmLeaveRoomForAdmission(OrbisNpMatching2ContextId ctx_id, u64 incarnation,
-                            OrbisNpMatching2RoomId room_id);
+                            OrbisNpMatching2RequestId request_id, OrbisNpMatching2RoomId room_id,
+                            u64 cleanup_nonce);
 s32 MmGetWorldInfoList(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_id,
                        const OrbisNpMatching2GetWorldInfoListRequest& request);
 s32 MmSearchRoom(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_id,

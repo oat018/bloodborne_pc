@@ -31,6 +31,7 @@ std::vector<Libraries::Np::NpMatching2::BbscAdmissionTicket> bbsc_test_admission
 std::vector<std::pair<Libraries::Np::NpMatching2::BbscAdmissionTicket, bool>>
     bbsc_test_admission_resolutions;
 Libraries::Http::BbscSummonCapabilityProofSnapshot bbsc_test_capability_proofs;
+bool bbsc_test_admission_resolution_success = true;
 }
 
 namespace Libraries::Np::NpMatching2 {
@@ -39,7 +40,12 @@ std::vector<BbscAdmissionTicket> GetPendingBbscAdmissionTickets() {
 }
 bool ResolveBbscAdmission(const BbscAdmissionTicket& ticket, bool admitted) {
     bbsc_test_admission_resolutions.emplace_back(ticket, admitted);
-    return true;
+    std::erase_if(bbsc_test_admission_tickets, [&](const auto& pending) {
+        return pending.context == ticket.context && pending.incarnation == ticket.incarnation &&
+            pending.request == ticket.request && pending.room == ticket.room &&
+            pending.nonce == ticket.nonce;
+    });
+    return bbsc_test_admission_resolution_success;
 }
 } // namespace Libraries::Np::NpMatching2
 
@@ -799,13 +805,20 @@ static void TestCapabilityAdmissionHostTick() {
     sent.clear();
     bbsc_test_capability_proofs = {};
     bbsc_test_capability_proofs.observation.own_sign.valid = true;
+    bbsc_test_capability_proofs.observation.own_sign.user_id = 4127;
+    bbsc_test_capability_proofs.observation.own_sign.character_id = 2723151752040083LL;
     bbsc_test_capability_proofs.observation.own_sign.summon_type = 0;
+    bbsc_test_capability_proofs.observation.private_attempt = {
+        Libraries::Http::BbscPrivateAttemptState::Ready, 1};
     bbsc_test_capability_proofs.observation.claim.valid = true;
     bbsc_test_capability_proofs.observation.claim.matched_unique_candidate = true;
     bbsc_test_capability_proofs.observation.claim.password_matches_own_sign = true;
     bbsc_test_capability_proofs.own.fill(0x11);
     bbsc_test_capability_proofs.selected.fill(0x22);
     bbsc_native_coop_hooks_ready = true;
+    const char* prior_bbsc = std::getenv("BB_BBSC");
+    const std::optional<std::string> prior_bbsc_value = prior_bbsc
+        ? std::optional<std::string>{prior_bbsc} : std::nullopt;
     setenv("BB_BBSC", "1", 1);
     OnBbscPartyRoomState({2, 77, true, "host", {"guest"}});
     assert(SetBbscPartyPeers(std::array<Peer, 1>{Peer{"guest", 41}}));
@@ -817,6 +830,11 @@ static void TestCapabilityAdmissionHostTick() {
     probe.own_proof.fill(0x22);
     probe.selected_proof.fill(0x11);
     auto bytes = EncodeCapability(probe);
+    ++bbsc_test_capability_proofs.observation.own_sign.character_id;
+    OnBbscPartyPacket({"guest", 41}, bytes.data(), bytes.size());
+    TickBbscAdmissionCoordinator();
+    assert(sent.empty());
+    --bbsc_test_capability_proofs.observation.own_sign.character_id;
     OnBbscPartyPacket({"guest", 41}, bytes.data(), bytes.size());
     TickBbscAdmissionCoordinator();
     assert(sent.size() == 1 && sent[0].first == (Peer{"guest", 41}));
@@ -834,6 +852,9 @@ static void TestCapabilityAdmissionHostTick() {
     OnBbscPartyRoomState({2, 0, false, {}, {}});
     established.clear();
     bbsc_native_coop_hooks_ready = false;
+    bbsc_test_capability_proofs = {};
+    if (prior_bbsc_value) setenv("BB_BBSC", prior_bbsc_value->c_str(), 1);
+    else unsetenv("BB_BBSC");
     std::puts("PASS: capability game tick confirms only the current actual member's matching claim proof");
 }
 
@@ -841,6 +862,7 @@ static void TestPartyPeerSelectionRefresh() {
     using namespace Core::Bloodborne;
     using namespace Core::Bbsc::Party;
     auto& established = Libraries::Np::NpSignaling::Helpers::bbsc_test_established_peers;
+    std::this_thread::sleep_for(std::chrono::milliseconds(510)); // Wait out the production refresh throttle.
     OnBbscPartyRoomState({2, 77, false, "host", {"host", "guest"}});
     established = {{"host", 19}, {"guest", 21}, {"unrelated", 25}};
     TickBbscPartyPeerSelection();
@@ -1183,13 +1205,21 @@ static void TestNativeCharacterIdentity() {
     std::array<u8, 0x40> flag_node{};
     std::array<u8, BbscWorldGroupBytes> live_flags{};
     std::array<u8, 0x130> matching{};
+    std::array<u8, 0x80> local_world_state{};
+    std::array<u8, 0x28> local_modules{};
+    std::array<u8, 0x100> local_module_data{};
     const auto address = [](auto& data) { return reinterpret_cast<u64>(data.data()); };
     image_base = address(image);
     MemoryPatcher::g_eboot_image_size = image.size();
     WriteValue<u64>(image_base, GlobalStatePointerOffset, address(global));
     WriteValue<u64>(image_base, PlayerSlotManagerPointerOffset, address(slots));
     WriteValue<u64>(image_base, MatchingStatePointerOffset, address(matching));
+    WriteValue<u64>(image_base, CandidateLocalStatePointerOffset, address(local_world_state));
     WriteValue<u64>(address(slots), 8, address(local));
+    WriteValue<u64>(address(local_world_state), 0x60, address(local));
+    WriteValue<u64>(address(local), 0x3B0, address(local_modules));
+    WriteValue<u64>(address(local_modules), 0x20, address(local_module_data));
+    WriteValue<s32>(address(local_module_data), 0xF8, 1000);
     WriteValue<s32>(address(global), 0x1490, 1);
     WriteValue<u8>(address(global), 0x1592, 1);
     WriteValue<s32>(address(matching), 0x124, 0);
@@ -1337,6 +1367,460 @@ static void TestNativeCharacterIdentity() {
     assert(!PrepareBbscNativePartyHome({4, 6}, ec, true) && ec);
     assert(!Core::Bbsc::Party::LoadJournal(BbscPartyHomePath(original_key), original_key, ec));
     mock_receipt_sha = good_receipt_hash;
+
+    // The guest has no outgoing claim; the host selects its own advertised sign by proof.
+    using namespace Core::Bbsc::Party;
+    bbsc_test_admission_tickets.clear();
+    bbsc_test_admission_resolutions.clear();
+    auto& admission_peers = Libraries::Np::NpSignaling::Helpers::bbsc_test_established_peers;
+    auto& admission_packets = Libraries::Np::NpSignaling::Helpers::bbsc_test_sent_packets;
+    admission_peers = {{"host", 41}};
+    admission_packets.clear();
+    bbsc_test_capability_proofs = {};
+    bbsc_test_capability_proofs.observation.private_attempt = {
+        Libraries::Http::BbscPrivateAttemptState::Ready, 12};
+    bbsc_test_capability_proofs.observation.own_sign = {
+        .valid = true, .session_id = "guest-session", .user_id = 4127,
+        .character_id = 2723151752040083LL, .summon_type = 0};
+    bbsc_test_capability_proofs.own.fill(0x11);
+    assert(ProofIsZero(bbsc_test_capability_proofs.selected));
+    bbsc_native_coop_hooks_ready = true;
+    const char* bbsc_setting = std::getenv("BB_BBSC");
+    const std::optional<std::string> previous_bbsc_setting = bbsc_setting
+        ? std::optional<std::string>{bbsc_setting} : std::nullopt;
+    setenv("BB_BBSC", "1", 1);
+    OnBbscPartyRoomState({34, 77, false, "host", {"host"}});
+    Libraries::Np::NpMatching2::BbscAdmissionTicket ticket;
+    ticket.context = 34;
+    ticket.incarnation = 2;
+    ticket.request = 5;
+    ticket.room = 77;
+    ticket.nonce = 0x99887766;
+    ticket.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    std::strcpy(ticket.owner.data, "host");
+    bbsc_test_admission_tickets = {ticket};
+    TickBbscAdmissionCoordinator();
+    assert(BbscAdmissionSuppressesOwnWorldRecovery(original_key));
+    auto another_character = original_key;
+    another_character.character[0] ^= 1;
+    assert(!BbscAdmissionSuppressesOwnWorldRecovery(another_character));
+    assert(admission_packets.size() == 1 && admission_packets[0].first == (Peer{"host", 41}));
+    const auto probe = DecodeCapability(admission_packets[0].second);
+    assert(probe && probe->kind == CapabilityKind::Probe && probe->room == ticket.room &&
+           probe->own_proof == bbsc_test_capability_proofs.own &&
+           ProofIsZero(probe->selected_proof));
+    Capability confirm;
+    confirm.kind = CapabilityKind::Confirm;
+    confirm.room = ticket.room;
+    confirm.challenge = probe->challenge;
+    confirm.own_proof.fill(0x33);
+    confirm.selected_proof = bbsc_test_capability_proofs.own;
+    auto confirm_bytes = EncodeCapability(confirm);
+    OnBbscPartyPacket({"unrelated", 99}, confirm_bytes.data(), confirm_bytes.size());
+    TickBbscAdmissionCoordinator();
+    assert(bbsc_test_admission_resolutions.empty());
+    confirm.challenge[0] ^= 1;
+    confirm_bytes = EncodeCapability(confirm);
+    OnBbscPartyPacket({"host", 41}, confirm_bytes.data(), confirm_bytes.size());
+    TickBbscAdmissionCoordinator();
+    assert(bbsc_test_admission_resolutions.empty());
+    confirm.challenge = probe->challenge;
+    confirm.selected_proof.fill(0x99);
+    confirm_bytes = EncodeCapability(confirm);
+    OnBbscPartyPacket({"host", 41}, confirm_bytes.data(), confirm_bytes.size());
+    TickBbscAdmissionCoordinator();
+    assert(bbsc_test_admission_resolutions.empty());
+    confirm.selected_proof = bbsc_test_capability_proofs.own;
+    confirm_bytes = EncodeCapability(confirm);
+    OnBbscPartyPacket({"host", 41}, confirm_bytes.data(), confirm_bytes.size());
+    TickBbscAdmissionCoordinator();
+    const auto admission_record = Core::Bbsc::Party::LoadJournal(
+        BbscPartyHomePath(original_key), original_key, ec);
+    assert(admission_record && admission_record->phase == Phase::Visiting &&
+           admission_record->admission == ticket.nonce && bbsc_test_admission_resolutions.size() == 1 &&
+           bbsc_test_admission_resolutions[0].second);
+    const auto selected_backup = BbscPartyHomePath(original_key).parent_path() /
+        (BbscPartyHomePath(original_key).stem().string() + ".selected-save-" +
+         std::to_string(mock_receipt_generation) + "-" + mock_receipt_sha + ".bin");
+    assert(std::filesystem::is_regular_file(selected_backup));
+    // A queued callback has a durable Visiting record before the native Lua event, and must not
+    // be mistaken for a crashed return while the join load is still pending.
+    assert(BbscAdmissionSuppressesOwnWorldRecovery(original_key));
+    assert(ConsumeBbscAdmittedJoinForNativeEvent());
+    assert(bbsc_admitted_join && bbsc_admitted_join->consumed);
+    assert(BbscAdmissionSuppressesOwnWorldRecovery(original_key));
+    WriteValue<s32>(address(matching), 0x124, 6);
+    WriteValue<s32>(address(local), 0xA4, 1);
+    WriteValue<u8>(address(global), 0x08, 0);
+
+    // A production game-tick exchange proves the first-playable boundary, durable Ack, and
+    // post-boundary event path using the real temporary journal and the existing peer inbox.
+    const auto previous_delivery_flag_manager = flag_manager;
+    std::array<u8, 0x20> delivery_head{};
+    std::vector<std::array<u8, 0x40>> delivery_nodes(BbscNativeProofGroupKeyCount);
+    std::vector<u8> delivery_storage(BbscNativeProofGroupKeyCount * BbscWorldGroupBytes);
+    const u64 delivery_head_addr = address(delivery_head);
+    WriteValue<u8>(delivery_head_addr, 0x19, 1);
+    const auto build_delivery_tree = [&](auto&& self, size_t first, size_t last, u64 parent) -> u64 {
+        if (first >= last) return delivery_head_addr;
+        const size_t middle = first + (last - first) / 2;
+        const u64 node = address(delivery_nodes[middle]);
+        WriteValue<u64>(node, 0x08, parent);
+        WriteValue<u8>(node, 0x19, 0);
+        WriteValue<u32>(node, 0x20, BbscNativeProofGroupKeys[middle]);
+        WriteValue<s32>(node, 0x28, 1);
+        WriteValue<u32>(node, 0x30, static_cast<u32>(middle));
+        WriteValue<u64>(node, 0x00, self(self, first, middle, node));
+        WriteValue<u64>(node, 0x10, self(self, middle + 1, last, node));
+        return node;
+    };
+    WriteValue<u64>(delivery_head_addr, 0x08,
+        build_delivery_tree(build_delivery_tree, 0, delivery_nodes.size(), delivery_head_addr));
+    WriteValue<u32>(address(flag_manager), 0x1C, 1000);
+    WriteValue<u32>(address(flag_manager), 0x20, BbscWorldGroupBytes);
+    WriteValue<u32>(address(flag_manager), 0x24, static_cast<u32>(delivery_nodes.size()));
+    WriteValue<u64>(address(flag_manager), 0x28, address(delivery_storage));
+    WriteValue<u64>(address(flag_manager), 0x38, delivery_head_addr);
+    WriteValue<u64>(image_base, WorldFlagManPointerOffset, address(flag_manager));
+    const auto set_catalog_flag = [&](u32 flag) {
+        const auto group = std::ranges::find(BbscNativeProofGroupKeys, flag / 1000);
+        assert(group != BbscNativeProofGroupKeys.end());
+        const size_t slot = static_cast<size_t>(group - BbscNativeProofGroupKeys.begin());
+        const u32 bit = flag % 1000;
+        delivery_storage[slot * BbscWorldGroupBytes + bit / 8] |=
+            static_cast<u8>(0x80u >> (bit % 8));
+    };
+    set_catalog_flag(12101800); // Pre-existing host completion belongs in baseline only.
+    const auto catalog_before = ReadBbscPartyCatalogState();
+    assert(catalog_before && (*catalog_before)[0]); // Native flag bytes are MSB-first.
+    auto& established = Libraries::Np::NpSignaling::Helpers::bbsc_test_established_peers;
+    auto& sent_packets = Libraries::Np::NpSignaling::Helpers::bbsc_test_sent_packets;
+    established = {{"guest", 42}, {"host", 41}};
+    sent_packets.clear();
+    WriteValue<s32>(address(local), 0xA4, 0); // Host role, first playable frame.
+    bbsc_test_capability_proofs = {};
+    bbsc_test_capability_proofs.observation.private_attempt = {
+        Libraries::Http::BbscPrivateAttemptState::Ready, 22};
+    bbsc_test_capability_proofs.observation.own_sign = {
+        .valid = true, .session_id = "host-session", .user_id = 4127,
+        .character_id = 2723151752040083LL, .summon_type = 0};
+    bbsc_test_capability_proofs.observation.claim.valid = true;
+    bbsc_test_capability_proofs.observation.claim.matched_unique_candidate = true;
+    bbsc_test_capability_proofs.observation.claim.password_matches_own_sign = true;
+    bbsc_test_capability_proofs.own.fill(0x33);
+    bbsc_test_capability_proofs.selected.fill(0x11);
+    OnBbscPartyRoomState({34, 77, true, "host", {"guest"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"guest", 42}}}));
+    Capability host_probe;
+    host_probe.kind = CapabilityKind::Probe;
+    host_probe.room = 77;
+    host_probe.challenge = probe->challenge;
+    host_probe.own_proof.fill(0x11);
+    auto host_probe_bytes = EncodeCapability(host_probe);
+    OnBbscPartyPacket({"guest", 42}, host_probe_bytes.data(), host_probe_bytes.size());
+    TickBbscAdmissionCoordinator(); // Host capability confirmation stamps the exact peer/challenge.
+    assert(std::ranges::any_of(sent_packets, [](const auto& packet) {
+        const auto decoded = DecodeCapability(packet.second);
+        return decoded && decoded->kind == CapabilityKind::Confirm;
+    }));
+    sent_packets.clear();
+
+    WriteValue<s32>(address(local), 0xA4, 1); // Guest becomes playable; this is when it requests baseline.
+    OnBbscPartyRoomState({34, 77, false, "host", {"host"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"host", 41}}}));
+    const auto guest_room = GetBbscPartyRoomState();
+    const auto guest_live_key = ReadBbscPartyCharacterKey(false);
+    assert(bbsc_admitted_join && bbsc_admitted_join->consumed && guest_room && !guest_live_key &&
+           BbscPartyGuestPlayable(*guest_room, bbsc_admitted_join->key));
+    TickBbscPartyEventDelivery();
+    assert(sent_packets.size() == 1 && sent_packets[0].first == (Peer{"host", 41}));
+    const auto guest_hello = sent_packets.front().second;
+    sent_packets.clear();
+
+    WriteValue<s32>(address(local), 0xA4, 0); // Host captures its complete baseline on this game tick.
+    OnBbscPartyRoomState({34, 77, true, "host", {"guest"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"guest", 42}}}));
+    OnBbscPartyPacket({"guest", 42}, guest_hello.data(), guest_hello.size());
+    TickBbscPartyEventDelivery();
+    assert(!sent_packets.empty());
+    set_catalog_flag(12201800); // Earned after the boundary, while baseline packets are still in flight.
+    assert(!bbsc_confirmed_party_peers.empty());
+    bbsc_confirmed_party_peers.front().last_send_ms = SteadyNowMs() - 1'000;
+    TickBbscPartyEventDelivery(); // Baseline and event remain retryable until durable Ack.
+    auto host_delivery = sent_packets;
+    sent_packets.clear();
+
+    WriteValue<s32>(address(local), 0xA4, 1);
+    OnBbscPartyRoomState({34, 77, false, "host", {"host"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"host", 41}}}));
+    for (const auto& packet : host_delivery)
+        OnBbscPartyPacket({"host", 41}, packet.second.data(), packet.second.size());
+    auto blocked_lease = CharacterLease::Acquire(BbscPartyHomePath(original_key), ec);
+    assert(blocked_lease); // A journal lease failure must hold the Ack.
+    TickBbscPartyEventDelivery();
+    assert(bbsc_guest_party_admission && bbsc_guest_party_admission->receiver.Active() &&
+           !bbsc_guest_party_admission->durable_baseline_ack);
+    assert(std::ranges::none_of(sent_packets, [](const auto& packet) {
+        const auto decoded = DecodeMessage(packet.second);
+        return decoded && decoded->kind == Kind::Ack;
+    }));
+    blocked_lease.reset();
+    TickBbscPartyEventDelivery();
+    assert(bbsc_guest_party_admission->durable_baseline_ack);
+    const auto after_baseline = LoadJournal(BbscPartyHomePath(original_key), original_key, ec);
+    assert(after_baseline && after_baseline->committed.empty() &&
+           std::ranges::find(after_baseline->pending, 12101800) == after_baseline->pending.end() &&
+           std::ranges::find(after_baseline->pending, 12201800) != after_baseline->pending.end());
+    assert(BbscAdmissionSuppressesOwnWorldRecovery(original_key) == false);
+    assert(!bbsc_admitted_join); // The recovery bypass ends only after durable baseline Ack.
+    auto guest_ack_packets = sent_packets;
+    sent_packets.clear();
+
+    WriteValue<s32>(address(local), 0xA4, 0);
+    OnBbscPartyRoomState({34, 77, true, "host", {"guest"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"guest", 42}}}));
+    for (const auto& packet : guest_ack_packets)
+        OnBbscPartyPacket({"guest", 42}, packet.second.data(), packet.second.size());
+    TickBbscPartyEventDelivery(); // Durable Ack retires setup and the post-boundary event.
+    sent_packets.clear();
+    TickBbscPartyEventDelivery();
+    auto first_event_packets = sent_packets;
+    assert(std::ranges::none_of(first_event_packets, [](const auto& packet) {
+        const auto decoded = DecodeMessage(packet.second);
+        return decoded && decoded->kind == Kind::Event && decoded->events == std::vector<u32>{12201800};
+    }));
+    sent_packets.clear();
+
+    WriteValue<s32>(address(local), 0xA4, 1);
+    OnBbscPartyRoomState({34, 77, false, "host", {"host"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"host", 41}}}));
+    for (const auto& packet : first_event_packets)
+        OnBbscPartyPacket({"host", 41}, packet.second.data(), packet.second.size());
+    Core::Bbsc::Party::Message wrong_peer_event;
+    wrong_peer_event.party = probe->challenge;
+    wrong_peer_event.admission = ticket.nonce;
+    wrong_peer_event.sequence = 2;
+    wrong_peer_event.kind = Kind::Event;
+    wrong_peer_event.events = {12301800};
+    const auto wrong_peer_bytes = EncodeMessage(wrong_peer_event);
+    OnBbscPartyPacket({"stranger", 99}, wrong_peer_bytes.data(), wrong_peer_bytes.size());
+    TickBbscPartyEventDelivery();
+    auto earned_after_first = LoadJournal(BbscPartyHomePath(original_key), original_key, ec);
+    assert(earned_after_first && earned_after_first->pending == std::vector<u32>{12201800});
+    sent_packets.clear();
+
+    // Death does not close a same-party channel. Host flags continue to be observed with the
+    // native world available even when host HP is zero.
+    WriteValue<s32>(address(local), 0xA4, 0);
+    WriteValue<s32>(address(local_module_data), 0xF8, 0);
+    set_catalog_flag(12301800);
+    OnBbscPartyRoomState({34, 77, true, "host", {"guest"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"guest", 42}}}));
+    bbsc_confirmed_party_peers.front().last_send_ms = SteadyNowMs() - 1'000;
+    TickBbscPartyEventDelivery();
+    auto death_event_packets = sent_packets;
+    assert(std::ranges::any_of(death_event_packets, [](const auto& packet) {
+        const auto decoded = DecodeMessage(packet.second);
+        return decoded && decoded->kind == Kind::Event && decoded->events == std::vector<u32>{12301800};
+    }));
+    sent_packets.clear();
+    WriteValue<s32>(address(local), 0xA4, 1);
+    WriteValue<s32>(address(local_module_data), 0xF8, 0);
+    OnBbscPartyRoomState({34, 77, false, "host", {"host"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"host", 41}}}));
+    for (const auto& packet : death_event_packets)
+        OnBbscPartyPacket({"host", 41}, packet.second.data(), packet.second.size());
+    TickBbscPartyEventDelivery();
+    auto earned_after_death = LoadJournal(BbscPartyHomePath(original_key), original_key, ec);
+    assert(earned_after_death && earned_after_death->pending == (std::vector<u32>{12201800, 12301800}));
+
+    // During loading, the selected identity reader can be unavailable. The cached exact key still
+    // binds persistence to the same journal and does not close eligibility or write foreign state.
+    WriteValue<s32>(address(local), 0xA4, 0);
+    WriteValue<s32>(address(local_module_data), 0xF8, 1000);
+    WriteValue<u8>(address(global), 0x08, 0);
+    set_catalog_flag(12301700);
+    OnBbscPartyRoomState({34, 77, true, "host", {"guest"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"guest", 42}}}));
+    bbsc_confirmed_party_peers.front().last_send_ms = SteadyNowMs() - 1'000;
+    TickBbscPartyEventDelivery();
+    auto loading_event_packets = sent_packets;
+    sent_packets.clear();
+    WriteValue<s32>(address(local), 0xA4, 1);
+    WriteValue<u64>(address(local), 0x688, 0);
+    WriteValue<u8>(address(global), 0x08, 1);
+    OnBbscPartyRoomState({34, 77, false, "host", {"host"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"host", 41}}}));
+    for (const auto& packet : loading_event_packets)
+        OnBbscPartyPacket({"host", 41}, packet.second.data(), packet.second.size());
+    TickBbscPartyEventDelivery();
+    auto earned_after_loading = LoadJournal(BbscPartyHomePath(original_key), original_key, ec);
+    assert(bbsc_guest_party_admission && earned_after_loading &&
+           earned_after_loading->pending == (std::vector<u32>{12201800, 12301800, 12301700}));
+    WriteValue<u64>(address(local), 0x688, 4127);
+    WriteValue<u8>(address(global), 0x08, 0);
+    WriteValue<s32>(address(local_module_data), 0xF8, 1000);
+
+    // The native guest session ends before Matching2 republishes the room; terminal Leave still
+    // closes the exact channel and queued post-exit events are not persisted.
+    WriteValue<s32>(address(matching), 0x124, 0);
+    sent_packets.clear();
+    TickBbscPartyEventDelivery();
+    auto leave_packets = sent_packets;
+    assert(!bbsc_guest_party_admission && std::ranges::any_of(leave_packets, [](const auto& packet) {
+        const auto decoded = DecodeMessage(packet.second);
+        return decoded && decoded->kind == Kind::Leave;
+    }));
+    sent_packets.clear();
+    WriteValue<s32>(address(local), 0xA4, 0);
+    OnBbscPartyRoomState({34, 77, true, "host", {"guest"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"guest", 42}}}));
+    for (const auto& packet : leave_packets)
+        if (const auto decoded = DecodeMessage(packet.second); decoded && decoded->kind == Kind::Leave)
+            OnBbscPartyPacket({"guest", 42}, packet.second.data(), packet.second.size());
+    TickBbscPartyEventDelivery();
+    assert(std::ranges::any_of(bbsc_confirmed_party_peers, [](const auto& entry) { return entry.closed; }));
+    sent_packets.clear();
+    TickBbscPartyEventDelivery();
+    assert(sent_packets.empty()); // No events are earned or delivered after confirmed room exit.
+    WriteValue<s32>(address(local), 0xA4, 1);
+    OnBbscPartyRoomState({34, 77, false, "host", {"host"}}); // Deliberately retain the stale room.
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"host", 41}}}));
+    Core::Bbsc::Party::Message after_exit;
+    after_exit.party = probe->challenge;
+    after_exit.admission = ticket.nonce;
+    after_exit.sequence = 4;
+    after_exit.kind = Kind::Event;
+    after_exit.events = {12301900};
+    const auto after_exit_bytes = EncodeMessage(after_exit);
+    OnBbscPartyPacket({"host", 41}, after_exit_bytes.data(), after_exit_bytes.size());
+    TickBbscPartyEventDelivery();
+    const auto after_exit_record = LoadJournal(BbscPartyHomePath(original_key), original_key, ec);
+    assert(after_exit_record && std::ranges::find(after_exit_record->pending, 12301900) ==
+                                    after_exit_record->pending.end());
+    bbsc_confirmed_party_peers.clear();
+    bbsc_guest_party_admission.reset();
+    bbsc_admitted_join.reset();
+    OnBbscPartyRoomState({34, 0, false, "", {}});
+    WriteValue<s32>(address(local), 0xA4, 0);
+    WriteValue<s32>(address(matching), 0x124, 0);
+    std::filesystem::remove(BbscPartyHomePath(original_key), ec);
+    assert(!ec);
+    // Before a managed admission is known, missing room publication must not close the vanilla
+    // summon curtain. A real managed room loss above still releases its own cover.
+    bbsc_guest_party_admission.reset();
+    bbsc_admitted_join.reset();
+    bbsc_load_cover = {};
+    bbsc_load_cover.active = true;
+    bbsc_load_cover.why = "summon";
+    TickBbscPartyEventDelivery();
+    assert(bbsc_load_cover.active);
+    bbsc_load_cover = {};
+    admission_packets.clear();
+    flag_manager = previous_delivery_flag_manager;
+    WriteValue<s32>(address(matching), 0x124, 6);
+    OnBbscPartyRoomState({34, 77, false, "host", {"host"}});
+    assert(SetBbscPartyPeers(std::array<Peer, 1>{{{"host", 41}}}));
+
+    const auto start_admission = [&](s32 context, u64 private_generation) {
+        ticket.context = context;
+        ticket.nonce += 1;
+        ticket.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        bbsc_test_admission_tickets = {ticket};
+        bbsc_test_admission_resolutions.clear();
+        admission_packets.clear();
+        bbsc_test_capability_proofs = {};
+        bbsc_test_capability_proofs.observation.private_attempt = {
+            Libraries::Http::BbscPrivateAttemptState::Ready, private_generation};
+        bbsc_test_capability_proofs.observation.own_sign = {
+            .valid = true, .session_id = "guest-session", .user_id = 4127,
+            .character_id = 2723151752040083LL, .summon_type = 0};
+        bbsc_test_capability_proofs.own.fill(0x11);
+        TickBbscAdmissionCoordinator();
+        assert(admission_packets.size() == 1);
+        const auto sent_probe = DecodeCapability(admission_packets[0].second);
+        assert(sent_probe && sent_probe->kind == CapabilityKind::Probe);
+        return *sent_probe;
+    };
+    const auto reject_confirmation = [&](const Capability& sent_probe) {
+        Capability bad_confirm;
+        bad_confirm.kind = CapabilityKind::Confirm;
+        bad_confirm.room = sent_probe.room;
+        bad_confirm.challenge = sent_probe.challenge;
+        bad_confirm.own_proof.fill(0x33);
+        bad_confirm.selected_proof = bbsc_test_capability_proofs.own;
+        const auto bytes = EncodeCapability(bad_confirm);
+        OnBbscPartyPacket({"host", 41}, bytes.data(), bytes.size());
+        TickBbscAdmissionCoordinator();
+        assert(bbsc_test_admission_resolutions.size() == 1 &&
+               !bbsc_test_admission_resolutions[0].second);
+        assert(!Core::Bbsc::Party::LoadJournal(BbscPartyHomePath(original_key), original_key, ec));
+    };
+
+    auto sent_probe = start_admission(34, 13);
+    bbsc_test_capability_proofs.observation.own_sign.summon_type = 1; // stale native role
+    reject_confirmation(sent_probe);
+    sent_probe = start_admission(34, 14);
+    bbsc_test_capability_proofs.observation.private_attempt.generation += 1; // stale request generation
+    reject_confirmation(sent_probe);
+    sent_probe = start_admission(34, 15);
+    bbsc_test_capability_proofs.observation.own_sign.character_id += 1; // sign belongs to another save
+    reject_confirmation(sent_probe);
+    sent_probe = start_admission(34, 16);
+    mock_receipt_sha.assign(64, '0'); // selected-save hash changed after the challenge
+    reject_confirmation(sent_probe);
+    mock_receipt_sha = good_receipt_hash;
+    sent_probe = start_admission(34, 17);
+    mock_receipt_override_path = (folder / "userdata0002").string(); // selected path changed
+    reject_confirmation(sent_probe);
+    mock_receipt_override_path.clear();
+    sent_probe = start_admission(34, 18);
+    WriteValue<u64>(address(local), 0x690, 2723151752040084ULL); // selected character changed
+    reject_confirmation(sent_probe);
+    WriteValue<u64>(address(local), 0x690, 2723151752040083ULL);
+    sent_probe = start_admission(34, 19);
+    Capability stale_confirm;
+    stale_confirm.kind = CapabilityKind::Confirm;
+    stale_confirm.room = sent_probe.room;
+    stale_confirm.challenge = sent_probe.challenge;
+    stale_confirm.own_proof.fill(0x33);
+    stale_confirm.selected_proof = bbsc_test_capability_proofs.own;
+    const auto stale_confirm_bytes = EncodeCapability(stale_confirm);
+    Journal prior_complete;
+    prior_complete.key = original_key;
+    prior_complete.party.fill(0x5a);
+    prior_complete.origin = {0x18010000, 10, 20, 30, 0.5f, 2412950};
+    prior_complete.fallback = {0x18010000, 100, 200, 300, 0.75f, 2412950};
+    {
+        auto lease = CharacterLease::Acquire(BbscPartyHomePath(original_key), ec);
+        assert(lease);
+        assert(StoreJournal(*lease, prior_complete, ec));
+        prior_complete.admission = 99;
+        prior_complete.phase = Phase::Visiting;
+        assert(StoreJournal(*lease, prior_complete, ec));
+        prior_complete.phase = Phase::Returning;
+        assert(StoreJournal(*lease, prior_complete, ec));
+        prior_complete.phase = Phase::Complete;
+        assert(StoreJournal(*lease, prior_complete, ec));
+    }
+    bbsc_test_admission_resolution_success = false;
+    OnBbscPartyPacket({"host", 41}, stale_confirm_bytes.data(), stale_confirm_bytes.size());
+    TickBbscAdmissionCoordinator();
+    bbsc_test_admission_resolution_success = true;
+    assert(bbsc_test_admission_resolutions.size() == 2 &&
+           bbsc_test_admission_resolutions[0].second &&
+           !bbsc_test_admission_resolutions[1].second);
+    assert(Core::Bbsc::Party::LoadJournal(BbscPartyHomePath(original_key), original_key, ec) ==
+           prior_complete);
+    admission_peers.clear();
+    bbsc_native_coop_hooks_ready = false;
+    OnBbscPartyRoomState({34, 0, false, {}, {}});
+    WriteValue<s32>(address(matching), 0x124, 0);
+    bbsc_test_capability_proofs = {};
+    if (previous_bbsc_setting) setenv("BB_BBSC", previous_bbsc_setting->c_str(), 1);
+    else unsetenv("BB_BBSC");
+    TestCapabilityAdmissionHostTick();
+
     auto home = PrepareBbscNativePartyHome({4, 5}, ec, true);
     assert(home && !ec);
     assert(home->record.key == original_key && home->record.admission == 0);
@@ -1344,9 +1828,6 @@ static void TestNativeCharacterIdentity() {
     assert(home->record.origin.map == 0x18010000 && home->record.origin.x == 10);
     assert(home->record.fallback.map == 0x18010000 && home->record.fallback.x == 100);
     assert(home->record.fallback.lamp == 2412950);
-    const auto selected_backup = BbscPartyHomePath(original_key).parent_path() /
-        (BbscPartyHomePath(original_key).stem().string() + ".selected-save-" +
-         std::to_string(mock_receipt_generation) + ".bin");
     assert(std::filesystem::is_regular_file(selected_backup));
     native_respawn_map = 0x18020000; // Native API resolves a point whose map is not currently loaded.
     assert(ResolveBbscRespawnPointMap(2412950) == native_respawn_map);
@@ -2321,7 +2802,6 @@ int main() {
     TestManagedCycleHookCoverage();
     TestPartyInbox();
     TestPartyPeerSelectionRefresh();
-    TestCapabilityAdmissionHostTick();
     TestSingleNativeJoinLoad();
     TestPartingBlankRow();
 }

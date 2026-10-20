@@ -924,9 +924,20 @@ constexpr size_t BbscPartyInboxPerPeer =
     Libraries::Np::NpSignaling::kBbscPartyMaxCatalogEvents +
     Libraries::Np::NpSignaling::kBbscPartyMaxChunks + 4;
 constexpr size_t BbscCapabilityInboxPerPeer = 4;
-bool bbsc_native_coop_hooks_ready{};
-std::optional<std::pair<Core::Bbsc::Party::CharacterKey, std::chrono::steady_clock::time_point>>
-    bbsc_admitted_join_key;
+std::atomic<bool> bbsc_native_coop_hooks_ready{};
+struct BbscAdmittedJoin {
+    Core::Bbsc::Party::CharacterKey key;
+    std::int32_t context{};
+    std::uint64_t incarnation{};
+    std::uint64_t request{};
+    std::uint64_t room{};
+    Core::Bbsc::Party::PartyId party{};
+    std::uint64_t nonce{};
+    std::string owner;
+    std::chrono::steady_clock::time_point expires;
+    bool consumed{};
+};
+std::optional<BbscAdmittedJoin> bbsc_admitted_join;
 
 std::mutex seamless_placement_mutex;
 std::optional<SummonPlacementDescriptor> seamless_host_placement;
@@ -3238,7 +3249,8 @@ void WriteEnginePanicStack(std::ostream& out, const GuestRegisterSnapshot& regis
 
 // The guest's loads under the death curtain's fade, see "Load cover".
 void StartBbscLoadCover(std::string_view why);
-void EndBbscLoadCover(std::string_view how);
+void EndBbscLoadCover(std::string_view how, bool preserve_party_pending = false);
+bool BbscPartyBaselinePendingForLoadCover();
 // The host's world state for a follow load, see "World state when warping together".
 bool BbscHostWorldFlagsReady(u32 packed_map);
 bool ApplyBbscHostWorldFlags(u32 packed_map, std::string_view why);
@@ -5728,7 +5740,7 @@ void TickBbscJoinTeleport(s64 now) {
              "({:.2f}, {:.2f}, {:.2f})",
              own ? own->position[0] : 0.0f, own ? own->position[1] : 0.0f,
              own ? own->position[2] : 0.0f, position[0], position[1], position[2]);
-    EndBbscLoadCover("guest placed beside the host");
+        EndBbscLoadCover("guest placed beside the host", true);
 }
 
 // ---- Warping together --------------------------------------------------------------------------
@@ -7356,6 +7368,8 @@ void TickBbscManagedReturnSaveReceipt() {
 }
 #endif
 
+bool BbscAdmissionSuppressesOwnWorldRecovery(const Core::Bbsc::Party::CharacterKey& key);
+
 void TickBbscOwnWorld() {
     static s64 last_ms = 0;
     static s64 recover_checked_ms = 0;
@@ -7374,7 +7388,9 @@ void TickBbscOwnWorld() {
     }
 #ifndef _WIN32
     TickBbscManagedReturnSaveReceipt();
-    if (const auto key = ReadBbscPartyCharacterKey(); key) {
+    const auto key = ReadBbscPartyCharacterKey();
+    if (key && BbscAdmissionSuppressesOwnWorldRecovery(*key)) return;
+    if (key) {
         const auto state = InspectBbscManagedHome(*key);
         if (state == BbscManagedHomeState::Prepared || state == BbscManagedHomeState::Pending ||
             state == BbscManagedHomeState::Unverifiable) {
@@ -7407,6 +7423,7 @@ void RestoreBbscOwnWorldAtLoad(bool managed_recovery_boundary = false) {
     // The respawn resolver executes during native loading. Keep ordinary readiness strict, but
     // permit that one verified boundary while still requiring exact selected-save/native IDs.
     const auto key = ReadBbscPartyCharacterKey(managed_recovery_boundary);
+    if (key && BbscAdmissionSuppressesOwnWorldRecovery(*key)) return;
 #ifndef _WIN32
     const auto managed_state = key ? InspectBbscManagedHome(*key) : BbscManagedHomeState::Missing;
     if (key && managed_state == BbscManagedHomeState::Pending) {
@@ -7924,6 +7941,7 @@ std::optional<BbscTransform> ResolveLastLampTransform() {
 #ifndef _WIN32
 struct BbscPreparedPartyHome {
     Core::Bbsc::Party::Journal record;
+    std::optional<Core::Bbsc::Party::Journal> previous;
     Core::Bbsc::Party::CharacterLease lease;
 };
 
@@ -8035,6 +8053,7 @@ std::optional<BbscPreparedPartyHome> PrepareBbscNativePartyHome(
     auto lease = CharacterLease::Acquire(path, ec);
     if (!lease) return std::nullopt;
     const auto previous = LoadJournal(path, *key, ec);
+    const std::optional<Journal> previous_record = previous;
     Journal record;
     if (previous) {
         if (previous->phase != Phase::Complete) {
@@ -8075,7 +8094,7 @@ std::optional<BbscPreparedPartyHome> PrepareBbscNativePartyHome(
             !StoreBbscSelectedSaveBackup(*lease, *key, *identity, ec)) return std::nullopt;
     }
     if (!StoreJournal(*lease, record, ec)) return std::nullopt;
-    return BbscPreparedPartyHome{std::move(record), std::move(*lease)};
+    return BbscPreparedPartyHome{std::move(record), previous_record, std::move(*lease)};
 }
 
 bool ApplyBbscPartyRecoveryJoinGuard(const GuestRegisterSnapshot& registers) {
@@ -8314,9 +8333,13 @@ void StartBbscLoadCover(std::string_view why) {
     LOG_INFO(Debug, "BBSC load cover: fading out ({})", why);
 }
 
-void EndBbscLoadCover(std::string_view how) {
+void EndBbscLoadCover(std::string_view how, bool preserve_party_pending) {
     if (!bbsc_load_cover.active) {
         return;
+    }
+    if (preserve_party_pending && bbsc_load_cover.why == "summon" &&
+        BbscPartyBaselinePendingForLoadCover()) {
+        return; // Keep the initial join cover until the ordered baseline is durably acknowledged.
     }
     bbsc_load_cover.active = false;
     if (bbsc_load_cover.why == "summon") {
@@ -8341,6 +8364,7 @@ void TickBbscLoadCover() {
     }
     const s64 now = SteadyNowMs();
     if (now - bbsc_load_cover.started_ms > BbscLoadCoverLimitMs) {
+        if (bbsc_load_cover.why == "summon" && BbscPartyBaselinePendingForLoadCover()) return;
         EndBbscLoadCover("time limit");
         return;
     }
@@ -11856,7 +11880,9 @@ void TickBbscSharedProgress() {
         // A file an earlier session left (crash, quit while a guest): merged once this character
         // is home and settled, the same way as after a session.
         const u64 me = GetLocalPlayerCharacter();
+        const auto key = ReadBbscPartyCharacterKey();
         if (own_world && me != 0 && GetCharacterHp(me) > 0 && ReadValue<u8>(global, 0x08) == 0 &&
+            (!key || !BbscAdmissionSuppressesOwnWorldRecovery(*key)) &&
             now - recover_checked_ms >= BbscProgressRecoverMs) {
             recover_checked_ms = now;
             if (const auto slot = BbscActiveSaveSlot(); slot.has_value()) {
@@ -15678,6 +15704,40 @@ void TickBbscFreeBell() {
              ReadValue<u8>(result.row, 0x38));
 }
 
+bool ConsumeBbscAdmittedJoinForNativeEvent() {
+#ifdef _WIN32
+    bbsc_admitted_join.reset();
+    return false;
+#else
+    if (!bbsc_admitted_join) return false;
+    auto& admission = *bbsc_admitted_join;
+    if (std::chrono::steady_clock::now() <= admission.expires && !admission.consumed) {
+        const auto key = ReadBbscPartyCharacterKey();
+        const auto room = GetBbscPartyRoomState();
+        const bool another_ticket = std::ranges::any_of(
+            Libraries::Np::NpMatching2::GetPendingBbscAdmissionTickets(), [&](const auto& ticket) {
+                return ticket.context == admission.context;
+            });
+        std::error_code admission_error;
+        const auto journal = key && *key == admission.key
+            ? Core::Bbsc::Party::LoadJournal(BbscPartyHomePath(*key), *key, admission_error)
+            : std::nullopt;
+        const bool admitted = key && *key == admission.key && room && !room->is_host &&
+            room->context == admission.context && room->room == admission.room &&
+            room->owner == admission.owner && !another_ticket && journal &&
+            journal->phase == Core::Bbsc::Party::Phase::Visiting &&
+            journal->admission == admission.nonce;
+        if (admitted) admission.consumed = true;
+        else bbsc_admitted_join.reset();
+        return admitted;
+    }
+    // shortcut: JoinSession has no Matching2 request ID; keep the admission gate disabled
+    // until native callback correlation is available.
+    bbsc_admitted_join.reset();
+    return false;
+#endif
+}
+
 void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
     if (tag >= Sites.size() || registers == nullptr) {
         return;
@@ -15751,7 +15811,10 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         }
     }
     if (site.offset == BbscGameTickOffset) {
-        if (EnvFlagEnabled("BB_BBSC")) TickBbscAdmissionCoordinator();
+        if (EnvFlagEnabled("BB_BBSC")) {
+            TickBbscAdmissionCoordinator();
+            TickBbscPartyEventDelivery();
+        }
 #ifndef _WIN32
         TickBbscNativeFlagProofReceipt();
         TickBbscManagedCycleReceipt();
@@ -15861,14 +15924,7 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         // Only session-relevant Lua events; the dispatcher also runs gameplay events.
         const std::string name = ReadGuestAscii(registers->rsi, 64);
         if (name == "JoinSession_White") {
-            bool admitted = false;
-            if (bbsc_admitted_join_key) {
-                if (std::chrono::steady_clock::now() <= bbsc_admitted_join_key->second) {
-                    const auto key = ReadBbscPartyCharacterKey();
-                    admitted = key && *key == bbsc_admitted_join_key->first;
-                }
-                bbsc_admitted_join_key.reset();
-            }
+            const bool admitted = ConsumeBbscAdmittedJoinForNativeEvent();
 #ifndef _WIN32
             if (!admitted && ApplyBbscPartyRecoveryJoinGuard(*registers)) {
                 BbscAnnounce(u"Co-op blocked: finish character recovery first.", "pending recovery");
@@ -16685,8 +16741,7 @@ std::optional<BbscPartyRoom> GetBbscPartyRoomState() {
 }
 
 bool IsBbscPrivateCoopAdmissionRequired() {
-    // shortcut: private claims that expire are indistinguishable from public searches here; keep
-    // the native gate disabled until the observer exposes an exact pending-private-join state.
+    // shortcut: held callbacks do not prove native preworld cancellation; enable after a copied-profile trace proves it.
     return false;
 }
 
@@ -16806,13 +16861,106 @@ struct AdmissionAttempt {
     std::array<u8, 16> challenge{};
     Libraries::Http::BbscSummonCapabilityProofSnapshot proofs;
     Core::Bbsc::Party::CharacterKey key;
+    u64 private_attempt_generation{};
+    bool proofs_ready{};
     s64 last_probe_ms{};
     unsigned probes{};
 };
 std::map<std::int32_t, AdmissionAttempt> bbsc_admission_attempts;
 
+struct BbscConfirmedPartyPeer {
+    Core::Bbsc::Party::Peer peer;
+    std::int32_t context{};
+    std::uint64_t room{};
+    std::string owner;
+    Core::Bbsc::Party::PartyId party{};
+    Core::Bbsc::Party::CharacterKey host_key;
+    std::uint64_t admission{};
+    Core::Bbsc::Party::Delivery delivery;
+    std::array<bool, Core::Bbsc::Party::kPartyBossCompletionCatalog.size()> last_flags{};
+    std::uint64_t sequence{};
+    s64 last_send_ms{};
+    bool delivery_started{};
+    bool closed{};
+};
+std::vector<BbscConfirmedPartyPeer> bbsc_confirmed_party_peers;
+
+struct BbscGuestPartyAdmission {
+    Core::Bbsc::Party::Peer host;
+    std::int32_t context{};
+    std::uint64_t room{};
+    std::string owner;
+    Core::Bbsc::Party::PartyId party{};
+    std::uint64_t admission{};
+    Core::Bbsc::Party::CharacterKey key;
+    Core::Bbsc::Party::Admission receiver;
+    Core::Bbsc::Party::Message durable_ack;
+    std::uint64_t persisted_sequence{};
+    s64 last_send_ms{};
+    bool durable_baseline_ack{};
+};
+std::optional<BbscGuestPartyAdmission> bbsc_guest_party_admission;
+
+std::optional<std::array<bool, Core::Bbsc::Party::kPartyBossCompletionCatalog.size()>>
+ReadBbscPartyCatalogState() {
+    std::array<bool, Core::Bbsc::Party::kPartyBossCompletionCatalog.size()> state{};
+    for (size_t i = 0; i < state.size(); ++i) {
+        const u32 flag = Core::Bbsc::Party::kPartyBossCompletionCatalog[i].flag_id;
+        const u64 storage = BbscFlagGroupStorage(flag / 1000);
+        if (!storage) return std::nullopt;
+        const u32 bit = flag % 1000;
+        state[i] = (ReadValue<u8>(storage, bit / 8) & (u8{0x80} >> (bit % 8))) != 0;
+    }
+    return state;
+}
+
+std::vector<Core::Bbsc::Party::EventId> BbscPartyCatalogBaseline(
+    const std::array<bool, Core::Bbsc::Party::kPartyBossCompletionCatalog.size()>& state) {
+    std::vector<Core::Bbsc::Party::EventId> events;
+    for (size_t i = 0; i < state.size(); ++i)
+        if (state[i]) events.push_back(Core::Bbsc::Party::kPartyBossCompletionCatalog[i].flag_id);
+    return events;
+}
+
+bool BbscPartyCatalogContains(Core::Bbsc::Party::EventId event) {
+    return std::ranges::any_of(Core::Bbsc::Party::kPartyBossCompletionCatalog,
+        [event](const auto& rule) { return rule.flag_id == event; });
+}
+
+bool BbscPartyHostPlayable() {
+    const u64 global = GetGlobalState();
+    const u64 player = GetLocalPlayerCharacter();
+    return GetSessionState() == 6 && GetLocalPlayerType() == 0 && player &&
+           GetCharacterHp(player) > 0 && ReadablePointer(global, 0x10) &&
+           ReadValue<u8>(global, 0x08) == 0;
+}
+
+bool BbscPartyGuestPlayable(const BbscPartyRoom& room,
+                            const Core::Bbsc::Party::CharacterKey& key) {
+    if (!bbsc_admitted_join || !bbsc_admitted_join->consumed ||
+        bbsc_admitted_join->key != key || bbsc_admitted_join->context != room.context ||
+        bbsc_admitted_join->room != room.room || bbsc_admitted_join->owner != room.owner ||
+        room.is_host || GetSessionState() != 6 || GetLocalPlayerType() != 1) return false;
+    const u64 global = GetGlobalState();
+    const u64 player = GetLocalPlayerCharacter();
+    return player && GetCharacterHp(player) > 0 && ReadablePointer(global, 0x10) &&
+           ReadValue<u8>(global, 0x08) == 0;
+}
+
 bool ProofIsZero(const std::array<u8, 32>& proof) {
     return std::ranges::all_of(proof, [](u8 byte) { return byte == 0; });
+}
+
+bool BbscSignMatchesCharacterKey(const Libraries::Http::BbscSummonSignSnapshot& sign,
+                                 const Core::Bbsc::Party::CharacterKey& key) {
+    if (!sign.valid || sign.user_id <= 0 || sign.character_id <= 0) return false;
+    const auto user = static_cast<u64>(sign.user_id);
+    const auto character = static_cast<u64>(sign.character_id);
+    for (size_t i = 0; i < 8; ++i) {
+        if (key.character[i] != static_cast<u8>(user >> (i * 8)) ||
+            key.character[i + 8] != static_cast<u8>(character >> (i * 8))) return false;
+    }
+    return true;
 }
 
 std::string OnlineId(const Libraries::Np::OrbisNpOnlineId& id) {
@@ -16843,15 +16991,23 @@ bool RoomContainsPeer(const BbscPartyRoom& room, const Core::Bbsc::Party::Peer& 
 
 void ReplyToCapabilityProbes(const BbscPartyRoom& room,
                              std::span<const BbscCapabilityPacket> packets) {
-    if (!room.is_host || !bbsc_native_coop_hooks_ready) return;
+    if (!room.is_host || !bbsc_native_coop_hooks_ready.load(std::memory_order_acquire) ||
+        !Core::Bbsc::Party::IsSupportedStoryMap(GetCurrentPackedMap())) return;
     for (const auto& packet : packets) {
         if (!RoomContainsPeer(room, packet.peer)) continue;
         const auto probe = Core::Bbsc::Party::DecodeCapability(packet.bytes);
         if (!probe || probe->kind != CapabilityKind::Probe || probe->room != room.room) continue;
         const auto peer = CurrentPartyPeer(packet.peer.online_id);
         if (!peer || *peer != packet.peer) continue;
+        const auto own = ReadBbscPartyCharacterKey(false);
         const auto proofs = Libraries::Http::GetBbscSummonCapabilityProofs(probe->challenge);
-        if (!proofs || ProofIsZero(proofs->selected) ||
+        if (!own || !proofs ||
+            proofs->observation.private_attempt.state != Libraries::Http::BbscPrivateAttemptState::Ready ||
+            !BbscSignMatchesCharacterKey(proofs->observation.own_sign, *own) ||
+            proofs->observation.own_sign.summon_type != 0 ||
+            !proofs->observation.claim.valid || !proofs->observation.claim.matched_unique_candidate ||
+            !proofs->observation.claim.password_matches_own_sign ||
+            ProofIsZero(proofs->own) || ProofIsZero(proofs->selected) ||
             CRYPTO_memcmp(probe->own_proof.data(), proofs->selected.data(), 32) != 0 ||
             (!ProofIsZero(probe->selected_proof) &&
              CRYPTO_memcmp(probe->selected_proof.data(), proofs->own.data(), 32) != 0)) continue;
@@ -16864,6 +17020,17 @@ void ReplyToCapabilityProbes(const BbscPartyRoom& room,
         const auto encoded = Core::Bbsc::Party::EncodeCapability(confirm);
         Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
             packet.peer, encoded.data(), static_cast<u32>(encoded.size()));
+        const auto confirmed = std::ranges::find_if(bbsc_confirmed_party_peers, [&](const auto& entry) {
+            return entry.peer.online_id == packet.peer.online_id;
+        });
+        if (confirmed != bbsc_confirmed_party_peers.end() && confirmed->peer == packet.peer &&
+            confirmed->context == room.context && confirmed->room == room.room &&
+            confirmed->party == probe->challenge && confirmed->host_key == *own) continue;
+        if (confirmed != bbsc_confirmed_party_peers.end()) bbsc_confirmed_party_peers.erase(confirmed);
+        if (bbsc_confirmed_party_peers.size() < BbscMaxGuests)
+            bbsc_confirmed_party_peers.push_back({.peer = packet.peer, .context = room.context,
+                .room = room.room, .owner = room.owner, .party = probe->challenge,
+                .host_key = *own});
     }
 }
 
@@ -16871,20 +17038,55 @@ bool ProofsStillCurrent(const AdmissionAttempt& attempt,
                         const Libraries::Http::BbscSummonCapabilityProofSnapshot& proofs) {
     const auto& old = attempt.proofs.observation;
     const auto& now = proofs.observation;
-    return now.own_sign.valid && now.own_sign.summon_type == 0 &&
+    return now.private_attempt.state == Libraries::Http::BbscPrivateAttemptState::Ready &&
+           now.private_attempt.generation == attempt.private_attempt_generation &&
+           BbscSignMatchesCharacterKey(now.own_sign, attempt.key) && now.own_sign.summon_type == 0 &&
            now.own_sign.generation == old.own_sign.generation &&
            now.own_sign.session_id == old.own_sign.session_id &&
            now.own_sign.user_id == old.own_sign.user_id &&
            now.own_sign.character_id == old.own_sign.character_id &&
-           now.claim.valid && now.claim.matched_unique_candidate &&
-           now.claim.password_matches_own_sign &&
-           now.claim.token == old.claim.token &&
-           now.claim.search_generation == old.claim.search_generation &&
-           now.claim.candidate.session_id == old.claim.candidate.session_id &&
-           now.claim.candidate.user_id == old.claim.candidate.user_id &&
-           now.claim.candidate.character_id == old.claim.candidate.character_id &&
            CRYPTO_memcmp(proofs.own.data(), attempt.proofs.own.data(), 32) == 0 &&
            CRYPTO_memcmp(proofs.selected.data(), attempt.proofs.selected.data(), 32) == 0;
+}
+
+bool BbscAdmissionSuppressesOwnWorldRecovery(const Core::Bbsc::Party::CharacterKey& key) {
+#ifdef _WIN32
+    (void)key;
+    return false;
+#else
+    const auto room = GetBbscPartyRoomState();
+    if (room && !room->is_host && room->room != 0 &&
+        std::ranges::find(room->members, room->owner) != room->members.end()) {
+        const auto observation = Libraries::Http::GetBbscSummonObservationSnapshot();
+        if (observation.private_attempt.state != Libraries::Http::BbscPrivateAttemptState::None) {
+            for (const auto& ticket : Libraries::Np::NpMatching2::GetPendingBbscAdmissionTickets()) {
+                if (ticket.context == room->context && ticket.room == room->room &&
+                    OnlineId(ticket.owner) == room->owner) {
+                    const auto attempt = bbsc_admission_attempts.find(ticket.context);
+                    return attempt != bbsc_admission_attempts.end() &&
+                           SameAdmissionTicket(attempt->second.ticket, ticket) && attempt->second.key == key;
+                }
+            }
+        }
+    }
+    if (bbsc_admitted_join && std::chrono::steady_clock::now() <= bbsc_admitted_join->expires &&
+        bbsc_admitted_join->key == key && room && !room->is_host &&
+        room->context == bbsc_admitted_join->context && room->room == bbsc_admitted_join->room &&
+        room->owner == bbsc_admitted_join->owner) {
+        const u64 player = GetLocalPlayerCharacter();
+        if (GetSessionState() == 6 && GetLocalPlayerType() == 1 && player != 0 &&
+            GetCharacterHp(player) > 0 && ReadValue<u8>(GetGlobalState(), 0x08) == 0) {
+            if (BbscPartyBaselinePendingForLoadCover()) return true;
+            bbsc_admitted_join.reset();
+            return false;
+        }
+        std::error_code ec;
+        const auto journal = Core::Bbsc::Party::LoadJournal(BbscPartyHomePath(key), key, ec);
+        return journal && journal->phase == Core::Bbsc::Party::Phase::Visiting &&
+               journal->admission == bbsc_admitted_join->nonce;
+    }
+    return false;
+#endif
 }
 
 void RejectAdmission(const AdmissionTicket& ticket) {
@@ -16897,31 +17099,56 @@ bool AdmitConfirmedTicket(AdmissionAttempt& attempt) {
     return false;
 #else
     auto& ticket = attempt.ticket;
-    std::array<u8, 16> party{};
-    if (RAND_bytes(party.data(), static_cast<int>(party.size())) != 1 ||
-        std::ranges::all_of(party, [](u8 byte) { return byte == 0; })) return false;
+    auto current_proofs = Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge);
+    auto current_key = ReadBbscPartyCharacterKey(false);
+    if (!attempt.proofs_ready || !current_proofs ||
+        !ProofsStillCurrent(attempt, *current_proofs) || !current_key || *current_key != attempt.key)
+        return false;
+    const auto party = attempt.challenge;
+    if (std::ranges::all_of(party, [](u8 byte) { return byte == 0; })) return false;
     std::error_code ec;
     auto home = PrepareBbscNativePartyHome(party, ec, true);
-    if (!home || home->record.key != attempt.key || ticket.nonce == 0) return false;
-    const auto current_proofs = Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge);
-    const auto current_key = ReadBbscPartyCharacterKey(false);
-    if (!current_proofs || !ProofsStillCurrent(attempt, *current_proofs) ||
-        !current_key || *current_key != attempt.key) return false;
+    if (!home) return false;
+    current_proofs = Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge);
+    current_key = ReadBbscPartyCharacterKey(false);
+    const auto rollback = [&] {
+        std::error_code rollback_error;
+        Core::Bbsc::Party::RollbackUnadmittedJournal(
+            home->lease, home->record, home->previous, rollback_error);
+        if (rollback_error) {
+            LOG_ERROR(Debug, "BBSC admission: could not restore the prior managed home journal: {}",
+                      rollback_error.message());
+        }
+    };
+    if (home->record.key != attempt.key || ticket.nonce == 0 || !current_proofs ||
+        !ProofsStillCurrent(attempt, *current_proofs) ||
+        !current_key || *current_key != attempt.key) {
+        rollback();
+        return false;
+    }
     home->record.admission = ticket.nonce;
     home->record.phase = Core::Bbsc::Party::Phase::Visiting;
-    if (!Core::Bbsc::Party::StoreJournal(home->lease, home->record, ec)) return false;
+    if (!Core::Bbsc::Party::StoreJournal(home->lease, home->record, ec)) {
+        rollback();
+        return false;
+    }
 
-    bbsc_admitted_join_key = std::pair{home->record.key,
-                                        std::chrono::steady_clock::now() + std::chrono::seconds(30)};
+    bbsc_admitted_join = BbscAdmittedJoin{home->record.key, ticket.context, ticket.incarnation,
+        ticket.request, ticket.room, home->record.party, ticket.nonce, OnlineId(ticket.owner),
+        std::chrono::steady_clock::now() + std::chrono::seconds(30), false};
     const bool resolved = Libraries::Np::NpMatching2::ResolveBbscAdmission(ticket, true);
-    if (!resolved) bbsc_admitted_join_key.reset();
+    if (!resolved) {
+        bbsc_admitted_join.reset();
+        rollback();
+    }
     return resolved;
 #endif
 }
 } // namespace
 
 void TickBbscAdmissionCoordinator() {
-    if (!EnvFlagEnabled("BB_BBSC") || !bbsc_native_coop_hooks_ready) return;
+    if (!EnvFlagEnabled("BB_BBSC") ||
+        !bbsc_native_coop_hooks_ready.load(std::memory_order_acquire)) return;
     TickBbscPartyPeerSelection();
     const auto tickets = Libraries::Np::NpMatching2::GetPendingBbscAdmissionTickets();
     const auto now = std::chrono::steady_clock::now();
@@ -16937,22 +17164,32 @@ void TickBbscAdmissionCoordinator() {
             attempt.ticket = ticket;
             const auto room = GetBbscPartyRoomState();
             const auto own = ReadBbscPartyCharacterKey(false);
-            const auto proofs = RAND_bytes(attempt.challenge.data(),
-                                            static_cast<int>(attempt.challenge.size())) == 1
-                ? Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge)
-                : std::nullopt;
+            const auto observation = Libraries::Http::GetBbscSummonObservationSnapshot();
+            const bool challenge_ready = RAND_bytes(attempt.challenge.data(),
+                                                     static_cast<int>(attempt.challenge.size())) == 1;
+            const auto proofs = challenge_ready
+                ? Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge) : std::nullopt;
             if (!room || room->context != ticket.context || room->room != ticket.room ||
                 room->is_host || room->owner != OnlineId(ticket.owner) ||
-                !std::ranges::contains(room->members, room->owner) || !own || !proofs ||
-                ProofIsZero(proofs->own) || ProofIsZero(proofs->selected) ||
-                !proofs->observation.claim.valid ||
-                !proofs->observation.claim.matched_unique_candidate ||
-                !proofs->observation.claim.password_matches_own_sign) {
+                std::ranges::find(room->members, room->owner) == room->members.end() || !own ||
+                !challenge_ready || ticket.nonce == 0 ||
+                observation.private_attempt.state == Libraries::Http::BbscPrivateAttemptState::None ||
+                observation.private_attempt.state == Libraries::Http::BbscPrivateAttemptState::Expired ||
+                observation.private_attempt.state == Libraries::Http::BbscPrivateAttemptState::Invalid) {
                 RejectAdmission(ticket);
                 continue;
             }
             attempt.key = *own;
-            attempt.proofs = *proofs;
+            attempt.private_attempt_generation = observation.private_attempt.generation;
+            if (observation.private_attempt.state == Libraries::Http::BbscPrivateAttemptState::Ready) {
+                if (!proofs || !BbscSignMatchesCharacterKey(proofs->observation.own_sign, *own) ||
+                    proofs->observation.own_sign.summon_type != 0 || ProofIsZero(proofs->own)) {
+                    RejectAdmission(ticket);
+                    continue;
+                }
+                attempt.proofs = *proofs;
+                attempt.proofs_ready = true;
+            }
             it = bbsc_admission_attempts.insert_or_assign(ticket.context, std::move(attempt)).first;
         }
     }
@@ -16973,6 +17210,31 @@ void TickBbscAdmissionCoordinator() {
             it = bbsc_admission_attempts.erase(it);
             continue;
         }
+        if (!attempt.proofs_ready) {
+            const auto observation = Libraries::Http::GetBbscSummonObservationSnapshot();
+            if (observation.private_attempt.generation != attempt.private_attempt_generation ||
+                observation.private_attempt.state == Libraries::Http::BbscPrivateAttemptState::Expired ||
+                observation.private_attempt.state == Libraries::Http::BbscPrivateAttemptState::Invalid ||
+                observation.private_attempt.state == Libraries::Http::BbscPrivateAttemptState::None) {
+                RejectAdmission(attempt.ticket);
+                it = bbsc_admission_attempts.erase(it);
+                continue;
+            }
+            if (observation.private_attempt.state == Libraries::Http::BbscPrivateAttemptState::Ready) {
+                const auto proofs = Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge);
+                if (!proofs || !BbscSignMatchesCharacterKey(proofs->observation.own_sign, attempt.key) ||
+                    proofs->observation.own_sign.summon_type != 0 || ProofIsZero(proofs->own)) {
+                    RejectAdmission(attempt.ticket);
+                    it = bbsc_admission_attempts.erase(it);
+                    continue;
+                }
+                attempt.proofs = *proofs;
+                attempt.proofs_ready = true;
+            } else {
+                ++it;
+                continue;
+            }
+        }
         bool completed = false;
         bool rejected = false;
         for (const auto& packet : packets) {
@@ -16980,9 +17242,10 @@ void TickBbscAdmissionCoordinator() {
             const auto confirm = Core::Bbsc::Party::DecodeCapability(packet.bytes);
             if (!confirm || confirm->kind != CapabilityKind::Confirm ||
                 confirm->room != attempt.ticket.room || confirm->challenge != attempt.challenge ||
-                ProofIsZero(confirm->own_proof) || ProofIsZero(attempt.proofs.selected) ||
+                ProofIsZero(confirm->own_proof) ||
                 CRYPTO_memcmp(confirm->selected_proof.data(), attempt.proofs.own.data(), 32) != 0 ||
-                CRYPTO_memcmp(attempt.proofs.selected.data(), confirm->own_proof.data(), 32) != 0) continue;
+                (!ProofIsZero(attempt.proofs.selected) &&
+                 CRYPTO_memcmp(attempt.proofs.selected.data(), confirm->own_proof.data(), 32) != 0)) continue;
             const auto current = Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge);
             const auto identity = ReadBbscPartyCharacterKey(false);
             if (!current || !ProofsStillCurrent(attempt, *current) || !identity || *identity != attempt.key) {
@@ -17018,6 +17281,272 @@ void TickBbscAdmissionCoordinator() {
         }
         ++it;
     }
+}
+
+namespace {
+bool BbscPartyBaselinePendingForLoadCover() {
+    if (bbsc_guest_party_admission) return !bbsc_guest_party_admission->durable_baseline_ack;
+    return bbsc_admitted_join && bbsc_admitted_join->consumed;
+}
+} // namespace
+
+void TickBbscPartyEventDelivery() {
+#ifdef _WIN32
+    return;
+#else
+    if (!EnvFlagEnabled("BB_BBSC") ||
+        !bbsc_native_coop_hooks_ready.load(std::memory_order_acquire)) return;
+    const auto room = GetBbscPartyRoomState();
+    if (!room) {
+        const bool had_managed_guest = bbsc_guest_party_admission.has_value() ||
+                                       (bbsc_admitted_join && bbsc_admitted_join->consumed);
+        bbsc_confirmed_party_peers.clear();
+        if (bbsc_guest_party_admission) {
+            auto& channel = *bbsc_guest_party_admission;
+            Core::Bbsc::Party::Message leave;
+            leave.party = channel.party;
+            leave.admission = channel.admission;
+            leave.kind = Core::Bbsc::Party::Kind::Leave;
+            const auto bytes = Core::Bbsc::Party::EncodeMessage(leave);
+            if (!bytes.empty()) Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+                channel.host, bytes.data(), static_cast<u32>(bytes.size()));
+            channel.receiver.Close();
+        }
+        bbsc_guest_party_admission.reset();
+        bbsc_admitted_join.reset();
+        if (had_managed_guest) EndBbscLoadCover("party room ended before baseline");
+        return;
+    }
+    TickBbscPartyPeerSelection();
+    const auto now = SteadyNowMs();
+    const auto current_key = ReadBbscPartyCharacterKey(false);
+
+    if (room->is_host) {
+        std::erase_if(bbsc_confirmed_party_peers, [&](const auto& admission) {
+            const auto peer = CurrentPartyPeer(admission.peer.online_id);
+            const auto host_key = ReadBbscPartyCharacterKey(false);
+            const bool changed_character = host_key && *host_key != admission.host_key;
+            if (changed_character && admission.admission) {
+                Core::Bbsc::Party::Message leave;
+                leave.party = admission.party;
+                leave.admission = admission.admission;
+                leave.kind = Core::Bbsc::Party::Kind::Leave;
+                const auto bytes = Core::Bbsc::Party::EncodeMessage(leave);
+                if (!bytes.empty()) Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+                    admission.peer, bytes.data(), static_cast<u32>(bytes.size()));
+            }
+            return admission.context != room->context || admission.room != room->room ||
+                   admission.owner != room->owner || !RoomContainsPeer(*room, admission.peer) ||
+                   !peer || *peer != admission.peer || changed_character;
+        });
+        const auto packets = TakeBbscPartyPackets();
+        for (const auto& packet : packets) {
+            const auto it = std::ranges::find_if(bbsc_confirmed_party_peers, [&](const auto& entry) {
+                return entry.peer == packet.peer && entry.context == room->context &&
+                       entry.room == room->room && entry.owner == room->owner;
+            });
+            if (it == bbsc_confirmed_party_peers.end()) continue;
+            const auto& message = packet.message;
+            if (message.party != it->party) continue;
+            if (message.kind == Core::Bbsc::Party::Kind::Leave) {
+                if (!it->admission || message.admission != it->admission) continue;
+                it->delivery.Close();
+                it->delivery_started = false;
+                it->closed = true;
+                continue;
+            }
+            if (!it->closed && !it->admission && message.kind == Core::Bbsc::Party::Kind::Hello &&
+                message.sequence == 0 && message.admission != 0) {
+                it->admission = message.admission;
+            } else if (!it->closed && it->admission && it->delivery_started &&
+                       message.admission == it->admission &&
+                       message.kind == Core::Bbsc::Party::Kind::Ack) {
+                it->delivery.AcceptAck(packet.peer, message);
+            }
+        }
+
+        const bool playable = BbscPartyHostPlayable();
+        const u64 host_global = GetGlobalState();
+        const bool host_world_available = GetSessionState() == 6 && GetLocalPlayerType() == 0 &&
+            ReadablePointer(host_global, 0x10) && ReadValue<u8>(host_global, 0x08) == 0 &&
+            Core::Bbsc::Party::IsSupportedStoryMap(GetCurrentPackedMap());
+        const auto live_flags = host_world_available ? ReadBbscPartyCatalogState() : std::nullopt;
+        for (auto& entry : bbsc_confirmed_party_peers) {
+            if (!entry.admission) continue;
+            if (entry.closed) continue;
+            if (!entry.delivery_started) {
+                if (!playable || !live_flags) continue; // Boundary requires first playable; missing is unknown.
+                const auto baseline = BbscPartyCatalogBaseline(*live_flags);
+                if (!entry.delivery.Begin(entry.peer, entry.party, entry.admission, 0, baseline)) continue;
+                entry.last_flags = *live_flags;
+                entry.sequence = 0;
+                entry.delivery_started = true;
+            } else if (live_flags) {
+                for (size_t i = 0; i < live_flags->size(); ++i) {
+                    if (!entry.last_flags[i] && (*live_flags)[i]) {
+                        const auto event = Core::Bbsc::Party::kPartyBossCompletionCatalog[i].flag_id;
+                        if (entry.sequence == std::numeric_limits<u64>::max() ||
+                            !entry.delivery.Push(++entry.sequence, event)) {
+                            entry.delivery.Close();
+                            entry.delivery_started = false;
+                            entry.admission = 0;
+                            break;
+                        }
+                    }
+                }
+                if (entry.delivery_started) {
+                    for (size_t i = 0; i < entry.last_flags.size(); ++i)
+                        entry.last_flags[i] = entry.last_flags[i] || (*live_flags)[i];
+                }
+            }
+            if (entry.delivery_started && now - entry.last_send_ms >= 500) {
+                for (const auto& message : entry.delivery.Pending()) {
+                    const auto bytes = Core::Bbsc::Party::EncodeMessage(message);
+                    if (!bytes.empty()) Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+                        entry.peer, bytes.data(), static_cast<u32>(bytes.size()));
+                }
+                entry.last_send_ms = now;
+            }
+        }
+        return;
+    }
+
+    // A confirmed guest channel is tied to this exact host connection and character. Death and
+    // loading do not close it; only a peer/room/character change does.
+    if (bbsc_guest_party_admission) {
+        auto& channel = *bbsc_guest_party_admission;
+        const auto peer = CurrentPartyPeer(room->owner);
+        if ((current_key && *current_key != channel.key) || room->context != channel.context ||
+            room->room != channel.room || room->owner != channel.owner || !peer || *peer != channel.host) {
+            Core::Bbsc::Party::Message leave;
+            leave.party = channel.party;
+            leave.admission = channel.admission;
+            leave.kind = Core::Bbsc::Party::Kind::Leave;
+            const auto bytes = Core::Bbsc::Party::EncodeMessage(leave);
+            if (!bytes.empty()) Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+                channel.host, bytes.data(), static_cast<u32>(bytes.size()));
+            channel.receiver.Close();
+            bbsc_guest_party_admission.reset();
+            bbsc_admitted_join.reset();
+        EndBbscLoadCover("party peer or room changed before baseline");
+        }
+    }
+    // A guest's live player type is not the own-world character type, so the strong native key
+    // reader is expected to be unavailable after JoinSession. Reuse only the exact key carried by
+    // the admitted ticket for this room; a positively observed different key still takes priority.
+    auto guest_key = current_key;
+    if (!guest_key && bbsc_admitted_join && bbsc_admitted_join->consumed &&
+        bbsc_admitted_join->context == room->context && bbsc_admitted_join->room == room->room &&
+        bbsc_admitted_join->owner == room->owner) {
+        guest_key = bbsc_admitted_join->key;
+    }
+    if (!bbsc_guest_party_admission && guest_key && BbscPartyGuestPlayable(*room, *guest_key)) {
+        const auto peer = CurrentPartyPeer(room->owner);
+        std::error_code ec;
+        if (peer && bbsc_admitted_join && *guest_key == bbsc_admitted_join->key &&
+            bbsc_admitted_join->party != Core::Bbsc::Party::PartyId{} &&
+            bbsc_admitted_join->nonce != 0) {
+            const auto path = BbscPartyHomePath(*guest_key);
+            const auto journal = Core::Bbsc::Party::LoadJournal(path, *guest_key, ec);
+            if (journal && journal->phase == Core::Bbsc::Party::Phase::Visiting &&
+                journal->party == bbsc_admitted_join->party &&
+                journal->admission == bbsc_admitted_join->nonce) {
+                BbscGuestPartyAdmission channel{.host = *peer, .context = room->context,
+                    .room = room->room, .owner = room->owner, .party = journal->party,
+                    .admission = journal->admission, .key = *guest_key};
+                channel.receiver.Begin(*peer, channel.party, channel.admission, 0, {});
+                bbsc_guest_party_admission = std::move(channel);
+            }
+        }
+    }
+    if (!bbsc_guest_party_admission) return;
+    auto& channel = *bbsc_guest_party_admission;
+    // Death and loading stay in session state 6. State 0 is the verified terminal transition to
+    // the guest's own world; the room snapshot can lag behind that native transition.
+    if (GetSessionState() == 0 || BbscHomeForOwnWorld()) {
+        Core::Bbsc::Party::Message leave;
+        leave.party = channel.party;
+        leave.admission = channel.admission;
+        leave.kind = Core::Bbsc::Party::Kind::Leave;
+        const auto bytes = Core::Bbsc::Party::EncodeMessage(leave);
+        if (!bytes.empty()) Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+            channel.host, bytes.data(), static_cast<u32>(bytes.size()));
+        channel.receiver.Close();
+        bbsc_guest_party_admission.reset();
+        bbsc_admitted_join.reset();
+        EndBbscLoadCover("native guest session ended");
+        return; // Do not consume events queued after the local native exit.
+    }
+    const auto packets = TakeBbscPartyPackets();
+    bool sequence_advanced = false;
+    for (const auto& packet : packets) {
+        if (packet.peer != channel.host || packet.message.party != channel.party ||
+            packet.message.admission != channel.admission) continue;
+        if (packet.message.kind == Core::Bbsc::Party::Kind::Leave) {
+            channel.receiver.Close();
+            bbsc_guest_party_admission.reset();
+            bbsc_admitted_join.reset();
+            EndBbscLoadCover("host ended party admission");
+            return;
+        }
+        if (std::ranges::any_of(packet.message.events, [](auto event) {
+                return !BbscPartyCatalogContains(event);
+            })) {
+            Core::Bbsc::Party::Message leave;
+            leave.party = channel.party;
+            leave.admission = channel.admission;
+            leave.kind = Core::Bbsc::Party::Kind::Leave;
+            const auto bytes = Core::Bbsc::Party::EncodeMessage(leave);
+            if (!bytes.empty()) Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+                channel.host, bytes.data(), static_cast<u32>(bytes.size()));
+            channel.receiver.Close();
+            bbsc_guest_party_admission.reset();
+            bbsc_admitted_join.reset();
+            EndBbscLoadCover("invalid party catalog event");
+            return;
+        }
+        const auto before = channel.receiver.LastSequence();
+        channel.receiver.Accept(packet.peer, packet.message);
+        sequence_advanced |= channel.receiver.LastSequence() > before;
+    }
+
+    const auto persist_and_ack = [&]() {
+        if (!channel.receiver.Active() ||
+            (channel.durable_baseline_ack && !sequence_advanced &&
+             channel.receiver.LastSequence() <= channel.persisted_sequence)) return;
+        std::error_code ec;
+        const auto path = BbscPartyHomePath(channel.key);
+        auto lease = Core::Bbsc::Party::CharacterLease::Acquire(path, ec);
+        auto record = lease ? Core::Bbsc::Party::LoadJournal(path, channel.key, ec) : std::nullopt;
+        if (!lease || !record || record->phase != Core::Bbsc::Party::Phase::Visiting ||
+            record->party != channel.party || record->admission != channel.admission) return;
+        const auto ack = Core::Bbsc::Party::PersistEarnedEvents(*lease, *record, channel.receiver, ec);
+        if (!ack) return; // Never acknowledge an intent that failed its durable journal write.
+        channel.durable_ack = *ack;
+        channel.persisted_sequence = ack->sequence;
+        channel.durable_baseline_ack = true;
+    };
+    persist_and_ack();
+    if (now - channel.last_send_ms >= 500) {
+        if (!channel.receiver.Active()) {
+            Core::Bbsc::Party::Message hello;
+            hello.party = channel.party;
+            hello.admission = channel.admission;
+            hello.sequence = 0;
+            hello.kind = Core::Bbsc::Party::Kind::Hello;
+            const auto bytes = Core::Bbsc::Party::EncodeMessage(hello);
+            if (!bytes.empty()) Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+                channel.host, bytes.data(), static_cast<u32>(bytes.size()));
+        } else if (channel.durable_baseline_ack) {
+            const auto bytes = Core::Bbsc::Party::EncodeMessage(channel.durable_ack);
+            if (!bytes.empty()) Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+                channel.host, bytes.data(), static_cast<u32>(bytes.size()));
+        }
+        channel.last_send_ms = now;
+    }
+    if (channel.durable_baseline_ack)
+        EndBbscLoadCover("first-playable baseline durable", true);
+#endif
 }
 
 void OnBbscHostBossPacket(std::int32_t boss) {
@@ -17868,7 +18397,7 @@ void InstallSeamlessCoopPatches() {
     summon_build_world_state_patch_installed = true;
     summon_build_negative_event_patch_installed = true;
     stage_transition_keep_matching_patch_installed = true;
-    bbsc_native_coop_hooks_ready = true;
+    bbsc_native_coop_hooks_ready.store(true, std::memory_order_release);
     LOG_INFO(Debug,
              "Bloodborne seamless patches enabled Beckoning, Small Resonant, and Sinister Bell "
              "use, active search, cross-map candidate selection, and native summon construction "

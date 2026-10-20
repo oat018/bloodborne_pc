@@ -132,6 +132,7 @@ struct HttpRequest {
     int bbsc_observer_kind = 0;
     u64 bbsc_observer_token = 0;
     u64 bbsc_observer_search_generation = 0;
+    u64 bbsc_observer_attempt_generation = 0;
     int bbsc_observer_context = 0;
 };
 
@@ -488,6 +489,7 @@ struct BbscSummonObserverTicket {
     BbscSummonObserverKind kind = BbscSummonObserverKind::None;
     u64 token = 0;
     u64 search_generation = 0;
+    u64 attempt_generation = 0;
     int context_id = 0;
 };
 
@@ -528,20 +530,38 @@ public:
             ++own_generation_;
             ClearOwnLocked();
             InvalidateSearchLocked();
-            return {BbscSummonObserverKind::Create, own_generation_, search_generation_, context_id};
+            const auto sign_intent = ParseSignIntent(plan.body);
+            if (sign_intent == SignIntent::Private) {
+                private_attempt_ = {BbscPrivateAttemptState::Pending,
+                                    ++next_private_attempt_generation_};
+                private_attempt_is_claim_ = false;
+            } else if (sign_intent == SignIntent::Public) {
+                ClearPrivateAttemptLocked();
+            } else {
+                InvalidatePrivateAttemptLocked();
+            }
+            return {BbscSummonObserverKind::Create, own_generation_, search_generation_,
+                    private_attempt_.generation, context_id};
         }
         if (IsBloodborneSummonSearchPath(plan.path)) {
             ++search_generation_;
             ClearSearchLocked();
             ClearClaimLocked();
             return {BbscSummonObserverKind::Search, search_generation_, search_generation_,
-                    context_id};
+                    0, context_id};
         }
         if (IsBloodborneSummonRequestPath(plan.path)) {
             ++next_claim_token_;
             ClearClaimLocked();
             claim_.token = next_claim_token_;
             claim_.search_generation = search_generation_;
+            const bool private_claim = own_sign_.summon_type == 0 &&
+                !own_summon_word_.empty();
+            if (private_claim || private_attempt_.state != BbscPrivateAttemptState::None) {
+                private_attempt_ = {BbscPrivateAttemptState::Pending,
+                                    ++next_private_attempt_generation_};
+                private_attempt_is_claim_ = true;
+            }
             claim_.candidate = {};
             claim_.password_matches_own_sign = false;
             if (SearchIsFreshLocked(std::chrono::steady_clock::now()) &&
@@ -567,7 +587,7 @@ public:
                 }
             }
             return {BbscSummonObserverKind::Claim, claim_.token, claim_.search_generation,
-                    context_id};
+                    private_attempt_is_claim_ ? private_attempt_.generation : 0, context_id};
         }
         InvalidateSearchLocked();
         return {};
@@ -586,13 +606,15 @@ public:
             return;
         }
         if (ticket.kind == BbscSummonObserverKind::Create) {
-            if (ticket.token != own_generation_) {
+            if (ticket.token != own_generation_ ||
+                ticket.attempt_generation != private_attempt_.generation) {
                 return;
             }
             const auto sign = ParseOwnSign(plan.body);
             const auto reply = ParseSuccessResponse(response, "SummonDataCreateResponse");
             if (!sign || !reply) {
                 ClearOwnLocked();
+                InvalidatePrivateAttemptLocked(ticket.attempt_generation);
                 return;
             }
             own_sign_.generation = ticket.token;
@@ -603,6 +625,8 @@ public:
             own_sign_.summon_type = sign->summon_type;
             own_summon_word_ = sign->summon_word;
             own_sign_at_ = std::chrono::steady_clock::now();
+            private_attempt_.state = BbscPrivateAttemptState::Ready;
+            private_attempt_is_claim_ = false;
             return;
         }
         if (ticket.kind == BbscSummonObserverKind::Search) {
@@ -653,6 +677,10 @@ public:
                 claim_.matched_unique_candidate = false;
                 claim_.password_matches_own_sign = false;
                 claim_.candidate = {};
+                InvalidatePrivateAttemptLocked(ticket.attempt_generation);
+            } else if (ticket.attempt_generation != 0 &&
+                       ticket.attempt_generation == private_attempt_.generation) {
+                private_attempt_.state = BbscPrivateAttemptState::Ready;
             }
             claim_at_ = std::chrono::steady_clock::now();
         }
@@ -667,14 +695,18 @@ public:
             return;
         }
         if (ticket.kind == BbscSummonObserverKind::Create && ticket.token == own_generation_) {
-            ClearOwnLocked();
-            InvalidateSearchLocked();
+            if (ticket.attempt_generation == private_attempt_.generation) {
+                ClearOwnLocked();
+                InvalidateSearchLocked();
+                InvalidatePrivateAttemptLocked(ticket.attempt_generation);
+            }
         } else if (ticket.kind == BbscSummonObserverKind::Search &&
                    ticket.token == search_generation_) {
             ++search_generation_;
             ClearSearchLocked();
             ClearClaimLocked();
         } else if (ticket.kind == BbscSummonObserverKind::Claim && ticket.token == claim_.token) {
+            InvalidatePrivateAttemptLocked(ticket.attempt_generation);
             ClearClaimLocked();
         }
     }
@@ -686,18 +718,21 @@ public:
         }
     }
 
-    BbscSummonObservationSnapshot Snapshot() {
+    BbscSummonObservationSnapshot Snapshot(
+        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
         std::lock_guard lock(mutex_);
-        ExpireLocked(std::chrono::steady_clock::now());
-        return {own_sign_, claim_};
+        ExpireLocked(now);
+        return {own_sign_, claim_, private_attempt_};
     }
 
     std::optional<BbscSummonCapabilityProofSnapshot> Proofs(
-        const std::array<u8, 16>& challenge) {
+        const std::array<u8, 16>& challenge,
+        std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
         std::lock_guard lock(mutex_);
-        ExpireLocked(std::chrono::steady_clock::now());
+        ExpireLocked(now);
         if (std::all_of(challenge.begin(), challenge.end(), [](u8 byte) { return byte == 0; }) ||
-            !own_sign_.valid || own_sign_.summon_type != 0 || own_summon_word_.empty() ||
+            private_attempt_.state != BbscPrivateAttemptState::Ready || !own_sign_.valid ||
+            own_sign_.summon_type != 0 || own_summon_word_.empty() ||
             own_sign_.session_id.empty() || own_sign_.session_id.size() > UINT16_MAX ||
             own_sign_.user_id < 0 || own_sign_.character_id < 0) {
             return std::nullopt;
@@ -738,7 +773,7 @@ public:
             return std::nullopt;
         }
         BbscSummonCapabilityProofSnapshot result;
-        result.observation = {own_sign_, claim_};
+        result.observation = {own_sign_, claim_, private_attempt_};
         result.own = *own;
         if (claim_.valid && claim_.matched_unique_candidate &&
             claim_.password_matches_own_sign && claim_.candidate.valid &&
@@ -772,6 +807,20 @@ private:
     static constexpr auto OwnSignLifetime = std::chrono::minutes(15);
     static constexpr auto SearchLifetime = std::chrono::seconds(30);
     static constexpr auto ClaimLifetime = std::chrono::seconds(30);
+
+    enum class SignIntent { Unknown, Public, Private };
+
+    static SignIntent ParseSignIntent(const std::vector<u8>& bytes) {
+        const auto body = ParseJson(bytes);
+        if (!body.is_object()) return SignIntent::Unknown;
+        s32 summon_type = -1;
+        if (!ReadInt32(body, "SummonType", summon_type)) return SignIntent::Unknown;
+        const bool has_word = body.contains("SummonWord") && body["SummonWord"].is_string();
+        const bool nonempty_word =
+            has_word && !body["SummonWord"].get_ref<const std::string&>().empty();
+        if (summon_type != 0 || (has_word && !nonempty_word)) return SignIntent::Public;
+        return SignIntent::Private;
+    }
 
     static bool ReadString(const nlohmann::json& object, const char* key, std::string& out) {
         if (!object.is_object() || !object.contains(key) || !object[key].is_string()) {
@@ -930,7 +979,24 @@ private:
     }
 
     void ClearClaimLocked() {
+        if (private_attempt_is_claim_ &&
+            (private_attempt_.state == BbscPrivateAttemptState::Pending ||
+             private_attempt_.state == BbscPrivateAttemptState::Ready)) {
+            private_attempt_.state = BbscPrivateAttemptState::Invalid;
+        }
         claim_ = {};
+    }
+
+    void ClearPrivateAttemptLocked() {
+        private_attempt_ = {};
+        private_attempt_is_claim_ = false;
+    }
+
+    void InvalidatePrivateAttemptLocked(u64 generation = 0) {
+        if (private_attempt_.state != BbscPrivateAttemptState::None &&
+            (generation == 0 || generation == private_attempt_.generation)) {
+            private_attempt_.state = BbscPrivateAttemptState::Invalid;
+        }
     }
 
     void InvalidateSearchLocked() {
@@ -944,13 +1010,16 @@ private:
         InvalidateSearchLocked();
         ++own_generation_;
         ++next_claim_token_;
+        ClearPrivateAttemptLocked();
         context_id_ = 0;
     }
 
     void FailTicketLocked(const BbscSummonObserverTicket& ticket) {
         if (ticket.kind == BbscSummonObserverKind::Create && ticket.token == own_generation_) {
+            if (ticket.attempt_generation != private_attempt_.generation) return;
             ClearOwnLocked();
             InvalidateSearchLocked();
+            InvalidatePrivateAttemptLocked(ticket.attempt_generation);
         } else if (ticket.kind == BbscSummonObserverKind::Search &&
                    ticket.token == search_generation_) {
             ClearSearchLocked();
@@ -960,6 +1029,7 @@ private:
             claim_.matched_unique_candidate = false;
             claim_.password_matches_own_sign = false;
             claim_.candidate = {};
+            InvalidatePrivateAttemptLocked(ticket.attempt_generation);
         }
     }
 
@@ -971,16 +1041,28 @@ private:
         if (own_sign_.valid && now - own_sign_at_ > OwnSignLifetime) {
             ClearOwnLocked();
             InvalidateSearchLocked();
+            if (private_attempt_.state != BbscPrivateAttemptState::None) {
+                private_attempt_.state = BbscPrivateAttemptState::Expired;
+            }
         }
         if (search_valid_ && now - search_at_ > SearchLifetime) {
+            const bool expire_claim = private_attempt_is_claim_ &&
+                private_attempt_.state == BbscPrivateAttemptState::Ready;
             ClearSearchLocked();
             ClearClaimLocked();
+            if (expire_claim) {
+                private_attempt_.state = BbscPrivateAttemptState::Expired;
+            }
         }
         if (claim_.valid && now - claim_at_ > ClaimLifetime) {
             claim_.valid = false;
             claim_.matched_unique_candidate = false;
             claim_.password_matches_own_sign = false;
             claim_.candidate = {};
+            if (private_attempt_is_claim_ &&
+                private_attempt_.state == BbscPrivateAttemptState::Ready) {
+                private_attempt_.state = BbscPrivateAttemptState::Expired;
+            }
         }
     }
 
@@ -989,6 +1071,7 @@ private:
     u64 own_generation_ = 0;
     u64 search_generation_ = 0;
     u64 next_claim_token_ = 0;
+    u64 next_private_attempt_generation_ = 0;
     u64 last_order_ = 0;
     BbscSummonSignSnapshot own_sign_;
     std::string own_summon_word_;
@@ -999,6 +1082,8 @@ private:
     std::chrono::steady_clock::time_point search_at_{};
     BbscSummonClaimSnapshot claim_;
     std::chrono::steady_clock::time_point claim_at_{};
+    BbscPrivateAttemptSnapshot private_attempt_;
+    bool private_attempt_is_claim_ = false;
 };
 
 BbscSummonObserver g_bbsc_summon_observer;
@@ -1015,7 +1100,7 @@ std::optional<BbscSummonCapabilityProofSnapshot> GetBbscSummonCapabilityProofs(
 BbscSummonObserverTicket GetBbscSummonObserverTicket(const HttpRequest& request) {
     return {static_cast<BbscSummonObserverKind>(request.bbsc_observer_kind),
             request.bbsc_observer_token, request.bbsc_observer_search_generation,
-            request.bbsc_observer_context};
+            request.bbsc_observer_attempt_generation, request.bbsc_observer_context};
 }
 
 void StoreBbscSummonObserverTicket(HttpRequest& request,
@@ -1023,6 +1108,7 @@ void StoreBbscSummonObserverTicket(HttpRequest& request,
     request.bbsc_observer_kind = static_cast<int>(ticket.kind);
     request.bbsc_observer_token = ticket.token;
     request.bbsc_observer_search_generation = ticket.search_generation;
+    request.bbsc_observer_attempt_generation = ticket.attempt_generation;
     request.bbsc_observer_context = ticket.context_id;
 }
 

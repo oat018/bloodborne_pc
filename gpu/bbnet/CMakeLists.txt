@@ -50,7 +50,7 @@ if (NOT WIN32)
         shadps4/core/bbsc_party_journal.cpp)
     target_include_directories(bbsc-party-test PRIVATE include shadps4 ..)
     target_compile_options(bbsc-party-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
-    target_link_libraries(bbsc-party-test PRIVATE ZLIB::ZLIB)
+    target_link_libraries(bbsc-party-test PRIVATE ZLIB::ZLIB OpenSSL::Crypto)
     set_target_properties(bbsc-party-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
     add_executable(bbsc-join-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_join.cpp
@@ -74,9 +74,10 @@ if (NOT WIN32)
         shadps4/core/libraries/np/np_matching2/np_matching2_internal.cpp
         "${SHADNET_PROTO_OUT}/shadnet.pb.cc")
     target_include_directories(bbsc-matching2-admission-test PRIVATE
-        include shadps4 shadps4/shadnet "${SHADNET_PROTO_OUT}" .. ../shim)
+        include shadps4 shadps4/shadnet "${SHADNET_PROTO_OUT}" "${MINIUPNPC_INCLUDE}" .. ../shim)
     target_compile_options(bbsc-matching2-admission-test PRIVATE
-        -UNDEBUG -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Wno-unused-function)
+        -UNDEBUG -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Wno-unused-function
+        -Wno-unused-parameter)
     target_link_options(bbsc-matching2-admission-test PRIVATE -Wl,--gc-sections)
     target_link_libraries(bbsc-matching2-admission-test PRIVATE fmt::fmt protobuf::libprotobuf pthread)
     set_target_properties(bbsc-matching2-admission-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")

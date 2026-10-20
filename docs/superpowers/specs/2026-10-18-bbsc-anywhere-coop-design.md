@@ -5,13 +5,21 @@ Date: 2026-10-18
 Status: written design approved by the user on 2026-10-18. Implementation planning
 is authorized; the implementation plan requires review before execution.
 
-## Implementation boundary and current status (2026-10-20)
+## Implementation boundary and current status (2026-10-21)
 
-The usage-limit checkpoint deliberately disables native admission activation. Its
-capability/HMAC/held-callback/coordinator/selected-save-backup code is preparatory;
-private-attempt lifetime, leave/retry and dispatcher-shutdown races, positive guest
-callback integration and live cancellation still block enabling it. This checkpoint
+Native admission activation remains disabled. The private-attempt lifetime and
+Matching2 cleanup/shutdown races have source fixes, focused regression coverage,
+and scoped re-review. The capability/HMAC/held-callback/coordinator/selected-save-
+backup path remains preparatory. Native guest preparation/rollback has focused
+tests and a clean scoped review; the module, six focused executables and three
+runtime bridge checks pass in bbport-dev. Proof of cancellation before world
+mutation still blocks enabling it. This status
 does not revise the approved behavior requirements or claim feature completion.
+
+First-playable type0x28 delivery now has source callers and a production-tick fixture,
+including durable baseline/event Ack, death/loading retention and terminal local
+exit. Root's final combined checks pass. Native activation, permanent event/item
+application, complete return/unsupported-area integration and Windows remain open.
 
 Use the BBSC already carried in BBPORT (`gpu/bbnet/`) as the primary
 implementation and reference base. The inspected [bbport revision

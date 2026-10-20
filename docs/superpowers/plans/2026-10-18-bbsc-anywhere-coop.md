@@ -4,15 +4,35 @@
 
 **Goal:** Let password-matched friends join across story maps or the Dream, earn only new shared progress, and return safely to their own world after leaving or restarting.
 
-**Latest usage-limit handoff (2026-10-20):** Native admission activation is OFF:
+**Current continuation (2026-10-21):** Native admission activation is OFF:
 `IsBbscPrivateCoopAdmissionRequired()` returns false. New source includes type-0x29
 capability codec/targeted routing, private-word HMAC proofs, held Matching2 success
 callbacks, a game-thread coordinator, and immutable selected-save backups before
 Prepared journal publication. Do not enable this path from its unit tests alone.
-First distinguish expired private attempts from public searches, resolve the
-same-room asynchronous leave/retry race and dispatcher-stop/enqueue race, then test
-positive guest preparation/callback release and native cancellation. Event/reward
-application remains disabled. Keep the prior source/FSR boundaries below.
+The HTTP observer now retains explicit Pending/Ready/Expired/Invalid private intent,
+including an advertising guest without an outgoing claim. Its malformed-create
+public-fallback regression is fixed. Matching2 now retains an exact asynchronous
+cleanup barrier, handles stale failed joins across context reuse, deduplicates Stop
+versus rejection cleanup, and synchronizes accepted-callback queueing with shutdown.
+Both slices have focused tests and scoped re-review. Native guest preparation and
+exact Prepared/Visiting rollback have focused tests and a clean scoped review too.
+Root built bbnet and ran all six focused executables plus three runtime bridge
+checks in bbport-dev, all passing. These checks do not prove native pre-world
+cancellation or exact Matching2 request attribution at the Lua observation.
+Event/reward application remains disabled. Keep the source/FSR boundaries below.
+
+**Final usage checkpoint (2026-10-21):** First-playable type0x28 delivery is wired
+behind the disabled admission gate. It reuses the capability challenge as a
+per-guest party identity and the existing Admission/Delivery/journal Ack path.
+Root's final bbnet build, six focused executables and three runtime bridge checks
+all PASS (usage-checkpoint-2026-10-21-final-checks.log). Review found local-exit and
+terminal-Leave receiver recreation bugs; both are fixed in the saved source.
+The final fixture restores its temporary flag-manager mapping before later recovery
+assertions. No assertion was weakened to hide that contamination.
+The selected-save backup generation-collision fix separately passed its focused
+journal check and scoped review: filenames include the verified byte SHA256 so
+a new process may reuse a receipt generation without overwriting an old snapshot.
+No additional feature scope starts while preparing the usage-limit checkpoint.
 
 **Usage rule (user):** Check the account's 300-minute window periodically during
 active work. When remaining usage is below 10%, stop at a documented checkpoint,

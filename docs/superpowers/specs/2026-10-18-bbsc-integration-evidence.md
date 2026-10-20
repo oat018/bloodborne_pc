@@ -1,6 +1,6 @@
 # BBSC integration evidence and checkpoints
 
-## Current checkpoint summary (2026-10-20)
+## Current checkpoint summary (2026-10-21)
 
 This summary is authoritative; later numbered sections and 2026-10-19 paragraphs
 are dated evidence and must not be read as current implementation status. The feature
@@ -10,10 +10,12 @@ is still partial and not ready to package.
   `IsBbscPrivateCoopAdmissionRequired() == false`. New source has strict type-0x29
   capability routing, HMAC proofs without exposing the native password, held
   Matching2 success callbacks, a game-thread coordinator and immutable selected-save
-  backups before Prepared publication. Exact private-attempt lifetime, same-room
-  rejection cleanup versus retry, dispatcher-stop versus enqueue, and positive
-  guest callback integration remain activation blockers. No live cancellation or
-  new event/reward application is claimed.
+  backups before Prepared publication. Private-attempt lifetime and Matching2
+  cleanup/shutdown race fixes have focused tests and scoped re-review. Native
+  guest preparation/rollback has focused tests and a clean scoped review. Root's
+  combined module, six focused executables and three runtime checks pass;
+  native cancellation is still unproven. No live cancellation or new
+  event/reward application is claimed.
 - Current integrated source includes ABI3 committed-copy receipts (runtime producer,
   BBSC consumer); ordered, peer-bound transport foundations; selected-character home
   snapshots; offline recovery-only startup and bounded native-lamp retry; journal-v4
@@ -2313,3 +2315,96 @@ Transcript: ignored `usage-checkpoint-final-checks.log` in this plan's evidence
 workspace. Admission activation stays false; the private-attempt lifetime,
 leave/retry and shutdown races listed above remain blockers. No package, Windows
 build or live new admission/reward test was performed.
+
+### 2026-10-21 continuation: private intent and Matching2 cleanup
+
+The HTTP observer now reports None/Pending/Ready/Expired/Invalid plus a monotonic
+private-attempt generation. A nonempty-word type0 create establishes private intent
+before an outgoing claim exists, allowing an advertising guest's own HMAC proof.
+Expiry preserves private classification. A malformed create with an empty word
+and missing/string SummonType remains Invalid; only a valid explicit public or
+non-co-op create clears that intent. Completed HTTP handle cleanup still preserves
+committed observation. Focused assertions and scoped fix re-review pass.
+
+Matching2 retains a context/incarnation/request/room/cleanup-nonce barrier until
+the exact successful internal leave reply. Failed cleanup blocks retry; old replies
+cannot clear newer same-room membership. Failed stale-incarnation JoinRoom replies
+retire only their exact cancelled request. Stop and rejection share one idempotent
+cleanup transition, claiming the original error callback before asynchronous leave
+submission. Accepted Resolve returns true only after inserting into a running
+dispatcher under its queue lock; this is not proof of native callback consumption.
+The fixture includes actual mm.cpp and OnMatchingReply, with a fake authenticated
+client backend. Root independently built and ran the HTTP and Matching2 targets in
+bbport-dev; both passed. Scoped Matching2 fix re-review is clean. No live server
+transport or exhaustive concurrent/TSAN interleavings were tested.
+
+Read-only native mapping located the game-facing request callback at VA0xCBD4A0:
+JoinRoom event2 routes to VA0xCBE5C0, which queues result events0x2A/0x29 through
+VA0xCBC3F0 and clears callback argument field+0x3C. The no-payload/error branch also
+queues0x29. The verified ELF is the same SHA256 recorded above; extraction used
+PT_LOAD file offset VA+0x4000. This demonstrates callback side effects, not a ready
+bit or a proven pre-world cancellation gate. The consumer and game-facing polling
+path remain unmapped at this point; retained successful traces contain no correlated
+callback-fire records. The native predicate remains false while this is unresolved.
+Native guest preparation/rollback review and the combined module check are still in
+progress. These observations do not close first-playable event application, rewards,
+Windows native recovery, or the before-packaging feature goal.
+
+The admission continuation subsequently passed root's combined check: bbnet build,
+all six focused executables (party/journal, native join, event catalog, targeted
+transport, HTTP, Matching2) and the ABI3 save-host/offline loader/negative-image
+recovery-module cases. Transcript is the local ignored
+`admission-continuation-final-checks.log`. Native/journal scoped review found no
+actionable issue. The production-tick guest fixture uses a real temporary selected
+save, immutable backup and journal, with HTTP/Matching2 fixture boundaries; it
+does not launch the game. It checks own-sign IDs against the selected CharacterKey,
+optional guest selection proof, wrong peer/challenge/generation/path/hash/character,
+queued callback through Lua observation to playable state, and rejected admission
+restoring a prior Complete journal without losing deferred claims.
+
+Unadmitted rollback now lives beside StoreJournal: it checks the exact unearned
+Prepared/Visiting record and previous Complete state before reusing the existing
+encoding/AtomicWrite path. A changed record is refused rather than rewound.
+First-time removal is durable on Linux; Windows removal is explicitly unsupported,
+with native managed-admission sections still disabled there. The native Lua
+observation contains no Matching2 request identity, so the one-shot's source-side
+context/room/nonce checks do not establish exact native callback attribution.
+The next source slice is first-playable type0x28 delivery and durable intent Ack;
+event/item mutation and native gate activation remain disabled.
+
+Bounded reward-save research found a concrete further seam: player serializer
+VA0x0156AA50 calls VA0x014EA560 at VA0x0156AC2B. That helper invokes the virtual
+method at vtable+0x10 on `[[0x0553B130]+8]`, whose runtime object also owns carried
+inventory. This does not identify the virtual method's goods codec, storage
+representation, or save/load direction. Existing persisted flag proof therefore
+cannot confirm carried/storage goods or distinguish consumed from never granted.
+Do not retire an item claim based on a native grant attempt or a live inventory
+count. The legacy boss-reward callers overlap all three required-item sources;
+they must share the eventual idempotent delivery path before it is enabled.
+
+Further native request-queue inspection mapped singleton VA0xCBC8E0/global0x56C7238
+and append helper VA0xCBC3F0 (vector+0xA8, mutex+0xD0), but not the consumer of its
+0x29/0x2A records. Another producer also queues0x29, so that discriminator alone
+cannot identify a completed Matching2 join. A source proof of the consumer or a
+new correlated copied-profile forced-reject trace is still required.
+
+Selected-save backup naming now includes both the process-local receipt generation
+and the SHA-256 verified from the provided bytes. Different valid snapshots with
+the same generation can coexist after a process restart, while an exact repeat is
+idempotent and existing files remain immutable. The old generation-only files are
+preserved. The focused journal check and scoped review pass; no automatic full-save
+restore API or Windows execution was tested. The party test links the project's
+existing OpenSSL::Crypto target for this verification.
+
+Final usage checkpoint: bbnet, all six focused executables and three runtime bridge
+checks PASS, exit0, after first-playable delivery and backup collision changes.
+Local transcript: usage-checkpoint-2026-10-21-final-checks.log. The delivery fixture
+exercises durable baseline, events after the boundary, journal-write failure/retry,
+death/loading and stale-room native exit. Review found local-exit and host-Leave
+receiver recreation gaps; saved source closes both guest channel and admission token
+on terminal paths. Root rechecked those resets. A later fixture failure was isolated
+to its temporary flag-manager mapping; saving/restoring that fixture state fixed
+the full run without changing production recovery or weakening its assertion.
+No live native cancellation, inventory codec, reward application, Windows execution
+or package was verified. Native admission remains false. This is a source checkpoint,
+not feature-complete pre-release approval.

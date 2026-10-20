@@ -4,17 +4,28 @@ BBSC (seamless co-op for Bloodborne, GPL-2.0-or-later; https://seamlesshunt.com)
 session alive through deaths, lamps, area changes, bosses and the Hunter's Dream, for up to five
 hunters. It is written for shadp2p (a shadPS4 fork); the port carries it in its online module.
 
-## Current implementation checkpoint: 2026-10-20
+## Current implementation checkpoint: 2026-10-21
 
 **Usage-limit checkpoint:** The new native admission predicate
 `IsBbscPrivateCoopAdmissionRequired()` deliberately returns false. Source now has
 the strict 96-byte type-0x29 capability exchange, challenge-bound HMAC proofs,
 Matching2 callback holding, the game-thread coordinator and immutable selected-save
 backups before a Prepared journal. These do not enable normal managed admission.
-Before activation, expose exact pending-private-attempt lifetime (expired private
-claims must not look public), fix the same-room rejection-cleanup/retry race and
-dispatcher-shutdown/enqueue race, and verify a positive guest admission through the
-delayed callback. Live cancellation and Windows recovery remain unverified.
+Private-attempt lifetime now remains explicit through expiration and failed or
+malformed requests. An advertising guest can provide its own proof without sending
+an outgoing claim. The rejection-cleanup/retry and dispatcher-shutdown/enqueue races
+have fixes with focused regression coverage and scoped re-review. Native guest
+preparation/rollback has focused tests and a clean scoped review too. The module,
+all six focused executables and three runtime bridge checks passed in bbport-dev.
+These are source/fixture checks; live pre-world cancellation and Windows recovery
+remain unverified.
+
+First-playable type0x28 callers now collect only verified catalog transitions after
+an independent per-guest baseline and acknowledge earned intent after durable journal
+storage. Death/loading retain eligibility; terminal exits close it. This remains
+dormant behind the disabled native gate, with no permanent flag/item application.
+The final combined build and checks passed after these changes. Backup filenames
+include the verified SHA256 to avoid collisions when receipt generations restart.
 
 **Status:** The anywhere-co-op feature is still partial and not ready for
 packaging. Linux source now includes offline recovery-only module initialization,
