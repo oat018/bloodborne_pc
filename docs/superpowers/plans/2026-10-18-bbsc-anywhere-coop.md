@@ -4,6 +4,8 @@
 
 **Goal:** Let password-matched friends join across story maps or the Dream, earn only new shared progress, and return safely to their own world after leaving or restarting.
 
+**Remaining work after checkpoint ea8ac53:** Follow the [ordered eight-step remaining-work plan](2026-10-21-bbsc-remaining-work.md). It separates existing foundations from unfinished integration and defines the before-packaging exit criteria.
+
 **Current continuation (2026-10-21):** Native admission activation is OFF:
 `IsBbscPrivateCoopAdmissionRequired()` returns false. New source includes type-0x29
 capability codec/targeted routing, private-word HMAC proofs, held Matching2 success
