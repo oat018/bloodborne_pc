@@ -4,9 +4,12 @@
 #include <algorithm>
 #include <atomic>
 #include <bit>
+#include <charconv>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <span>
 #include <unordered_set>
 #include <utility>
@@ -46,7 +49,40 @@ bool ValidKey(const CharacterKey& key) {
            path.lexically_normal() == path && !key.user.empty() && key.user.size() <= 31 &&
            key.user.find_first_of("/\\") == std::string::npos &&
            key.user.find('\0') == std::string::npos && key.slot < 10 &&
-           std::ranges::any_of(key.character, [](auto byte) { return byte != 0; });
+           std::ranges::any_of(key.character, [](auto byte) { return byte != 0; }) &&
+           ((key.cycle <= 6) || ((key.cycle & 0x80000000u) != 0 &&
+                                  (key.cycle & 0x7fffffffu) != 0));
+}
+
+bool ValidSha256(std::string_view hash) {
+    return hash.size() == 64 && std::ranges::all_of(hash, [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+}
+
+bool SameCharacter(const CharacterKey& a, const CharacterKey& b) {
+    return a.save_dir == b.save_dir && a.user == b.user && a.slot == b.slot &&
+           a.character == b.character;
+}
+
+bool ValidCycleRecord(const ManagedCycleEpoch& record) {
+    if (!ValidKey(record.key) || record.native_cycle != 7 || record.epoch > 0x7fffffffULL ||
+        std::to_underlying(record.stage) > std::to_underlying(ManagedCycleStage::SaveSerialized))
+        return false;
+    if (record.stage == ManagedCycleStage::Stable)
+        return record.epoch == 0 ? record.key.cycle <= 6 && record.target_key_cycle == 0
+                                 : record.key.cycle == (0x80000000u | record.epoch) &&
+                                       record.target_key_cycle == record.key.cycle &&
+                                       ValidSha256(record.serialized_sha256);
+    if (!ValidSha256(record.baseline_sha256)) return false;
+    if (record.stage == ManagedCycleStage::Intent)
+        return record.epoch <= 0x7fffffffULL && record.target_key_cycle != 0 &&
+               (record.target_key_cycle & 0x80000000u) != 0;
+    if (record.stage == ManagedCycleStage::Applied)
+        return record.target_key_cycle != 0 && (record.target_key_cycle & 0x80000000u) != 0;
+    return record.target_key_cycle != 0 && (record.target_key_cycle & 0x80000000u) != 0 &&
+           record.serialized_generation >= record.baseline_generation &&
+           ValidSha256(record.serialized_sha256);
 }
 
 bool ValidDestination(const Destination& to) {
@@ -73,6 +109,8 @@ bool Valid(const Journal& record) {
     for (const auto& claim : record.retained) {
         if (!claim.event || !claim.admission ||
             !std::ranges::any_of(claim.party, [](auto byte) { return byte != 0; }) ||
+            !((claim.cycle <= 6) || ((claim.cycle & 0x80000000u) != 0 &&
+                                     (claim.cycle & 0x7fffffffu) != 0)) ||
             !unique.insert(claim.event).second) return false;
     }
     return true;
@@ -139,6 +177,54 @@ struct Reader {
     }
 };
 
+std::vector<std::uint8_t> EncodeCycleRecord(const ManagedCycleEpoch& record) {
+    std::vector<std::uint8_t> body;
+    PutString(body, record.key.save_dir);
+    PutString(body, record.key.user);
+    Put(body, record.key.slot, 1);
+    body.insert(body.end(), record.key.character.begin(), record.key.character.end());
+    Put(body, record.key.cycle, 4);
+    Put(body, record.epoch, 8);
+    Put(body, record.target_key_cycle, 4);
+    Put(body, record.native_cycle, 1);
+    Put(body, std::to_underlying(record.stage), 1);
+    Put(body, record.baseline_generation, 8);
+    Put(body, record.serialized_generation, 8);
+    PutString(body, record.baseline_sha256);
+    PutString(body, record.serialized_sha256);
+    std::vector<std::uint8_t> bytes{'B', 'B', 'C', 'E'};
+    Put(bytes, 1, 4);
+    Put(bytes, body.size(), 4);
+    Put(bytes, crc32(0, body.data(), static_cast<uInt>(body.size())), 4);
+    bytes.insert(bytes.end(), body.begin(), body.end());
+    return bytes;
+}
+
+std::optional<ManagedCycleEpoch> DecodeCycleRecord(std::span<const std::uint8_t> bytes) {
+    if (bytes.size() < 16 || std::memcmp(bytes.data(), "BBCE", 4) != 0) return {};
+    Reader header{bytes, 4};
+    if (header.Get(4) != 1 || header.Get(4) != bytes.size() - 16 ||
+        header.Get(4) != crc32(0, bytes.data() + 16, static_cast<uInt>(bytes.size() - 16)))
+        return {};
+    Reader body{bytes.subspan(16)};
+    ManagedCycleEpoch record;
+    record.key.save_dir = body.String(1023);
+    record.key.user = body.String(31);
+    record.key.slot = static_cast<std::uint8_t>(body.Get(1));
+    record.key.character = body.Id();
+    record.key.cycle = static_cast<std::uint32_t>(body.Get(4));
+    record.epoch = body.Get(8);
+    record.target_key_cycle = static_cast<std::uint32_t>(body.Get(4));
+    record.native_cycle = static_cast<std::uint8_t>(body.Get(1));
+    record.stage = static_cast<ManagedCycleStage>(body.Get(1));
+    record.baseline_generation = body.Get(8);
+    record.serialized_generation = body.Get(8);
+    record.baseline_sha256 = body.String(64);
+    record.serialized_sha256 = body.String(64);
+    if (!body.valid || body.at != body.bytes.size() || !ValidCycleRecord(record)) return {};
+    return record;
+}
+
 std::vector<std::uint8_t> Encode(const Journal& record) {
     std::vector<std::uint8_t> body;
     PutString(body, record.key.save_dir);
@@ -164,10 +250,11 @@ std::vector<std::uint8_t> Encode(const Journal& record) {
         body.insert(body.end(), claim.party.begin(), claim.party.end());
         Put(body, claim.admission, 8);
         Put(body, claim.committed, 1);
+        Put(body, claim.cycle, 4);
     }
     Put(body, record.native_return_selected, 1);
     std::vector<std::uint8_t> bytes{'B', 'B', 'P', 'R'};
-    Put(bytes, 4, 4);
+    Put(bytes, 5, 4);
     Put(bytes, body.size(), 4);
     Put(bytes, crc32(0, body.data(), static_cast<uInt>(body.size())), 4);
     bytes.insert(bytes.end(), body.begin(), body.end());
@@ -179,7 +266,7 @@ std::optional<Journal> Decode(std::span<const std::uint8_t> bytes) {
         return std::nullopt;
     Reader header{bytes, 4};
     const auto version = header.Get(4);
-    if ((version < 1 || version > 4) || header.Get(4) != bytes.size() - 16) return std::nullopt;
+    if ((version < 1 || version > 5) || header.Get(4) != bytes.size() - 16) return std::nullopt;
     if (header.Get(4) != crc32(0, bytes.data() + 16, static_cast<uInt>(bytes.size() - 16)))
         return std::nullopt;
     Reader reader{bytes.subspan(16)};
@@ -203,7 +290,8 @@ std::optional<Journal> Decode(std::span<const std::uint8_t> bytes) {
     record.committed = reader.Events();
     if (version >= 2) {
         const auto count = reader.Get(2);
-        if (!reader.valid || count > MaxEvents || count > (reader.bytes.size() - reader.at) / 29)
+        const std::size_t claim_size = version >= 5 ? 33 : 29;
+        if (!reader.valid || count > MaxEvents || count > (reader.bytes.size() - reader.at) / claim_size)
             return std::nullopt;
         for (std::size_t i = 0; i < count; ++i) {
             EarnedClaim claim;
@@ -213,6 +301,8 @@ std::optional<Journal> Decode(std::span<const std::uint8_t> bytes) {
             const auto committed = reader.Get(1);
             if (committed > 1) return std::nullopt;
             claim.committed = committed != 0;
+            claim.cycle = version >= 5 ? static_cast<std::uint32_t>(reader.Get(4))
+                                       : record.key.cycle;
             record.retained.push_back(claim);
         }
     }
@@ -228,9 +318,9 @@ std::optional<Journal> Decode(std::span<const std::uint8_t> bytes) {
 std::vector<EarnedClaim> Claims(const Journal& record) {
     auto claims = record.retained;
     for (const auto event : record.pending)
-        claims.push_back({event, record.party, record.admission, false});
+        claims.push_back({event, record.party, record.admission, false, record.key.cycle});
     for (const auto event : record.committed)
-        claims.push_back({event, record.party, record.admission, true});
+        claims.push_back({event, record.party, record.admission, true, record.key.cycle});
     return claims;
 }
 
@@ -282,10 +372,49 @@ void CloseHandleValue(NativeHandle handle) {
 #endif
 }
 
+#ifdef _WIN32
+// shortcut: path components are re-resolved after checking, when hostile rename races matter use handle-relative I/O.
+bool CheckWindowsPath(const fs::path& path, bool allow_missing_leaf, bool directory_leaf,
+                      std::error_code& ec) {
+    std::error_code path_error;
+    const auto absolute = fs::absolute(path, path_error).lexically_normal();
+    if (path_error) { ec = path_error; return false; }
+    auto current = absolute.root_path();
+    const auto relative = absolute.relative_path();
+    for (auto part = relative.begin(); part != relative.end(); ++part) {
+        current /= *part;
+        const bool leaf = std::next(part) == relative.end();
+        const auto handle = ::CreateFileW(current.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) {
+            const auto error = ::GetLastError();
+            if (leaf && allow_missing_leaf &&
+                (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)) return true;
+            ec = {static_cast<int>(error), std::system_category()};
+            return false;
+        }
+        BY_HANDLE_FILE_INFORMATION info{};
+        const bool read_info = ::GetFileInformationByHandle(handle, &info) != 0;
+        const auto error = read_info ? ERROR_SUCCESS : ::GetLastError();
+        ::CloseHandle(handle);
+        if (!read_info) { ec = {static_cast<int>(error), std::system_category()}; return false; }
+        if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            return Fail(ec, std::errc::too_many_symbolic_link_levels);
+        if (!leaf && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            return Fail(ec, std::errc::not_a_directory);
+        if (leaf && ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != directory_leaf)
+            return Fail(ec, directory_leaf ? std::errc::not_a_directory : std::errc::is_a_directory);
+    }
+    return true;
+}
+#endif
+
 bool ReadRegularFile(const fs::path& path, std::size_t minimum, std::size_t maximum,
                      std::vector<std::uint8_t>& bytes, std::error_code& ec) {
     ec.clear();
 #ifdef _WIN32
+    if (!CheckWindowsPath(path, false, false, ec)) return false;
     HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                                 FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
@@ -348,6 +477,7 @@ bool AtomicWrite(const fs::path& destination, std::span<const std::uint8_t> byte
                  std::error_code& ec) {
     ec.clear();
 #ifdef _WIN32
+    if (!CheckWindowsPath(destination, true, false, ec)) return false;
     static std::atomic<std::uint64_t> serial{};
     fs::path temporary;
     HANDLE file = INVALID_HANDLE_VALUE;
@@ -427,6 +557,36 @@ bool AtomicWrite(const fs::path& destination, std::span<const std::uint8_t> byte
 #endif
 }
 
+bool HasAnyTaggedCycleHome(const fs::path& base_journal, const CharacterKey& expected,
+                           std::error_code& ec) {
+    ec.clear();
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string character;
+    for (const auto byte : expected.character) {
+        character.push_back(hex[byte >> 4]);
+        character.push_back(hex[byte & 15]);
+    }
+    const auto prefix = "home-" + std::to_string(expected.slot) + "-" + character + "-cycle-";
+    const auto directory = base_journal.parent_path();
+    std::error_code status_error;
+    const auto directory_status = fs::symlink_status(directory, status_error);
+    if (status_error == std::errc::no_such_file_or_directory) return false;
+    if (status_error) { ec = status_error; return true; }
+#ifdef _WIN32
+    if (!CheckWindowsPath(directory, false, true, ec)) return true;
+#endif
+    if (directory_status.type() != fs::file_type::directory)
+        return Fail(ec, std::errc::not_a_directory);
+    fs::directory_iterator it(directory, status_error), end;
+    if (status_error) { ec = status_error; return true; }
+    for (; it != end; it.increment(status_error)) {
+        if (status_error) { ec = status_error; return true; }
+        if (it->path().filename().string().starts_with(prefix)) return true;
+    }
+    if (status_error) { ec = status_error; return true; }
+    return false;
+}
+
 } // namespace
 
 std::optional<Journal> PrepareNextParty(const Journal& previous, PartyId party,
@@ -440,6 +600,30 @@ std::optional<Journal> PrepareNextParty(const Journal& previous, PartyId party,
     next.fallback = fallback;
     next.retained = Claims(previous);
     return Valid(next) ? std::optional{std::move(next)} : std::nullopt;
+}
+
+std::optional<Journal> MigrateCompletedCycleHome(const Journal& previous,
+                                                  const CharacterKey& new_key,
+                                                  PartyId party, Destination origin,
+                                                  Destination fallback) {
+    if (!Valid(previous) || previous.phase != Phase::Complete || !ValidKey(new_key) ||
+        !SameCharacter(previous.key, new_key) || party == previous.party ||
+        (new_key.cycle & 0x80000000u) == 0) return {};
+    const auto next_ordinal = new_key.cycle & 0x7fffffffu;
+    const auto previous_ordinal = previous.key.cycle & 0x7fffffffu;
+    const bool native_boundary = previous.key.cycle == 6 && next_ordinal == 1;
+    const bool managed_boundary = (previous.key.cycle & 0x80000000u) != 0 &&
+                                  next_ordinal == previous_ordinal + 1;
+    if (!native_boundary && !managed_boundary) return {};
+    // A cycle boundary starts a new claim namespace. The completed prior journal is
+    // retained byte-for-byte at its old path, but its event claims must not suppress
+    // fresh boss/item delivery in this NG epoch.
+    Journal migrated;
+    migrated.key = new_key;
+    migrated.party = party;
+    migrated.origin = origin;
+    migrated.fallback = fallback;
+    return Valid(migrated) ? std::optional{std::move(migrated)} : std::nullopt;
 }
 
 void ReturnSaveTracker::Arm(const CharacterKey& key, std::uint64_t baseline_generation,
@@ -605,14 +789,19 @@ std::optional<CharacterLease> CharacterLease::Acquire(const fs::path& path, std:
     ec.clear();
     if (path.empty() || path.filename().empty()) { Fail(ec, std::errc::invalid_argument); return {}; }
     if (!path.parent_path().empty()) {
+#ifdef _WIN32
+        if (!CheckWindowsPath(path.parent_path(), true, true, ec)) return {};
+#endif
         // Create only one level so its parent is known to exist and can be flushed.
         fs::create_directory(path.parent_path(), ec);
         if (ec) return {};
         const auto parent = path.parent_path().parent_path().empty() ? fs::path{"."}
                                                                    : path.parent_path().parent_path();
 #ifdef _WIN32
-        (void)parent; // Atomic record publication below uses MOVEFILE_WRITE_THROUGH.
+        (void)parent;
+        if (!CheckWindowsPath(path, true, false, ec)) return {};
         const fs::path lock = path.wstring() + L".lock";
+        if (!CheckWindowsPath(lock, true, false, ec)) return {};
         HANDLE handle = ::CreateFileW(lock.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                                       OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         if (handle == INVALID_HANDLE_VALUE) {
@@ -638,7 +827,9 @@ std::optional<CharacterLease> CharacterLease::Acquire(const fs::path& path, std:
 #endif
     }
 #ifdef _WIN32
+    if (!CheckWindowsPath(path, true, false, ec)) return {};
     const fs::path lock = path.wstring() + L".lock";
+    if (!CheckWindowsPath(lock, true, false, ec)) return {};
     HANDLE handle = ::CreateFileW(lock.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                                   OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (handle == INVALID_HANDLE_VALUE) {
@@ -684,6 +875,353 @@ std::optional<Journal> LoadJournal(const fs::path& path, const CharacterKey& exp
         return {};
     }
     return record;
+}
+
+fs::path ManagedCycleEpochPath(const fs::path& journal) {
+#ifdef _WIN32
+    return fs::path(journal.native() + L".cycle");
+#else
+    return fs::path(journal.string() + ".cycle");
+#endif
+}
+
+bool HasUnresolvedPriorCycleHome(const fs::path& journal, const CharacterKey& expected,
+                                 std::error_code& ec) {
+    ec.clear();
+    if (!ValidKey(expected) || (expected.cycle & 0x80000000u) == 0)
+        return Fail(ec, std::errc::invalid_argument);
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string character;
+    character.reserve(expected.character.size() * 2);
+    for (const auto byte : expected.character) {
+        character.push_back(hex[byte >> 4]);
+        character.push_back(hex[byte & 15]);
+    }
+    std::string cycle_hex(8, '0');
+    for (std::size_t i = 0; i < cycle_hex.size(); ++i)
+        cycle_hex[cycle_hex.size() - 1 - i] = hex[(expected.cycle >> (i * 4)) & 15];
+    const auto base_name = "home-" + std::to_string(expected.slot) + "-" + character + ".bin";
+    const auto current_name = "home-" + std::to_string(expected.slot) + "-" + character +
+                              "-cycle-" + cycle_hex + ".bin";
+    if (journal.filename().string() != current_name)
+        return Fail(ec, std::errc::invalid_argument);
+
+    const auto directory = journal.parent_path();
+    std::error_code status_error;
+    const auto directory_status = fs::symlink_status(directory, status_error);
+    if (status_error == std::errc::no_such_file_or_directory) return false;
+    if (status_error) { ec = status_error; return true; }
+#ifdef _WIN32
+    if (!CheckWindowsPath(directory, false, true, ec)) return true;
+#endif
+    if (directory_status.type() != fs::file_type::directory)
+        return Fail(ec, std::errc::not_a_directory);
+    fs::directory_iterator it(directory, status_error), end;
+    if (status_error) { ec = status_error; return true; }
+    for (; it != end; it.increment(status_error)) {
+        if (status_error) { ec = status_error; return true; }
+        const auto name = it->path().filename().string();
+        if (name.ends_with(".bin.lock")) continue; // CharacterLease coordination file, not a home record.
+        std::uint32_t cycle = 0;
+        if (name == base_name) {
+            cycle = 6;
+        } else {
+            const auto prefix = "home-" + std::to_string(expected.slot) + "-" + character + "-cycle-";
+            if (!name.starts_with(prefix)) continue;
+            const auto suffix = std::string_view{name}.substr(prefix.size());
+            if (suffix.size() != 12 || suffix.substr(8) != ".bin")
+                return Fail(ec, std::errc::bad_message);
+            for (std::size_t i = 0; i < 8; ++i) {
+                const char c = suffix[i];
+                const unsigned digit = c >= '0' && c <= '9' ? c - '0' :
+                    (c >= 'a' && c <= 'f' ? c - 'a' + 10 : 16);
+                if (digit == 16) return Fail(ec, std::errc::bad_message);
+                cycle = (cycle << 4) | digit;
+            }
+            if ((cycle & 0x80000000u) == 0) return Fail(ec, std::errc::bad_message);
+        }
+        const auto candidate = it->path();
+        if (candidate.filename().string() == current_name) continue;
+        std::error_code candidate_error;
+        const auto candidate_status = fs::symlink_status(candidate, candidate_error);
+        if (candidate_error || candidate_status.type() != fs::file_type::regular) {
+            ec = candidate_error ? candidate_error : std::make_error_code(std::errc::bad_message);
+            return true;
+        }
+        auto prior_key = expected;
+        prior_key.cycle = cycle;
+        auto lease = CharacterLease::Acquire(candidate, candidate_error);
+        if (!lease) { ec = candidate_error; return true; }
+        const auto record = LoadJournal(candidate, prior_key, candidate_error);
+        if (!record) { ec = candidate_error ? candidate_error : std::make_error_code(std::errc::bad_message); return true; }
+        if (record->phase != Phase::Complete) {
+            ec = std::make_error_code(std::errc::operation_in_progress);
+            return true;
+        }
+    }
+    if (status_error) { ec = status_error; return true; }
+    return false;
+}
+
+std::optional<ManagedCycleEpoch> LoadManagedCycleEpoch(
+    const fs::path& journal, const CharacterKey& expected, std::error_code& ec) {
+    ec.clear();
+    if (!ValidKey(expected)) { Fail(ec, std::errc::invalid_argument); return {}; }
+    std::vector<std::uint8_t> bytes;
+    if (!ReadRegularFile(ManagedCycleEpochPath(journal), 16, 2048, bytes, ec)) return {};
+    auto record = DecodeCycleRecord(bytes);
+    if (!record || !SameCharacter(record->key, expected)) {
+        Fail(ec, std::errc::bad_message);
+        return {};
+    }
+    return record;
+}
+
+bool StoreManagedCycleEpoch(const CharacterLease& lease, const ManagedCycleEpoch& record,
+                            std::error_code& ec) {
+    ec.clear();
+    if (lease.fd_ < 0) return Fail(ec, std::errc::bad_file_descriptor);
+    if (!ValidCycleRecord(record)) return Fail(ec, std::errc::invalid_argument);
+    const auto path = ManagedCycleEpochPath(lease.path_);
+    std::vector<std::uint8_t> prior_bytes;
+    std::error_code read_error;
+    if (ReadRegularFile(path, 16, 2048, prior_bytes, read_error)) {
+        const auto prior = DecodeCycleRecord(prior_bytes);
+        if (!prior || !SameCharacter(prior->key, record.key))
+            return Fail(ec, std::errc::bad_message);
+        bool allowed = false;
+        if (prior->stage == ManagedCycleStage::Stable && record.stage == ManagedCycleStage::Intent)
+            allowed = prior->key == record.key && prior->epoch == record.epoch &&
+                      record.target_key_cycle > prior->key.cycle;
+        else if (prior->stage == ManagedCycleStage::Intent && record.stage == ManagedCycleStage::Applied)
+            allowed = prior->key == record.key && prior->target_key_cycle == record.target_key_cycle &&
+                      prior->baseline_sha256 == record.baseline_sha256 &&
+                      prior->baseline_generation == record.baseline_generation;
+        else if (prior->stage == ManagedCycleStage::Applied &&
+                 record.stage == ManagedCycleStage::TransitionSerialized)
+            allowed = prior->key == record.key && prior->target_key_cycle == record.target_key_cycle &&
+                      prior->baseline_sha256 == record.baseline_sha256 &&
+                      prior->baseline_generation == record.baseline_generation;
+        else if (prior->stage == ManagedCycleStage::Applied &&
+                 record.stage == ManagedCycleStage::Applied)
+            allowed = prior->key == record.key && prior->target_key_cycle == record.target_key_cycle &&
+                      prior->baseline_sha256 == record.baseline_sha256;
+        else if (prior->stage == ManagedCycleStage::TransitionSerialized &&
+                 record.stage == ManagedCycleStage::Stable) {
+            const bool committed_transition = record.key.cycle == prior->target_key_cycle &&
+                record.epoch == (prior->target_key_cycle & 0x7fffffffu) &&
+                record.serialized_sha256 == prior->serialized_sha256 &&
+                record.serialized_generation > prior->serialized_generation;
+            const bool canceled_unpersisted_transition = record.key == prior->key &&
+                record.epoch == prior->epoch && record.serialized_sha256 == prior->baseline_sha256;
+            allowed = committed_transition || canceled_unpersisted_transition;
+        }
+        else if (prior->stage == ManagedCycleStage::Applied && record.stage == ManagedCycleStage::Stable)
+            allowed = record.key == prior->key && record.epoch == prior->epoch &&
+                      record.serialized_sha256 == prior->baseline_sha256;
+        else if (prior->stage == ManagedCycleStage::Intent && record.stage == ManagedCycleStage::Stable)
+            allowed = record.key == prior->key && record.epoch == prior->epoch &&
+                      record.serialized_sha256 == prior->baseline_sha256;
+        else if (prior->stage == ManagedCycleStage::TransitionSerialized &&
+                 record.stage == ManagedCycleStage::Applied)
+            allowed = prior->key == record.key && prior->target_key_cycle == record.target_key_cycle &&
+                      prior->serialized_sha256 != prior->baseline_sha256 &&
+                      record.baseline_sha256 == prior->serialized_sha256;
+        else if (prior->stage == ManagedCycleStage::Stable &&
+                 (prior->key.cycle & 0x80000000u) && record.stage == ManagedCycleStage::Stable)
+            allowed = prior->key == record.key && prior->epoch == record.epoch &&
+                      prior->serialized_sha256 == record.serialized_sha256;
+        else if (prior->stage == ManagedCycleStage::Stable &&
+                 (prior->key.cycle & 0x80000000u) && record.stage == ManagedCycleStage::SaveSerialized)
+            allowed = prior->key == record.key && prior->epoch == record.epoch &&
+                      prior->serialized_sha256 == record.baseline_sha256 &&
+                      record.target_key_cycle == prior->key.cycle;
+        else if (prior->stage == ManagedCycleStage::SaveSerialized && record.stage == ManagedCycleStage::Stable)
+            allowed = prior->key == record.key && prior->epoch == record.epoch &&
+                      (record.serialized_sha256 == prior->baseline_sha256 ||
+                       (record.serialized_sha256 == prior->serialized_sha256 &&
+                        record.serialized_generation > prior->serialized_generation));
+        else if (prior->stage == ManagedCycleStage::SaveSerialized &&
+                 record.stage == ManagedCycleStage::SaveSerialized)
+            allowed = prior->key == record.key && prior->epoch == record.epoch &&
+                      record.target_key_cycle == prior->target_key_cycle &&
+                      (record.baseline_sha256 == prior->baseline_sha256 ||
+                       record.baseline_sha256 == prior->serialized_sha256);
+        if (!allowed) return Fail(ec, std::errc::invalid_argument);
+    } else if (read_error != std::errc::no_such_file_or_directory) {
+        ec = read_error;
+        return false;
+    } else if (record.stage != ManagedCycleStage::Stable ||
+               !((record.epoch == 0 && record.key.cycle == 6) ||
+                 (record.epoch == 1 && record.key.cycle == 0x80000001u &&
+                  ValidSha256(record.serialized_sha256)))) {
+        return Fail(ec, std::errc::invalid_argument);
+    } else {
+        // A fresh cap-7 anchor is legal only when no prior home journal exists, including
+        // a completed journal. A native 6->7 transition may seed its pre-increment baseline
+        // alongside that same-cycle journal, but only when it is already Complete; this
+        // sidecar never modifies or erases its claims.
+        std::error_code status_error;
+        const auto status = fs::symlink_status(lease.path_, status_error);
+        const bool journal_exists = !status_error && status.type() != fs::file_type::not_found;
+        if (record.epoch == 1 && journal_exists)
+            return Fail(ec, std::errc::file_exists);
+        if (status_error && status_error != std::errc::no_such_file_or_directory)
+            return Fail(ec, std::errc::io_error);
+        if (record.epoch == 1) {
+            std::error_code history_error;
+            if (HasAnyTaggedCycleHome(lease.path_, record.key, history_error))
+                return Fail(ec, std::errc::file_exists);
+            if (history_error) { ec = history_error; return false; }
+        }
+        if (record.epoch == 0 && journal_exists) {
+            std::error_code journal_error;
+            const auto previous = LoadJournal(lease.path_, record.key, journal_error);
+            if (!previous || previous->phase != Phase::Complete)
+                return Fail(ec, std::errc::file_exists);
+        }
+    }
+    const auto bytes = EncodeCycleRecord(record);
+    return AtomicWrite(path, bytes, true, ec);
+}
+
+std::optional<ManagedCycleEpoch> BeginManagedCycleIntent(
+    const ManagedCycleEpoch& stable, std::uint8_t previous_native_cycle,
+    std::uint64_t generation, std::string_view preincrement_sha256) {
+    if (!ValidCycleRecord(stable) || stable.stage != ManagedCycleStage::Stable ||
+        previous_native_cycle < 6 || previous_native_cycle > 7 ||
+        (previous_native_cycle == 6 && stable.key.cycle != 6) ||
+        (previous_native_cycle == 7 &&
+         (stable.key.cycle & 0x80000000u) == 0) || !ValidSha256(preincrement_sha256)) return {};
+    const auto ordinal = stable.epoch == 0 ? 1 : stable.epoch + 1;
+    if (ordinal > 0x7fffffffULL) return {};
+    auto intent = stable;
+    intent.target_key_cycle = 0x80000000u | static_cast<std::uint32_t>(ordinal);
+    intent.stage = ManagedCycleStage::Intent;
+    intent.baseline_generation = generation;
+    intent.serialized_generation = 0;
+    intent.baseline_sha256 = preincrement_sha256;
+    intent.serialized_sha256.clear();
+    return intent;
+}
+
+std::optional<ManagedCycleEpoch> ObserveManagedCycleApplied(
+    const ManagedCycleEpoch& intent, std::uint8_t previous_native_cycle,
+    std::uint8_t live_native_cycle) {
+    if (!ValidCycleRecord(intent) || intent.stage != ManagedCycleStage::Intent ||
+        previous_native_cycle < 6 || previous_native_cycle > 7 ||
+        live_native_cycle != std::min<unsigned>(previous_native_cycle + 1, 7)) return {};
+    auto applied = intent;
+    applied.stage = ManagedCycleStage::Applied;
+    return applied;
+}
+
+std::optional<ManagedCycleEpoch> ObserveManagedCycleSerializeEnd(
+    const ManagedCycleEpoch& source, std::string_view serialized_sha256,
+    std::uint64_t generation) {
+    if (!ValidCycleRecord(source) || !ValidSha256(serialized_sha256) ||
+        generation < source.baseline_generation) return {};
+    auto serialized = source;
+    if (source.stage == ManagedCycleStage::Applied) {
+        serialized.stage = ManagedCycleStage::TransitionSerialized;
+    } else if ((source.stage == ManagedCycleStage::Stable ||
+                source.stage == ManagedCycleStage::SaveSerialized) &&
+               (source.key.cycle & 0x80000000u) != 0) {
+        serialized.stage = ManagedCycleStage::SaveSerialized;
+        serialized.baseline_sha256 = source.stage == ManagedCycleStage::Stable
+                                         ? source.serialized_sha256
+                                         : source.baseline_sha256;
+        serialized.baseline_generation = generation;
+        serialized.target_key_cycle = source.key.cycle;
+    } else {
+        return {};
+    }
+    serialized.serialized_sha256 = serialized_sha256;
+    serialized.serialized_generation = generation;
+    return ValidCycleRecord(serialized) ? std::optional{serialized} : std::nullopt;
+}
+
+std::optional<ManagedCycleEpoch> RebaseManagedCycleForResume(
+    const ManagedCycleEpoch& persisted, std::string_view selected_sha256,
+    std::uint64_t current_process_generation) {
+    if (!ValidCycleRecord(persisted) || !ValidSha256(selected_sha256)) return {};
+    auto rebased = persisted;
+    const auto make_stable = [&] {
+        auto stable = persisted;
+        stable.stage = ManagedCycleStage::Stable;
+        stable.target_key_cycle = stable.epoch == 0 ? 0 : stable.key.cycle;
+        stable.baseline_generation = 0;
+        stable.serialized_generation = current_process_generation;
+        stable.baseline_sha256.clear();
+        stable.serialized_sha256 = std::string(selected_sha256);
+        return stable;
+    };
+    if (persisted.stage == ManagedCycleStage::Stable && persisted.epoch != 0) {
+        if (selected_sha256 != persisted.serialized_sha256) return {};
+        rebased.serialized_generation = current_process_generation;
+    } else if (persisted.stage == ManagedCycleStage::Intent ||
+               persisted.stage == ManagedCycleStage::Applied) {
+        // The selected save is still the pre-mutation image, so the candidate epoch
+        // was never durably established in this process. Resume the prior namespace.
+        if (selected_sha256 != persisted.baseline_sha256) return {};
+        rebased = make_stable();
+    } else if (persisted.stage == ManagedCycleStage::TransitionSerialized) {
+        if (persisted.serialized_sha256 == persisted.baseline_sha256) {
+            // For native 7->7 the unchanged bytes cannot reveal whether the increment
+            // was durably committed before shutdown. Do not infer either outcome.
+            return {};
+        } else if (selected_sha256 == persisted.baseline_sha256) {
+            // A pre-hash after restart proves the native increment was not persisted.
+            rebased = make_stable();
+        } else if (selected_sha256 == persisted.serialized_sha256) {
+            // The post-image is recognized, but a fresh SerializeEnd and receipt are
+            // still required in this process before promoting the managed epoch.
+            rebased.stage = ManagedCycleStage::Applied;
+            rebased.baseline_sha256 = std::string(selected_sha256);
+            rebased.baseline_generation = current_process_generation;
+            rebased.serialized_generation = 0;
+            rebased.serialized_sha256.clear();
+        } else return {};
+    } else if (persisted.stage == ManagedCycleStage::SaveSerialized) {
+        if (selected_sha256 == persisted.baseline_sha256) {
+            // Ordinary save did not become the selected image; retain the stable epoch.
+            rebased = make_stable();
+        } else if (selected_sha256 == persisted.serialized_sha256) {
+            // Recognize the selected image but require fresh serialization provenance
+            // and a receipt in this process before accepting it as the epoch baseline.
+            rebased.baseline_sha256 = std::string(selected_sha256);
+            rebased.baseline_generation = current_process_generation;
+            rebased.serialized_generation = current_process_generation;
+        } else {
+            return {};
+        }
+    } else {
+        return {};
+    }
+    return ValidCycleRecord(rebased) ? std::optional{rebased} : std::nullopt;
+}
+
+std::optional<ManagedCycleEpoch> CommitManagedCycleEpoch(
+    const ManagedCycleEpoch& serialized, std::uint64_t receipt_generation,
+    std::string_view receipt_sha256, std::string_view persisted_sha256) {
+    if (!ValidCycleRecord(serialized) ||
+        (serialized.stage != ManagedCycleStage::TransitionSerialized &&
+         serialized.stage != ManagedCycleStage::SaveSerialized) ||
+        receipt_generation <= serialized.serialized_generation ||
+        !ValidSha256(receipt_sha256) || !ValidSha256(persisted_sha256) ||
+        receipt_sha256 != serialized.serialized_sha256 ||
+        persisted_sha256 != serialized.serialized_sha256) return {};
+    auto committed = serialized;
+    if (serialized.stage == ManagedCycleStage::TransitionSerialized) {
+        committed.key.cycle = serialized.target_key_cycle;
+        committed.epoch = serialized.target_key_cycle & 0x7fffffffu;
+    }
+    committed.stage = ManagedCycleStage::Stable;
+    committed.target_key_cycle = committed.epoch == 0 ? 0 : committed.key.cycle;
+    committed.baseline_generation = 0;
+    committed.serialized_generation = receipt_generation;
+    committed.baseline_sha256.clear();
+    return committed;
 }
 
 fs::path WorldSnapshotPath(const fs::path& journal, const PartyId& party) {
@@ -834,6 +1372,63 @@ bool StoreJournal(const CharacterLease& lease, const Journal& record, std::error
     const auto bytes = Encode(record);
     return AtomicWrite(lease.path_, bytes, true, ec);
 }
+
+bool StoreSelectedSaveBackup(const CharacterLease& lease, const CharacterKey& key,
+                             std::string_view selected_path, std::uint64_t server_user,
+                             std::uint64_t server_character, std::uint64_t generation,
+                             std::string_view sha256, std::span<const std::uint8_t> bytes,
+                             std::error_code& ec) {
+    ec.clear();
+    std::uint64_t parsed_user = 0;
+    const auto parsed = std::from_chars(key.user.data(), key.user.data() + key.user.size(), parsed_user);
+    const auto expected_path = fs::path{key.save_dir} / ("userdata000" + std::to_string(key.slot));
+    bool ids_match = parsed.ec == std::errc{} && parsed.ptr == key.user.data() + key.user.size() &&
+                     parsed_user == server_user;
+    for (std::size_t i = 0; i < 8; ++i) {
+        ids_match = ids_match && key.character[i] == static_cast<std::uint8_t>(server_user >> (i * 8)) &&
+                    key.character[i + 8] == static_cast<std::uint8_t>(server_character >> (i * 8));
+    }
+    if (lease.fd_ < 0 || !ValidKey(key) || selected_path.empty() || selected_path.size() > 4096 ||
+        selected_path.find('\0') != std::string_view::npos || server_user == 0 ||
+        server_character == 0 || generation == 0 || bytes.size() != 0x140000 ||
+        !ValidSha256(sha256) || !ids_match || fs::path{selected_path} != expected_path)
+        return Fail(ec, std::errc::invalid_argument);
+    std::vector<std::uint8_t> body;
+    PutString(body, key.save_dir);
+    PutString(body, std::string{selected_path});
+    Put(body, key.slot, 1);
+    Put(body, server_user, 8);
+    Put(body, server_character, 8);
+    Put(body, key.cycle, 4);
+    Put(body, generation, 8);
+    PutString(body, std::string{sha256});
+    Put(body, bytes.size(), 4);
+    body.insert(body.end(), bytes.begin(), bytes.end());
+    std::vector<std::uint8_t> encoded{'B', 'B', 'S', 'B'};
+    Put(encoded, 1, 4);
+    Put(encoded, body.size(), 4);
+    Put(encoded, crc32(0, body.data(), static_cast<uInt>(body.size())), 4);
+    encoded.insert(encoded.end(), body.begin(), body.end());
+    const auto path = lease.path_.parent_path() /
+        (lease.path_.stem().string() + ".selected-save-" + std::to_string(generation) + ".bin");
+    std::error_code exists_error;
+    const auto status = fs::symlink_status(path, exists_error);
+    if (!exists_error && status.type() != fs::file_type::not_found) {
+        if (status.type() != fs::file_type::regular) return Fail(ec, std::errc::file_exists);
+        std::ifstream input(path, std::ios::binary | std::ios::ate);
+        if (!input || input.tellg() != static_cast<std::streamoff>(encoded.size()))
+            return Fail(ec, std::errc::file_exists);
+        std::vector<std::uint8_t> existing(encoded.size());
+        input.seekg(0);
+        if (!input.read(reinterpret_cast<char*>(existing.data()), existing.size()) || existing != encoded)
+            return Fail(ec, std::errc::file_exists);
+        return true;
+    }
+    if (exists_error != std::errc::no_such_file_or_directory && exists_error)
+        return Fail(ec, std::errc::io_error);
+    return AtomicWrite(path, encoded, false, ec);
+}
+
 std::optional<Message> PersistEarnedEvents(const CharacterLease& lease, Journal& record,
                                          const Admission& admission, std::error_code& ec) {
     ec.clear();

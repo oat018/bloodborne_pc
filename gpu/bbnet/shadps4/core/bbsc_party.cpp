@@ -81,6 +81,46 @@ std::optional<Message> DecodeMessage(std::span<const std::uint8_t> bytes) {
     return message;
 }
 
+std::vector<std::uint8_t> EncodeCapability(const CapabilityMessage& message) {
+    const auto nonzero = [](const auto& bytes) {
+        return std::ranges::any_of(bytes, [](auto byte) { return byte != 0; });
+    };
+    if (static_cast<unsigned>(message.kind) > static_cast<unsigned>(CapabilityKind::Confirm) ||
+        !message.room || !nonzero(message.challenge) || !nonzero(message.own_proof)) return {};
+    std::vector<std::uint8_t> bytes{'S', 'H', 'A', 'D',
+        Libraries::Np::NpSignaling::kSignalingBbscCapabilityType,
+        Libraries::Np::NpSignaling::kBbscCapabilityVersion,
+        static_cast<std::uint8_t>(message.kind), 0};
+    bytes.reserve(Libraries::Np::NpSignaling::kBbscCapabilityPacketBytes);
+    for (unsigned i = 0; i < 8; ++i)
+        bytes.push_back(static_cast<std::uint8_t>(message.room >> (i * 8)));
+    bytes.insert(bytes.end(), message.challenge.begin(), message.challenge.end());
+    bytes.insert(bytes.end(), message.own_proof.begin(), message.own_proof.end());
+    bytes.insert(bytes.end(), message.selected_proof.begin(), message.selected_proof.end());
+    return bytes;
+}
+
+std::optional<CapabilityMessage> DecodeCapability(std::span<const std::uint8_t> bytes) {
+    using namespace Libraries::Np::NpSignaling;
+    if (bytes.size() != kBbscCapabilityPacketBytes || std::memcmp(bytes.data(), "SHAD", 4) ||
+        bytes[4] != kSignalingBbscCapabilityType || bytes[5] != kBbscCapabilityVersion ||
+        bytes[6] > static_cast<std::uint8_t>(CapabilityKind::Confirm) || bytes[7] != 0)
+        return std::nullopt;
+    CapabilityMessage message;
+    message.kind = static_cast<CapabilityKind>(bytes[6]);
+    for (unsigned i = 0; i < 8; ++i)
+        message.room |= std::uint64_t{bytes[8 + i]} << (i * 8);
+    std::copy_n(bytes.begin() + 16, message.challenge.size(), message.challenge.begin());
+    std::copy_n(bytes.begin() + 32, message.own_proof.size(), message.own_proof.begin());
+    std::copy_n(bytes.begin() + 64, message.selected_proof.size(), message.selected_proof.begin());
+    const auto nonzero = [](const auto& value) {
+        return std::ranges::any_of(value, [](auto byte) { return byte != 0; });
+    };
+    if (!message.room || !nonzero(message.challenge) || !nonzero(message.own_proof))
+        return std::nullopt;
+    return message;
+}
+
 
 bool ValidPeer(const Peer& peer) {
     return !peer.online_id.empty() && peer.online_id.size() <= 16 && peer.connection > 0 &&

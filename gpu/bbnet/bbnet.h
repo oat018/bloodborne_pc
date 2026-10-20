@@ -44,10 +44,17 @@ typedef struct BbNetHost {
 typedef int (*BbNetInitFn)(const BbNetHost *host);
 int bbnet_init(const BbNetHost *host);
 
+/* Recovery-only startup: accepts only the runtime save receipt callback, does not initialize
+ * network imports/workers, and installs only managed offline-recovery hooks for Bloodborne. */
+typedef int (*BbNetRecoveryInitFn)(const BbNetHost *host);
+int bbnet_recovery_init(const BbNetHost *host);
+
 /* Optional: the game's image is mapped and patched, before its first instruction runs (game
  * modules of the online module install their hooks here: BBSC for Bloodborne). */
 typedef void (*BbNetImageReadyFn)(uint64_t image_base, uint64_t image_size);
 void bbnet_image_ready(uint64_t image_base, uint64_t image_size);
+typedef void (*BbNetRecoveryImageReadyFn)(uint64_t image_base, uint64_t image_size);
+void bbnet_recovery_image_ready(uint64_t image_base, uint64_t image_size);
 
 /* The module's function for an imported NID ("NID#lib#mod"), or 0. */
 typedef uintptr_t (*BbNetResolveFn)(const char *scoped_nid);

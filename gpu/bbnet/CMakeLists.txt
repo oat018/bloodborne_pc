@@ -19,7 +19,7 @@ file(GLOB_RECURSE BBNET_SOURCES CONFIGURE_DEPENDS shadps4/core/libraries/network
 # port's stand-ins for shadPS4's UI (bbsc_glue.cpp). Installed only for Bloodborne with BB_BBSC=1.
 list(APPEND BBNET_SOURCES shadps4/core/bloodborne_re.cpp shadps4/core/bbsc_persistence.cpp
     shadps4/core/bbsc_memscan.cpp shadps4/core/bbsc_cinematic.cpp shadps4/core/bbsc_party.cpp
-    bbsc_glue.cpp)
+    shadps4/core/bbsc_party_journal.cpp bbsc_glue.cpp)
 # Trophies and the system dialogs stay in the C runtime; their shadPS4 versions need the
 # emulator's UI layers.
 list(FILTER BBNET_SOURCES EXCLUDE REGEX
@@ -45,7 +45,6 @@ target_link_libraries(bbnet PRIVATE bbgpu nlohmann_json::nlohmann_json protobuf:
 target_include_directories(bbnet PRIVATE "${MINIUPNPC_INCLUDE}")
 
 if (NOT WIN32)
-    target_sources(bbnet PRIVATE shadps4/core/bbsc_party_journal.cpp)
     add_executable(bbsc-party-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_party.cpp
         ../../tests/test_bbsc_party_journal.cpp shadps4/core/bbsc_party.cpp
         shadps4/core/bbsc_party_journal.cpp)
@@ -70,10 +69,28 @@ if (NOT WIN32)
     target_link_libraries(bbsc-party-transport-test PRIVATE fmt::fmt pthread)
     set_target_properties(bbsc-party-transport-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
+    add_executable(bbsc-matching2-admission-test EXCLUDE_FROM_ALL
+        ../../tests/test_bbsc_matching2_admission.cpp
+        shadps4/core/libraries/np/np_matching2/np_matching2_internal.cpp
+        "${SHADNET_PROTO_OUT}/shadnet.pb.cc")
+    target_include_directories(bbsc-matching2-admission-test PRIVATE
+        include shadps4 shadps4/shadnet "${SHADNET_PROTO_OUT}" .. ../shim)
+    target_compile_options(bbsc-matching2-admission-test PRIVATE
+        -UNDEBUG -ffunction-sections -fdata-sections -Wall -Wextra -Werror -Wno-unused-function)
+    target_link_options(bbsc-matching2-admission-test PRIVATE -Wl,--gc-sections)
+    target_link_libraries(bbsc-matching2-admission-test PRIVATE fmt::fmt protobuf::libprotobuf pthread)
+    set_target_properties(bbsc-matching2-admission-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
+    add_executable(bbsc-party-events-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_party_events.cpp
+        shadps4/core/bbsc_party.cpp)
+    target_include_directories(bbsc-party-events-test PRIVATE include shadps4 ..)
+    target_compile_options(bbsc-party-events-test PRIVATE -UNDEBUG -Wall -Wextra -Werror)
+    set_target_properties(bbsc-party-events-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+
     add_executable(bbsc-http-poll-test EXCLUDE_FROM_ALL ../../tests/test_bbsc_http_poll.cpp)
     target_include_directories(bbsc-http-poll-test PRIVATE include shadps4 .. ../shim ../third_party/httplib)
     target_compile_options(bbsc-http-poll-test PRIVATE -UNDEBUG -ffunction-sections -fdata-sections)
     target_link_options(bbsc-http-poll-test PRIVATE -Wl,--gc-sections)
-    target_link_libraries(bbsc-http-poll-test PRIVATE fmt::fmt pthread)
+    target_link_libraries(bbsc-http-poll-test PRIVATE fmt::fmt pthread OpenSSL::Crypto)
     set_target_properties(bbsc-http-poll-test PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 endif()

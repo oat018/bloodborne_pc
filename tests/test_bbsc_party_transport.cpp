@@ -24,7 +24,8 @@ int SignalingSendTo(const void*, u32 size, u32 address, u16 port) {
 }
 namespace Core::Bloodborne {
 void OnBbscPartyPacket(const Peer& peer, const void* bytes, std::uint32_t size) {
-    assert(DecodeMessage({static_cast<const u8*>(bytes), size}));
+    const auto packet = std::span{static_cast<const u8*>(bytes), size};
+    assert(DecodeMessage(packet) || DecodeCapability(packet));
     delivered = peer; ++received;
 }
 }
@@ -41,12 +42,30 @@ int main() {
     assert(!Helpers::SendBbscPartyToPeer({"other", 7}, bytes.data(), bytes.size()) && sent == 1);
     assert(!Helpers::SendBbscPartyToPeer({"host", 8}, bytes.data(), bytes.size()) && sent == 1);
     assert(!Helpers::SendBbscPartyToPeer(peer, nullptr, bytes.size()));
+    auto& ambiguous = g_connections[8];
+    ambiguous = connection;
+    ambiguous.addr = 321; ambiguous.port = 654;
+    assert(!Helpers::FindBbscPartyPeer("host"));
+    assert(!Helpers::SendBbscPartyToPeer(peer, bytes.data(), bytes.size()) && sent == 1);
+    std::memset(ambiguous.online_id.data, 0, sizeof(ambiguous.online_id.data));
+    std::memcpy(ambiguous.online_id.data, "guest", 6);
+    ambiguous.addr = connection.addr; ambiguous.port = connection.port;
+    assert(!Helpers::FindBbscPartyPeer("host"));
+    assert(!Helpers::SendBbscPartyToPeer(peer, bytes.data(), bytes.size()) && sent == 1);
+    assert(!Helpers::ReceiveBbscPartyPacket(bytes.data(), bytes.size(), 123, 456));
+    g_connections.erase(8);
     assert(Helpers::ReceiveBbscPartyPacket(bytes.data(), bytes.size(), 123, 456));
     assert(received == 1 && delivered == peer);
+    CapabilityMessage capability; capability.room = 9;
+    capability.challenge[0] = capability.own_proof[0] = 1;
+    const auto capability_bytes = EncodeCapability(capability);
+    assert(Helpers::SendBbscPartyToPeer(peer, capability_bytes.data(), capability_bytes.size()) == 1);
+    assert(Helpers::ReceiveBbscPartyPacket(capability_bytes.data(), capability_bytes.size(), 123, 456));
+    assert(received == 2 && delivered == peer);
     assert(!Helpers::ReceiveBbscPartyPacket(bytes.data(), bytes.size(), 123, 457));
     connection.state = ConnState::Inactive;
     assert(!Helpers::FindBbscPartyPeer("host"));
-    assert(!Helpers::SendBbscPartyToPeer(peer, bytes.data(), bytes.size()) && sent == 1);
+    assert(!Helpers::SendBbscPartyToPeer(peer, bytes.data(), bytes.size()) && sent == 2);
     assert(!Helpers::ReceiveBbscPartyPacket(bytes.data(), bytes.size(), 123, 456));
     connection.state = ConnState::Established;
     g_connections[8] = connection;
@@ -58,6 +77,6 @@ int main() {
     assert(!Helpers::ReceiveBbscPartyPacket(bad.data(), bad.size(), 123, 456));
     send_fail = true;
     assert(!Helpers::SendBbscPartyToPeer(peer, bytes.data(), bytes.size()));
-    assert(sent == 2 && received == 1);
+    assert(sent == 3 && received == 2);
     std::puts("PASS: targeted party transport pins account/connection and rejects unknown, inactive or ambiguous sources");
 }

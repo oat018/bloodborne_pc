@@ -221,6 +221,7 @@ struct CallbackPayload {
 
 struct ContextObject {
     OrbisNpMatching2ContextId ctx_id = 0;
+    u64 incarnation = 0;
     bool started = false;
     bool stop_pending = false;
     bool destroy_pending = false;
@@ -268,6 +269,7 @@ struct ContextObject {
 
     void Reset() {
         ctx_id = 0;
+        incarnation = 0;
         started = false;
         stop_pending = false;
         destroy_pending = false;
@@ -313,6 +315,32 @@ struct RequestCallbackInfo {
     void* arg = nullptr;
 };
 
+struct BbscAdmissionTicket {
+    OrbisNpMatching2ContextId context = 0;
+    u64 incarnation = 0;
+    OrbisNpMatching2RequestId request = 0;
+    OrbisNpMatching2RoomId room = 0;
+    u64 nonce = 0;
+    std::chrono::steady_clock::time_point deadline{};
+    Libraries::Np::OrbisNpOnlineId owner{};
+};
+
+bool ArmBbscAdmission(OrbisNpMatching2ContextId context, OrbisNpMatching2RequestId request);
+bool IsBbscAdmissionArmed(OrbisNpMatching2ContextId context,
+                          OrbisNpMatching2RequestId request);
+bool HasBbscAdmissionPending(OrbisNpMatching2ContextId context);
+std::vector<BbscAdmissionTicket> GetPendingBbscAdmissionTickets();
+bool ResolveBbscAdmission(const BbscAdmissionTicket& ticket, bool admitted);
+void InvalidateBbscAdmission(OrbisNpMatching2ContextId context,
+                             OrbisNpMatching2RoomId room = 0);
+void CancelBbscAdmissionRequest(OrbisNpMatching2ContextId context,
+                                OrbisNpMatching2RequestId request);
+bool HoldBbscAdmissionResponse(ContextObject& ctx, OrbisNpMatching2RequestId request,
+                               OrbisNpMatching2Event event,
+                               OrbisNpMatching2RequestCallback callback, void* callback_arg,
+                               void* request_data,
+                               std::shared_ptr<CallbackPayload> payload_owner);
+
 void PublishBbscPartyRoom(const ContextObject& ctx);
 
 class ContextManager {
@@ -344,6 +372,7 @@ private:
     std::array<ContextObject, kMaxContexts + 1> m_contexts{};
     std::array<bool, kMaxContexts + 1> m_used{};
     OrbisNpMatching2ContextId m_next_id = 1;
+    u64 m_next_incarnation = 1;
 
     OrbisNpMatching2ContextCallback m_pending_context_callback = nullptr;
     void* m_pending_context_callback_arg = nullptr;
@@ -358,9 +387,11 @@ struct PendingEvent {
         LOBBY_EVENT_CB,
         LOBBY_MESSAGE_CB,
         ROOM_MESSAGE_CB,
+        ADMISSION_TIMEOUT,
     };
     Type type = CONTEXT_CB;
     OrbisNpMatching2ContextId ctx_id = 0;
+    u64 ctx_incarnation = 0;
     std::chrono::steady_clock::time_point fire_at;
 
     OrbisNpMatching2Event ctx_event{};
@@ -389,6 +420,17 @@ struct PendingEvent {
     OrbisNpMatching2RoomMemberId src_member_id = 0;
     OrbisNpMatching2Event msg_event{};
     void* message_data = nullptr;
+    BbscAdmissionTicket admission_ticket{};
+};
+
+struct BbscAdmissionState {
+    BbscAdmissionTicket ticket;
+    bool ready = false;
+    OrbisNpMatching2Event req_event{};
+    OrbisNpMatching2RequestCallback request_cb = nullptr;
+    void* request_cb_arg = nullptr;
+    void* request_data = nullptr;
+    std::shared_ptr<CallbackPayload> payload_owner;
 };
 
 struct NpMatching2State {
@@ -402,6 +444,9 @@ struct NpMatching2State {
     std::condition_variable queue_cv;
     std::vector<PendingEvent> pending_events;
     std::atomic<bool> dispatch_running{false};
+    std::mutex admission_mutex;
+    std::map<OrbisNpMatching2ContextId, struct BbscAdmissionState> admission;
+    u64 next_admission_nonce = 1;
 };
 
 extern NpMatching2State g_state;

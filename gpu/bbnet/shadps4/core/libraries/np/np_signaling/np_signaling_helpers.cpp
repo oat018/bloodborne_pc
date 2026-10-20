@@ -161,6 +161,26 @@ struct BbscPeer {
     u16 port;
 };
 
+bool IsBbscPartyPacket(const void* packet, u32 size) {
+    if (!packet) return false;
+    const auto bytes = std::span{static_cast<const u8*>(packet), size};
+    return Core::Bbsc::Party::DecodeMessage(bytes).has_value() ||
+           Core::Bbsc::Party::DecodeCapability(bytes).has_value();
+}
+
+bool IsUniqueEstablishedPeer(s32 connection, std::string_view online_id) {
+    const auto target = g_connections.find(connection);
+    if (target == g_connections.end() || target->second.state != ConnState::Established ||
+        !target->second.addr || !target->second.port ||
+        OnlineIdToString(target->second.online_id) != online_id) return false;
+    for (const auto& [other_connection, info] : g_connections) {
+        if (other_connection == connection || info.state != ConnState::Established) continue;
+        if (OnlineIdToString(info.online_id) == online_id ||
+            (info.addr == target->second.addr && info.port == target->second.port)) return false;
+    }
+    return true;
+}
+
 std::vector<BbscPeer> EstablishedBbscPeers() {
     std::vector<BbscPeer> peers;
     SignalingMutexGuard lock;
@@ -184,19 +204,18 @@ std::optional<Core::Bbsc::Party::Peer> FindBbscPartyPeer(std::string_view online
         peer = Core::Bbsc::Party::Peer{std::string{online_id}, connection};
         if (!Core::Bbsc::Party::ValidPeer(*peer)) return std::nullopt;
     }
+    if (peer && !IsUniqueEstablishedPeer(peer->connection, peer->online_id)) return std::nullopt;
     return peer;
 }
 
 u32 SendBbscPartyToPeer(const Core::Bbsc::Party::Peer& peer, const void* packet, u32 size) {
-    if (!Core::Bbsc::Party::ValidPeer(peer) || !packet ||
-        !Core::Bbsc::Party::DecodeMessage({static_cast<const u8*>(packet), size})) return 0;
+    if (!Core::Bbsc::Party::ValidPeer(peer) || !IsBbscPartyPacket(packet, size)) return 0;
     u32 address = 0;
     u16 port = 0;
     {
         SignalingMutexGuard lock;
         const auto it = g_connections.find(peer.connection);
-        if (it == g_connections.end() || it->second.state != ConnState::Established ||
-            OnlineIdToString(it->second.online_id) != peer.online_id) return 0;
+        if (!IsUniqueEstablishedPeer(peer.connection, peer.online_id)) return 0;
         address = it->second.addr;
         port = it->second.port;
     }
@@ -205,8 +224,7 @@ u32 SendBbscPartyToPeer(const Core::Bbsc::Party::Peer& peer, const void* packet,
 }
 
 bool ReceiveBbscPartyPacket(const void* packet, u32 size, u32 address, u16 port) {
-    if (!packet || !address || !port ||
-        !Core::Bbsc::Party::DecodeMessage({static_cast<const u8*>(packet), size})) return false;
+    if (!address || !port || !IsBbscPartyPacket(packet, size)) return false;
     std::optional<Core::Bbsc::Party::Peer> peer;
     {
         SignalingMutexGuard lock;
@@ -412,7 +430,7 @@ static void ReceiveThreadMain() {
         }
         const u8 type = buf[4];
 
-        if (type == kSignalingBbscPartyType) {
+        if (type == kSignalingBbscPartyType || type == kSignalingBbscCapabilityType) {
             Helpers::ReceiveBbscPartyPacket(buf, static_cast<u32>(nbytes), from_addr, from_port);
             continue;
         }

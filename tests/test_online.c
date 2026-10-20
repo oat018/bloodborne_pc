@@ -3,6 +3,7 @@
 #include "gpu/bbgpu.h"
 #include "gpu/bbnet/bbnet.h"
 #include <assert.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdint.h>
@@ -35,7 +36,13 @@ static int check_save_host(int reject) {
     assert(mkdtemp(root));
     assert(!runtime_file_mount("/savedata0",root));
     BbNetSaveReceipt receipt={0};
+    char native_path[1024];
+    snprintf(native_path,sizeof(native_path),"%s/userdata0001",root);
+    FILE *native_save=fopen(native_path,"wb");
+    assert(native_save && fwrite("existing",1,8,native_save)==8 && !fclose(native_save));
     assert(query("/savedata0/userdata0001",&receipt)==ENOENT);
+    assert(!strcmp(receipt.path,native_path) && !receipt.generation && !receipt.error &&
+        !receipt.bytes && !receipt.sha256[0]); /* Path provenance alone is not a save receipt. */
     int fd=(int)runtime_file_open("/savedata0/userdata0001",0x602,0600);
     assert(fd>=3 && runtime_file_write(fd,"save",4)==4 && !runtime_file_close(fd));
     assert(!query("/savedata0/userdata0001",&receipt));
@@ -55,6 +62,50 @@ static int check_save_host(int reject) {
     return 0;
 }
 
+static int check_offline_recovery_loader(void) {
+    const char *module_path="out/bbnet-save-host-test.so";
+    void *module=dlopen(module_path,RTLD_NOW|RTLD_LOCAL);
+    assert(module);
+    int (*recovery_init_calls)(void)=(int (*)(void))dlsym(module,"fixture_recovery_init_calls");
+    int (*recovery_ready_calls)(void)=(int (*)(void))dlsym(module,"fixture_recovery_ready_calls");
+    int (*network_init_calls)(void)=(int (*)(void))dlsym(module,"fixture_network_init_calls");
+    assert(recovery_init_calls && recovery_ready_calls && network_init_calls);
+    setenv("BB_ONLINE","0",1);
+    setenv("BB_NET_MODULE",module_path,1);
+    runtime_net_configure("/bloodborne","CUSA03173","Bloodborne","01.09");
+    runtime_net_image_ready(0x12340000,0x5600000);
+    assert(recovery_init_calls()==1 && recovery_ready_calls()==1);
+    assert(network_init_calls()==0);
+    assert(!runtime_net_resolve("Nlev7Lg8k3A#E#F")); // offline imports stay in runtime_services
+    assert(network_init_calls()==0);
+    puts("PASS: offline Bloodborne recovery loads hooks without network module init/imports");
+    return 0;
+}
+
+static size_t task_count(void) {
+    DIR *tasks=opendir("/proc/self/task");
+    assert(tasks);
+    size_t count=0;
+    struct dirent *entry;
+    while ((entry=readdir(tasks)))
+        if (entry->d_name[0]!='.') ++count;
+    closedir(tasks);
+    return count;
+}
+
+static int check_offline_recovery_module(void) {
+    const char *path="out/gpu/libbbnet.so";
+    setenv("BB_ONLINE","0",1);
+    setenv("BB_NET_MODULE",path,1);
+    runtime_net_configure("/bloodborne","CUSA03173","Bloodborne","01.09");
+    const size_t before=task_count();
+    runtime_net_image_ready(0,0); /* invalid image safely refuses hook installation */
+    assert(!runtime_net_resolve("Nlev7Lg8k3A#E#F"));
+    assert(task_count()==before); /* recovery-only load must not start NP/auth workers */
+    puts("PASS: actual BBSC recovery entry loads offline without network imports or worker threads");
+    return 0;
+}
+
 /* The settings menu of the GPU library restarts through probe.c, which tests do not link. */
 void runtime_restart(void) { abort(); }
 
@@ -64,6 +115,8 @@ void runtime_restart(void) { abort(); }
 int main(int argc,char **argv) {
     if (argc==2 && !strcmp(argv[1],"--bbsc-save-host")) return check_save_host(0);
     if (argc==2 && !strcmp(argv[1],"--bbsc-reject-host")) return check_save_host(1);
+    if (argc==2 && !strcmp(argv[1],"--bbsc-recovery-offline")) return check_offline_recovery_loader();
+    if (argc==2 && !strcmp(argv[1],"--bbsc-recovery-module")) return check_offline_recovery_module();
     static const char *const online[]={
         "Nlev7Lg8k3A#E#F",  /* sceNetInit */
         "A9cVMUtEp4Y#K#L",  /* sceHttpInit */

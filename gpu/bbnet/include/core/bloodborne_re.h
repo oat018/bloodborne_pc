@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,10 +36,19 @@ struct BbscPartyRoom {
 };
 void OnBbscPartyRoomState(BbscPartyRoom room);
 std::optional<BbscPartyRoom> GetBbscPartyRoomState();
+bool IsBbscPrivateCoopAdmissionRequired();
 struct BbscPartyPacket { Core::Bbsc::Party::Peer peer; Core::Bbsc::Party::Message message; };
+struct BbscCapabilityPacket {
+    Core::Bbsc::Party::Peer peer;
+    std::array<std::uint8_t, 96> bytes{};
+};
 bool SetBbscPartyPeers(std::span<const Core::Bbsc::Party::Peer> peers);
+// Game-thread refresh: route type0x28 only to currently established members of the published room.
+void TickBbscPartyPeerSelection();
 void OnBbscPartyPacket(const Core::Bbsc::Party::Peer& peer, const void* packet, std::uint32_t size);
 std::vector<BbscPartyPacket> TakeBbscPartyPackets();
+std::vector<BbscCapabilityPacket> TakeBbscCapabilityPackets();
+void TickBbscAdmissionCoordinator();
 // BBSC life state: another player says whether it is dead (spectating) or alive. Relay receive
 // thread; only stores it.
 void OnBbscLifePacket(std::uint32_t player, std::uint8_t dead, std::uint32_t sequence);
@@ -59,6 +69,8 @@ std::uint32_t GetBbscRelayHost();
 std::int32_t GetBbscRelaySessionState();
 void InstallSeamlessCoopPatches();
 void InstallReverseEngineeringTrace();
+// Installs only managed own-world recovery, native return selection, and post-return save hooks.
+bool InstallBbscManagedRecoveryHooks(bool recovery_only);
 
 // BBSC Discord status: what the game is doing, gathered once a second on the game tick.
 struct BbscPresence {

@@ -1,49 +1,88 @@
 # BBSC integration evidence and checkpoints
 
-## Current checkpoint summary (2026-10-19)
+## Current checkpoint summary (2026-10-20)
 
-Implementation checkpoint `45e4d022b33244045bf2b881a00e07b068899f84` is on
-branch `pre`. It includes the source, tests and three updated tracked documents
-(`docs/BBSC.md`, the implementation plan and this evidence document). It does not
-mean the full anywhere-co-op feature is complete. Earlier sections below preserve
-chronological observations; this summary and the final v4 section supersede their
-older statements about missing restore/save consumers.
+This summary is authoritative; later numbered sections and 2026-10-19 paragraphs
+are dated evidence and must not be read as current implementation status. The feature
+is still partial and not ready to package.
 
-- Implemented: ABI3 committed-copy receipts; ordered, peer-bound protocol and
-  durable-intent policy; selected-character identity/home snapshot adapters;
-  managed own-world restore hooks; journal v4 native-point selection and
-  post-destination SerializeBegin/End/hash/receipt completion fence.
-- Still disconnected or unfinished: normal-join preparation/admission/capability
-  and backup policy, live protocol/event consumer coordination, complete offline
-  recovery loading/warp/retry, explicit safe boss/story/item catalog/application,
-  exact managed NG7 cycle isolation, and Windows target integration/verification.
-- Win32 journal APIs exist in source, but `gpu/bbnet/CMakeLists.txt` still includes
-  the journal in `bbnet` only inside `if (NOT WIN32)`. The source adapter is not
-  proof of Windows linkage, compilation or working recovery.
-- Focused `bbport-dev` module build, party, join and transport checks passed.
-  The native join fixture confirms destination mismatch preserves recovery;
-  successful exact-point return is covered only by the pure tracker unit fixture.
-  No new gameplay run, Windows build or AppImage/EXE packaging was performed.
+- Latest usage-limit checkpoint keeps native admission activation OFF via
+  `IsBbscPrivateCoopAdmissionRequired() == false`. New source has strict type-0x29
+  capability routing, HMAC proofs without exposing the native password, held
+  Matching2 success callbacks, a game-thread coordinator and immutable selected-save
+  backups before Prepared publication. Exact private-attempt lifetime, same-room
+  rejection cleanup versus retry, dispatcher-stop versus enqueue, and positive
+  guest callback integration remain activation blockers. No live cancellation or
+  new event/reward application is claimed.
+- Current integrated source includes ABI3 committed-copy receipts (runtime producer,
+  BBSC consumer); ordered, peer-bound transport foundations; selected-character home
+  snapshots; offline recovery-only startup and bounded native-lamp retry; journal-v4
+  post-destination SerializeEnd / ABI3 receipt fence; restart-aware managed cycle
+  epochs/rollover; a 22-boss, three-required-item catalog with explicit endgame
+  deferrals; and native dynamic flag-span/group capture with an immutable,
+  selected-character/receipt-gated optional flag reader.
+- HTTP observation now retains successful native sign/search/claim identity,
+  exact unique target selection and the observed nonempty password match. It
+  follows the final worker-poll result delivered to the game, rejects stale or
+  ambiguous attempts, and survives normal completed-request read/delete cleanup.
+  Pending abort/delete and context termination still invalidate pending work.
+  It is role-neutral observation, not a remote-peer attestation or admission gate.
+- Focused synthetic tests cover production cycle observers for fresh native 6→7 and
+  saturated 7→7, same-epoch save receipt windows, restart cancellation from the exact
+  native-6 preimage, and recognized postimage resume with a reset process generation.
+  They also cover cap-7 return completion, prior-home rollover guards, catalog
+  policy, real flag-hook installation and synthetic serialized flag reads. These
+  do not prove native gameplay placement or progression in a running game.
+- Still disabled or unfinished: normal-join home preparation/admission, selected-host
+  capability/password/backup binding, first-playable event consumer, live native
+  event acquisition validation, event/item application and save-confirmed retirement.
+  Windows build/recovery and gameplay validation are also open.
+- `gpu/bbnet/CMakeLists.txt` now includes `bbsc_party_journal.cpp` for Windows.
+  Native Windows journal file operations check path components and reject existing
+  reparse points. This is a source change; Windows compilation/linkage/runtime are
+  unverified, recovery hooks remain disabled, and hostile concurrent parent-path
+  replacement is outside the path-based checks' guarantee.
+- Admission clarification: the Lua dispatcher's null-name return proves only that
+  the named Lua handler is skipped. The native caller at `0x0131A7AD` ignores its
+  return value and continues bookkeeping at `0x0131A7B2`; this is not proof that
+  the native join is cancelled. A safe pre-world wait/reject path is still required
+  before normal managed admission can be enabled.
 
-Raw logs, copied saves, disassembly and `progress.md` under
-`.superpowers/sdd/2026-10-18-bbsc-anywhere-coop/` are intentionally gitignored and
-remain local. They were not pushed; game/save binaries must not be added to Git.
-The tracked source, focused tests and this summary carry the portable checkpoint.
-The local final logs are `checkpoint-v4-final-{build,party,join,transport}.log`;
-the module link is recorded in `checkpoint-v4-build.log` and the final incremental
-build recompiles the corrected join fixture. To rerun in `bbport-dev`:
+**Source boundary:** Use the BBSC already carried in BBPORT (`gpu/bbnet/`) as the
+primary implementation and reference base. The inspected [bbport revision
+`8185b88d80573fa300595d5c54450183b4109935`](https://github.com/deadinside28/bloodborne_pc/tree/8185b88d80573fa300595d5c54450183b4109935)
+is the current comparison baseline. The inspected external [CLSAMG22/BBSC revision
+`315f76c38b1ca5843b082f93f47927a9193ad94a`](https://github.com/CLSAMG22/BBSC/tree/315f76c38b1ca5843b082f93f47927a9193ad94a)
+is supplementary only for behavior missing from BBPORT's existing BBSC, not an
+equal or replacement base. These are inspected versions, not a permanent freeze.
+Keep feature behavior under `gpu/bbnet/`; the only current runtime exceptions are `src/runtime_net.c` for offline
+recovery module loading (otherwise runtime offline mode never opens the module) and
+`src/runtime_file.c` for the canonical selected mount path before first dirty close
+(the module cannot resolve the private `/savedata0` mount). The path-only ENOENT result
+has zero generation/bytes/hash and is not save proof. Tests supporting these exceptions:
+`out/online-test --bbsc-recovery-offline` and `--bbsc-recovery-module` check offline
+imports/workers and fail-closed invalid-image loading; `out/online-test --bbsc-save-host`
+checks path-only ENOENT then a real dirty-close receipt. Necessary future bbport edits
+must state the concrete gap, why BBSC cannot supply the needed runtime fact, and a
+focused test; this is not a prohibition or renewed approval gate.
 
-```sh
-ninja -C out/gpu bbnet bbsc-party-test bbsc-join-test bbsc-party-transport-test
-out/gpu/bbsc-party-test
-out/gpu/bbsc-join-test
-out/gpu/bbsc-party-transport-test
-```
-
-These commands require the existing configured build/dependencies; they are not
-a clean-machine or full gameplay acceptance result. The next session stops before
-packaging. The pre-existing dirty `gpu/third_party/fsr-vulkan` working tree is
-excluded from the checkpoint commit and must be preserved.
+Focused final checks in `bbport-dev` are logged under
+`.superpowers/sdd/2026-10-18-bbsc-anywhere-coop/`: `cycle-final-{build,party,join,
+transport,events}.log` and `cycle-cap7-return-{build,join}.log`. The runtime bridge
+checks are `offline-recovery-resume-build.log` and `offline-recovery-resume-checks.log`.
+The latest caller regression checks are `cycle-restart-caller-{build,party,join}.log`.
+All listed focused checks pass. No game was launched, no Windows build or AppImage/EXE
+was produced.
+The later continuation is independently checked in
+`continuation-final-checks-2026-10-20.log`: `bbnet` plus party, native join/flag-proof,
+catalog, targeted transport and real HTTP-worker tests pass, followed by all three
+runtime bridge checks above. Scoped source reviews covered the Windows path changes,
+native flag capture/reader and HTTP observation lifecycle. The integrated native
+fixture installs the actual `0x0156AC56`/`0x0156AC94` pair in one mapped image before
+testing proof attribution; the HTTP fixture reads and deletes completed native
+requests without erasing their successful observation. These remain synthetic
+fixtures and do not complete live co-op acceptance or a whole-branch review.
+The pre-existing dirty FSR-Vulkan submodule must be preserved.
 
 ## Historical checkpoint 1
 
@@ -2186,3 +2225,91 @@ selection/confirmation and receipt handling are wired, but restart/offline modul
 activation and return warp/retry behavior are unfinished. Normal-join admission,
 capability/backup policy, event catalog/application, exact NG7 isolation, Windows
 compile/runtime and broad gameplay remain open; no package was built.
+
+### 2026-10-20 — Offline restart path connected, native outcome pending
+
+The Linux runtime image-ready seam now loads the module's recovery-only exports even
+when `BB_ONLINE=0`; this does not invoke ordinary module initialization, import
+registration, NP/auth setup or worker creation. The actual DSO fixture confirms no
+new thread and no online import. Its image is deliberately invalid, so the native
+installer rejects it and preserves the pending journal; this proves fail-closed
+loading, not successful gameplay recovery.
+
+The native respawn resolver uses a boundary-specific identity reader that permits
+the game loading flag only there. It still binds only the selected native slot, exact
+canonical mounted file, native user/character IDs and equal persisted cycle. Other
+identity readers still reject a loading character. Before every native selector or
+StageTransition mutation, the return tick checks the armed key and reloads the
+Returning journal while holding its character lease; foreign/missing/corrupt records,
+changed fallback/reference, or character switches withhold the mutation. Automatic
+reload requests are capped at three; if native destination confirmation is not
+observed, the durable record remains pending. Selector choice is not arrival proof.
+
+Before any dirty close in a new process, the runtime receipt callback may return the
+canonical resolved `/savedata0` file path with ENOENT and all generation/size/hash/error
+proof fields zero. This is only mount/path provenance. BBSC then reads and validates
+that exact file and native identity; the path-only result cannot satisfy native save
+completion.
+
+Focused `bbport-dev` build and checks pass: `offline-recovery-resume-build.log` and
+`offline-recovery-resume-checks.log` in `.superpowers/sdd/2026-10-18-bbsc-anywhere-coop/`.
+The tests cover load-boundary vs ordinary identity, recovery-only loader, no-thread
+behavior, selected-save path-only ENOENT, and the existing journal/identity/transport
+fences. No game was launched. Actual selector/StageTransition gameplay, restart
+arrival, destination confirmation and final save receipt are unverified; Windows
+recovery, normal-join admission, event application/catalog and NG7 isolation remain
+unfinished. The earlier notes above that say offline module loading/warp is absent
+are superseded for this Linux source implementation only; no end-to-end return claim
+is made.
+
+## 2026-10-20 — Room-bound party inbox selection
+
+The normal BBSC game tick now refreshes the type0x28 peer allowlist from the
+owned Matching2 room snapshot. Hosts resolve only `room.members`; guests resolve
+only `room.owner`. Each account must map to exactly one currently established
+signaling account+connection; missing or ambiguous mappings clear the allowlist.
+The receive queue remains bounded and game-thread-only. This adds no send,
+admission, event application, item grant or journal mutation caller.
+
+The join fixture calls the refresh and exercises owner-only delivery plus ambiguous
+connection rejection. The module and `bbsc-join-test`, `bbsc-party-test`,
+`bbsc-party-transport-test`, and `bbsc-party-events-test` build and pass in
+`bbport-dev`; logs are `party-peer-selection-build.log` and
+`party-peer-selection-checks.log`. Candidate trace data exposes a numeric account
+token/user ID, while room ownership is available only after asynchronous JoinRoom.
+No source-verified mapping or reject-capable native gate before world mutation is
+connected. The native save decoder also does not yet prove that event flags/items
+landed in a selected-character save. Therefore event/reward writes remain disabled;
+cap7 exact-cycle isolation and Windows journal integration remain open.
+
+The recovery installer also validates the native selector and StageTransition byte
+signatures against the existing 1.09 `NativeCallSignature` table before activating
+those direct calls. The join fixture now invokes the production return tick with
+counted ABI stubs and checks success, selector rejection, loading guard, foreign
+character, absent/corrupt journal, preserved Returning state and retry exhaustion
+across a repeated same-character/party restore. This covers the branch logic only;
+the synthetic stubs do not establish native in-game placement or load behavior.
+
+2026-10-20 cycle-resume evidence update: journal and native-hook tests now cover
+generation reset across process restart, recognized pre-hash cancellation, expected
+post-hash reserialization, equal-hash 7→7 ambiguity, consecutive tagged epochs, empty
+claim rollover, unresolved prior-home blocking and missing-sidecar anchor rejection.
+The join fixture calls the production cycle and return observers in callback order for
+a tagged cap-7 character, requires native destination confirmation before SerializeBegin,
+matches the later ABI3 selected-save receipt, stabilizes the epoch, and completes the
+return journal on the following tick. Focused logs are
+`cycle-resume-{build,party,join,transport}.log` and
+`cycle-cap7-return-{build,join}.log`. The runtime boundary is synthetic; no live game
+or Windows build was run. Normal admission/capability and event application remain
+disabled, so this evidence does not establish the complete anywhere-coop feature.
+
+### 2026-10-20 usage-limit checkpoint verification
+
+Final combined `bbport-dev` build of `bbnet` and all six focused BBSC test
+executables passed: party/journal, native join/flag proof, event catalog, targeted
+transport, HTTP observer/HMAC, and Matching2 admission dispatcher. The ABI3 save-host,
+offline recovery loader and actual recovery-module negative-image checks also passed.
+Transcript: ignored `usage-checkpoint-final-checks.log` in this plan's evidence
+workspace. Admission activation stays false; the private-attempt lifetime,
+leave/retry and shutdown races listed above remain blockers. No package, Windows
+build or live new admission/reward test was performed.

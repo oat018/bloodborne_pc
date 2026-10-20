@@ -5,6 +5,60 @@ Date: 2026-10-18
 Status: written design approved by the user on 2026-10-18. Implementation planning
 is authorized; the implementation plan requires review before execution.
 
+## Implementation boundary and current status (2026-10-20)
+
+The usage-limit checkpoint deliberately disables native admission activation. Its
+capability/HMAC/held-callback/coordinator/selected-save-backup code is preparatory;
+private-attempt lifetime, leave/retry and dispatcher-shutdown races, positive guest
+callback integration and live cancellation still block enabling it. This checkpoint
+does not revise the approved behavior requirements or claim feature completion.
+
+Use the BBSC already carried in BBPORT (`gpu/bbnet/`) as the primary
+implementation and reference base. The inspected [bbport revision
+`8185b88d80573fa300595d5c54450183b4109935`](https://github.com/deadinside28/bloodborne_pc/tree/8185b88d80573fa300595d5c54450183b4109935)
+is the current comparison baseline. The inspected external [CLSAMG22/BBSC revision
+`315f76c38b1ca5843b082f93f47927a9193ad94a`](https://github.com/CLSAMG22/BBSC/tree/315f76c38b1ca5843b082f93f47927a9193ad94a)
+is supplementary only for behavior missing from BBPORT's existing BBSC, not an
+equal or replacement base. These inspected versions are not a freeze on later
+upstream changes. Do not wholesale replace or merge either repository.
+
+Two small runtime bridges are required because the module cannot observe these
+runtime-owned facts itself: `src/runtime_net.c` loads only recovery hooks when
+`BB_ONLINE=0` (the offline runtime otherwise never opens the module), and
+`src/runtime_file.c` supplies the canonical selected `/savedata0` mount path before
+the first dirty save close (the module cannot resolve the runtime-private mount).
+The path-only response is ENOENT with generation, bytes and SHA256 empty; it is
+strictly path provenance, not a committed-save receipt. Focused tests are
+`out/online-test --bbsc-recovery-offline`, `--bbsc-recovery-module`, and
+`--bbsc-save-host`, covering offline imports/workers, invalid-image rejection, and
+path-only lookup followed by a real committed receipt.
+
+Necessary bbport changes are allowed when a concrete runtime boundary requires
+them; document the evidence that BBSC cannot supply, keep the change minimal, and
+add a focused test. The two bridges above are a scope limit, not a blanket ban on
+future core fixes or a renewed approval gate. At this status point, offline managed
+recovery/return, managed capped-7 cycle proof/rollover and catalog data have source
+and synthetic tests. Native pre-world admission/capability, catalog event application
+and native-save confirmation for earned rewards are not enabled; Windows integration
+and live-game recovery remain unverified. This status does not change the eleven
+approved behavior requirements below.
+
+The current source also observes the native flag serializer's dynamic span and
+catalog group slots, exposes an immutable receipt/identity-gated optional flag
+reader, and records bounded native sign/search/claim observations from the final
+HTTP response delivered to the game. These have synthetic tests, not live-game
+proof. Windows now includes the journal source and native path/reparse checks;
+Windows build/runtime and native recovery hooks remain unverified/disabled.
+The Lua null-name guard proves skipped dispatch only: its native caller ignores
+the return value. Native join cancellation therefore remains an integration gate.
+
+The focused cycle caller fixture now runs the real observers through fresh native
+6→7 and saturated 7→7 transitions, ordinary same-epoch saves, and restart recovery.
+Only a recognized native-6 preimage can cancel an uncommitted increment; a recognized
+postimage needs fresh SerializeEnd and receipt evidence in the new process. Equal-hash
+7→7 restart state remains ambiguous and blocked. These are synthetic file/observer
+tests, not live native gameplay proof.
+
 ## Intent and agreed behavior
 
 Friends should be able to ring their co-op bells in different story maps or the

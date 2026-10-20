@@ -468,6 +468,52 @@ struct Symbol {
     u64 address;
 };
 std::vector<Symbol> g_symbols;
+
+bool PrepareBbscRecoveryImage(std::uint64_t base, std::uint64_t size, bool recovery_only) {
+#ifdef _WIN32
+    (void)base;
+    (void)size;
+    (void)recovery_only;
+    std::printf("BBSC recovery: Windows native hooks are not integrated; journal stays pending\n");
+    return false;
+#else
+    MemoryPatcher::g_eboot_address = base;
+    MemoryPatcher::g_eboot_image_size = size;
+    const Game::Profile* profile = Game::Active();
+    if (!profile || std::string_view{profile->name} != "Bloodborne" ||
+        MemoryPatcher::g_game_serial != "CUSA03173" || base == 0 || size == 0) {
+        std::printf("BBSC recovery: unsupported title/image; managed journal stays pending\n");
+        return false;
+    }
+    const auto* psf = Common::Singleton<PSF>::Instance();
+    if (psf->GetString("APP_VER").value_or("Unknown") != "01.09") {
+        std::printf("BBSC recovery: requires Bloodborne 1.09; managed journal stays pending\n");
+        return false;
+    }
+    unsigned writable = 0;
+    if (FILE* maps = std::fopen("/proc/self/maps", "r")) {
+        char line[512];
+        while (std::fgets(line, sizeof(line), maps)) {
+            unsigned long long start = 0, end = 0;
+            char perms[5] = {};
+            if (std::sscanf(line, "%llx-%llx %4s", &start, &end, perms) != 3 || perms[2] != 'x')
+                continue;
+            start = std::max<unsigned long long>(start, base);
+            end = std::min<unsigned long long>(end, base + size);
+            if (start < end)
+                writable += mprotect(reinterpret_cast<void*>(start), end - start,
+                                     PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+        }
+        std::fclose(maps);
+    }
+    std::printf("BBSC recovery: %u executable code mappings writable\n", writable);
+    if (!Core::Bloodborne::InstallBbscManagedRecoveryHooks(recovery_only)) {
+        std::printf("BBSC recovery: verified native hooks unavailable; managed journal stays pending\n");
+        return false;
+    }
+    return true;
+#endif
+}
 } // namespace
 
 namespace Core::Loader {
@@ -496,6 +542,9 @@ extern "C" __attribute__((visibility("default"))) void bbnet_image_ready(std::ui
     // same 1.09 executable (gpu/games/bloodborne.cpp), and each of its sites is byte-checked.
     const char* bbsc = std::getenv("BB_BBSC");
     if (!bbsc || bbsc[0] != '1') {
+        // The managed home journal also has to recover when normal co-op is disabled. This
+        // installs only the verified restore/selector/save hooks; it does not enable BBSC.
+        PrepareBbscRecoveryImage(base, size, false);
         return;
     }
     const Game::Profile* profile = Game::Active();
@@ -568,6 +617,25 @@ extern "C" __attribute__((visibility("default"))) void bbnet_image_ready(std::ui
     Core::Bloodborne::InstallSeamlessCoopPatches();
     Core::Bbsc::InstallPersistentSessionPatches();
     Core::Bloodborne::InstallReverseEngineeringTrace();
+    Core::Bloodborne::InstallBbscManagedRecoveryHooks(false);
+}
+
+extern "C" __attribute__((visibility("default"))) int bbnet_recovery_init(const BbNetHost* host) {
+    // Recovery must have exactly the save-receipt observation. In particular it must never gain
+    // guest-thread callbacks that could start NP/auth workers or register online imports.
+    if (!host || host->abi != BBNET_ABI_VERSION || !host->save_receipt || host->thread_spawn ||
+        host->thread_join || !host->serial || std::strcmp(host->serial, "CUSA03173") != 0) {
+        std::printf("BBSC recovery: runtime ABI/host contract mismatch; staying offline\n");
+        return -1;
+    }
+    g_host = *host;
+    Configure(host->app0, host->serial, host->title, host->app_ver);
+    return 0;
+}
+
+extern "C" __attribute__((visibility("default"))) void bbnet_recovery_image_ready(
+    std::uint64_t base, std::uint64_t size) {
+    PrepareBbscRecoveryImage(base, size, true);
 }
 
 extern "C" __attribute__((visibility("default"))) int bbnet_init(const BbNetHost* host) {

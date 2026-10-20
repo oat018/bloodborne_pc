@@ -20,6 +20,8 @@
 #include <unordered_set>
 #include <vector>
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
@@ -127,6 +129,10 @@ struct HttpRequest {
     int epoll_id = 0;
     void* epoll_user_arg = nullptr;
     std::vector<std::pair<std::string, std::string>> headers;
+    int bbsc_observer_kind = 0;
+    u64 bbsc_observer_token = 0;
+    u64 bbsc_observer_search_generation = 0;
+    int bbsc_observer_context = 0;
 };
 
 struct HttpState {
@@ -149,6 +155,7 @@ struct HttpState {
 };
 
 static HttpState g_state;
+static std::atomic<u64> g_bbsc_http_observer_order{0};
 
 //***********************************
 // Helper functions
@@ -451,6 +458,12 @@ bool ApplyHostOverride(std::string& scheme, std::string& host, u16& port, bool& 
     return true;
 }
 
+bool IsBloodborneSummonPath(std::string_view path);
+bool IsBloodborneSummonRequestPath(std::string_view path);
+bool IsBloodborneSummonSearchPath(std::string_view path);
+bool IsBloodborneSummonCreatePath(std::string_view path);
+bool IsBloodborneSummonDeletePath(std::string_view path);
+
 struct SendRequestPlan {
     std::string scheme;
     std::string host;
@@ -462,10 +475,556 @@ struct SendRequestPlan {
     std::vector<u8> body;
     std::vector<std::pair<std::string, std::string>> headers; // Merged tmpl + conn + req
     HttpSettings settings;
+    int context_id = 0;
+    u64 observer_order = 0;
     // True if the request's owning ctx had sceHttpsLoadCert called. In that
     // case we bypass TLS verification because we can't load the game's CAs.
     bool ctx_has_loaded_certs = false;
 };
+
+enum class BbscSummonObserverKind : int { None, Create, Search, Claim };
+
+struct BbscSummonObserverTicket {
+    BbscSummonObserverKind kind = BbscSummonObserverKind::None;
+    u64 token = 0;
+    u64 search_generation = 0;
+    int context_id = 0;
+};
+
+class BbscSummonObserver {
+public:
+    BbscSummonObserverTicket Begin(const SendRequestPlan& plan, int context_id, u64 order = 0) {
+        if (!IsBloodborneSummonPath(plan.path)) {
+            return {};
+        }
+        std::lock_guard lock(mutex_);
+        ExpireLocked(std::chrono::steady_clock::now());
+        if (order == 0) {
+            order = last_order_ + 1;
+        }
+        if (order < last_order_) {
+            return {};
+        }
+        last_order_ = order;
+        if (context_id <= 0) {
+            ClearLocked();
+            return {};
+        }
+        if (context_id_ != 0 && context_id_ != context_id) {
+            ClearLocked();
+        }
+        context_id_ = context_id;
+
+        const bool seamless = std::any_of(plan.headers.begin(), plan.headers.end(), [](const auto& h) {
+            return HeaderNameMatches(h.first, "X-ShadPS4-Bloodborne-Seamless");
+        });
+        if (!seamless || IsBloodborneSummonDeletePath(plan.path)) {
+            ClearLocked();
+            context_id_ = context_id;
+            return {};
+        }
+
+        if (IsBloodborneSummonCreatePath(plan.path)) {
+            ++own_generation_;
+            ClearOwnLocked();
+            InvalidateSearchLocked();
+            return {BbscSummonObserverKind::Create, own_generation_, search_generation_, context_id};
+        }
+        if (IsBloodborneSummonSearchPath(plan.path)) {
+            ++search_generation_;
+            ClearSearchLocked();
+            ClearClaimLocked();
+            return {BbscSummonObserverKind::Search, search_generation_, search_generation_,
+                    context_id};
+        }
+        if (IsBloodborneSummonRequestPath(plan.path)) {
+            ++next_claim_token_;
+            ClearClaimLocked();
+            claim_.token = next_claim_token_;
+            claim_.search_generation = search_generation_;
+            claim_.candidate = {};
+            claim_.password_matches_own_sign = false;
+            if (SearchIsFreshLocked(std::chrono::steady_clock::now()) &&
+                own_sign_.valid && own_sign_.summon_type == 0 &&
+                search_matches_own_sign_ && ClaimRequestMatchesOwnSign(plan.body)) {
+                const auto target = ParseClaimTarget(plan.body);
+                if (target) {
+                    const Candidate* match = nullptr;
+                    size_t matches = 0;
+                    for (const auto& candidate : candidates_) {
+                        if (candidate.user_id == target->first &&
+                            candidate.character_id == target->second) {
+                            match = &candidate;
+                            ++matches;
+                        }
+                    }
+                    if (matches == 1 && match != nullptr) {
+                        claim_.matched_unique_candidate = true;
+                        claim_.password_matches_own_sign = true;
+                        claim_.candidate = ToSnapshot(*match);
+                        claim_.candidate.generation = search_generation_;
+                    }
+                }
+            }
+            return {BbscSummonObserverKind::Claim, claim_.token, claim_.search_generation,
+                    context_id};
+        }
+        InvalidateSearchLocked();
+        return {};
+    }
+
+    void Complete(const BbscSummonObserverTicket& ticket, const SendRequestPlan& plan,
+                  const HttpResponse& response, s32 request_error) {
+        if (ticket.kind == BbscSummonObserverKind::None) {
+            return;
+        }
+        std::lock_guard lock(mutex_);
+        ExpireLocked(std::chrono::steady_clock::now());
+        if (ticket.context_id != context_id_ || request_error != 0 || response.status_code != 200 ||
+            response.body.empty() || response.body.size() > MaxResponseBytes) {
+            FailTicketLocked(ticket);
+            return;
+        }
+        if (ticket.kind == BbscSummonObserverKind::Create) {
+            if (ticket.token != own_generation_) {
+                return;
+            }
+            const auto sign = ParseOwnSign(plan.body);
+            const auto reply = ParseSuccessResponse(response, "SummonDataCreateResponse");
+            if (!sign || !reply) {
+                ClearOwnLocked();
+                return;
+            }
+            own_sign_.generation = ticket.token;
+            own_sign_.valid = true;
+            own_sign_.session_id = sign->session_id;
+            own_sign_.user_id = sign->user_id;
+            own_sign_.character_id = sign->character_id;
+            own_sign_.summon_type = sign->summon_type;
+            own_summon_word_ = sign->summon_word;
+            own_sign_at_ = std::chrono::steady_clock::now();
+            return;
+        }
+        if (ticket.kind == BbscSummonObserverKind::Search) {
+            if (ticket.token != search_generation_) {
+                return;
+            }
+            const auto query = ParseCoopSearch(plan.body);
+            const auto reply = ParseSearchResponse(response);
+            if (!query || !reply || !own_sign_.valid || own_sign_.summon_type != 0 ||
+                query->summon_word != own_summon_word_) {
+                ClearSearchLocked();
+                return;
+            }
+            std::vector<Candidate> candidates;
+            candidates.reserve(reply->size());
+            for (const auto& row : *reply) {
+                const auto candidate = ParseCandidate(row);
+                if (!candidate) {
+                    ClearSearchLocked();
+                    return;
+                }
+                if (candidate->summon_type == 0 && candidate->summon_word == query->summon_word) {
+                    Candidate eligible;
+                    eligible.session_id = candidate->session_id;
+                    eligible.summon_word = candidate->summon_word;
+                    eligible.user_id = candidate->user_id;
+                    eligible.character_id = candidate->character_id;
+                    eligible.summon_type = candidate->summon_type;
+                    candidates.push_back(std::move(eligible));
+                }
+            }
+            candidates_ = std::move(candidates);
+            search_matches_own_sign_ = true;
+            search_at_ = std::chrono::steady_clock::now();
+            search_valid_ = true;
+            return;
+        }
+        if (ticket.kind == BbscSummonObserverKind::Claim) {
+            if (ticket.token != claim_.token || ticket.search_generation != search_generation_ ||
+                ticket.search_generation != claim_.search_generation) {
+                return;
+            }
+            const auto reply = ParseSuccessResponse(response, "SummonDataSummonResponse");
+            claim_.valid = claim_.matched_unique_candidate && claim_.password_matches_own_sign &&
+                           SearchIsFreshLocked(std::chrono::steady_clock::now()) &&
+                           ClaimRequestMatchesOwnSign(plan.body) && reply.has_value();
+            if (!claim_.valid) {
+                claim_.matched_unique_candidate = false;
+                claim_.password_matches_own_sign = false;
+                claim_.candidate = {};
+            }
+            claim_at_ = std::chrono::steady_clock::now();
+        }
+    }
+
+    void Cancel(const BbscSummonObserverTicket& ticket) {
+        if (ticket.kind == BbscSummonObserverKind::None) {
+            return;
+        }
+        std::lock_guard lock(mutex_);
+        if (ticket.context_id != context_id_) {
+            return;
+        }
+        if (ticket.kind == BbscSummonObserverKind::Create && ticket.token == own_generation_) {
+            ClearOwnLocked();
+            InvalidateSearchLocked();
+        } else if (ticket.kind == BbscSummonObserverKind::Search &&
+                   ticket.token == search_generation_) {
+            ++search_generation_;
+            ClearSearchLocked();
+            ClearClaimLocked();
+        } else if (ticket.kind == BbscSummonObserverKind::Claim && ticket.token == claim_.token) {
+            ClearClaimLocked();
+        }
+    }
+
+    void InvalidateContext(int context_id) {
+        std::lock_guard lock(mutex_);
+        if (context_id_ == context_id) {
+            ClearLocked();
+        }
+    }
+
+    BbscSummonObservationSnapshot Snapshot() {
+        std::lock_guard lock(mutex_);
+        ExpireLocked(std::chrono::steady_clock::now());
+        return {own_sign_, claim_};
+    }
+
+    std::optional<BbscSummonCapabilityProofSnapshot> Proofs(
+        const std::array<u8, 16>& challenge) {
+        std::lock_guard lock(mutex_);
+        ExpireLocked(std::chrono::steady_clock::now());
+        if (std::all_of(challenge.begin(), challenge.end(), [](u8 byte) { return byte == 0; }) ||
+            !own_sign_.valid || own_sign_.summon_type != 0 || own_summon_word_.empty() ||
+            own_sign_.session_id.empty() || own_sign_.session_id.size() > UINT16_MAX ||
+            own_sign_.user_id < 0 || own_sign_.character_id < 0) {
+            return std::nullopt;
+        }
+
+        const auto proof_for = [&](std::string_view session, u64 user_id, u64 character_id,
+                                   u32 summon_type) -> std::optional<std::array<u8, 32>> {
+            std::vector<u8> message;
+            constexpr std::string_view domain = "BBSC-admission-v1";
+            message.insert(message.end(), domain.begin(), domain.end());
+            message.insert(message.end(), challenge.begin(), challenge.end());
+            const auto append_le = [&message](u64 value, size_t bytes) {
+                for (size_t i = 0; i < bytes; ++i) {
+                    message.push_back(static_cast<u8>(value >> (i * 8)));
+                }
+            };
+            append_le(session.size(), 2);
+            message.insert(message.end(), session.begin(), session.end());
+            append_le(user_id, 8);
+            append_le(character_id, 8);
+            append_le(summon_type, 4);
+
+            std::array<u8, 32> proof{};
+            unsigned int proof_size = 0;
+            if (!HMAC(EVP_sha256(), own_summon_word_.data(),
+                      static_cast<int>(own_summon_word_.size()), message.data(), message.size(),
+                      proof.data(), &proof_size) ||
+                proof_size != proof.size()) {
+                return std::nullopt;
+            }
+            return proof;
+        };
+
+        const auto own = proof_for(own_sign_.session_id, static_cast<u64>(own_sign_.user_id),
+                                  static_cast<u64>(own_sign_.character_id),
+                                  static_cast<u32>(own_sign_.summon_type));
+        if (!own) {
+            return std::nullopt;
+        }
+        BbscSummonCapabilityProofSnapshot result;
+        result.observation = {own_sign_, claim_};
+        result.own = *own;
+        if (claim_.valid && claim_.matched_unique_candidate &&
+            claim_.password_matches_own_sign && claim_.candidate.valid &&
+            claim_.candidate.summon_type == 0 && claim_.candidate.user_id >= 0 &&
+            claim_.candidate.character_id >= 0 &&
+            claim_.candidate.session_id.size() <= UINT16_MAX) {
+            if (const auto selected = proof_for(
+                    claim_.candidate.session_id, static_cast<u64>(claim_.candidate.user_id),
+                    static_cast<u64>(claim_.candidate.character_id),
+                    static_cast<u32>(claim_.candidate.summon_type))) {
+                result.selected = *selected;
+            }
+        }
+        return result;
+    }
+
+private:
+    struct ParsedSign {
+        std::string session_id;
+        std::string summon_word;
+        s64 user_id = -1;
+        s64 character_id = -1;
+        s32 summon_type = -1;
+    };
+    struct Candidate : ParsedSign {};
+    struct SearchQuery { std::string summon_word; };
+
+    static constexpr size_t MaxObserverStringBytes = 128;
+    static constexpr size_t MaxCandidates = 64;
+    static constexpr size_t MaxResponseBytes = 1024 * 1024;
+    static constexpr auto OwnSignLifetime = std::chrono::minutes(15);
+    static constexpr auto SearchLifetime = std::chrono::seconds(30);
+    static constexpr auto ClaimLifetime = std::chrono::seconds(30);
+
+    static bool ReadString(const nlohmann::json& object, const char* key, std::string& out) {
+        if (!object.is_object() || !object.contains(key) || !object[key].is_string()) {
+            return false;
+        }
+        const auto& value = object[key].get_ref<const std::string&>();
+        if (value.empty() || value.size() > MaxObserverStringBytes) {
+            return false;
+        }
+        out = value;
+        return true;
+    }
+
+    static bool ReadNonnegativeInteger(const nlohmann::json& object, const char* key, s64& out) {
+        if (!object.is_object() || !object.contains(key) || !object[key].is_number_integer()) {
+            return false;
+        }
+        const auto& value = object[key];
+        if (value.is_number_unsigned() && value.get<u64>() > static_cast<u64>(INT64_MAX)) {
+            return false;
+        }
+        out = value.get<s64>();
+        return out >= 0;
+    }
+
+    static bool ReadInt32(const nlohmann::json& object, const char* key, s32& out) {
+        s64 value = 0;
+        if (!ReadNonnegativeInteger(object, key, value) || value > INT32_MAX) {
+            return false;
+        }
+        out = static_cast<s32>(value);
+        return true;
+    }
+
+    static nlohmann::json ParseJson(const std::vector<u8>& bytes) {
+        return nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
+    }
+
+    static std::optional<ParsedSign> ParseOwnSign(const std::vector<u8>& bytes) {
+        const auto body = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
+        ParsedSign sign;
+        if (!body.is_object() || !ReadString(body, "SessionId", sign.session_id) ||
+            !ReadString(body, "SummonWord", sign.summon_word) ||
+            !ReadNonnegativeInteger(body, "UserId", sign.user_id) ||
+            !ReadNonnegativeInteger(body, "CharaId", sign.character_id) ||
+            !ReadInt32(body, "SummonType", sign.summon_type) || sign.summon_type != 0) {
+            return std::nullopt;
+        }
+        return sign;
+    }
+
+    static std::optional<SearchQuery> ParseCoopSearch(const std::vector<u8>& bytes) {
+        const auto body = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
+        SearchQuery query;
+        if (!body.is_object() || !ReadString(body, "SummonWord", query.summon_word) ||
+            !body.contains("SummonTypeList") || !body["SummonTypeList"].is_array()) {
+            return std::nullopt;
+        }
+        for (const auto& type : body["SummonTypeList"]) {
+            s32 summon_type = -1;
+            if (!ReadInt32(type, "SummonType", summon_type)) {
+                return std::nullopt;
+            }
+            if (summon_type == 0) {
+                return query;
+            }
+        }
+        return std::nullopt;
+    }
+
+    static std::optional<Candidate> ParseCandidate(const nlohmann::json& row) {
+        Candidate candidate;
+        if (!ReadString(row, "SessionId", candidate.session_id) ||
+            !ReadString(row, "SummonWord", candidate.summon_word) ||
+            !ReadNonnegativeInteger(row, "UserId", candidate.user_id) ||
+            !ReadNonnegativeInteger(row, "CharaId", candidate.character_id) ||
+            !ReadInt32(row, "SummonType", candidate.summon_type)) {
+            return std::nullopt;
+        }
+        return candidate;
+    }
+
+    static std::optional<std::vector<nlohmann::json>> ParseSearchResponse(
+        const HttpResponse& response) {
+        const auto body = ParseJson(response.body);
+        if (!HasSuccessFields(body, "SummonDataGetListResponse") ||
+            !body.contains("SummonDataList") || !body["SummonDataList"].is_array() ||
+            body["SummonDataList"].size() > MaxCandidates) {
+            return std::nullopt;
+        }
+        return body["SummonDataList"].get<std::vector<nlohmann::json>>();
+    }
+
+    static bool HasSuccessFields(const nlohmann::json& body, std::string_view message_id) {
+        return body.is_object() && body.contains("MessageId") && body["MessageId"].is_string() &&
+               body["MessageId"] == message_id && body.contains("ResKind") &&
+               body["ResKind"].is_number_integer() && body["ResKind"] == 0;
+    }
+
+    static std::optional<bool> ParseSuccessResponse(const HttpResponse& response,
+                                                    std::string_view message_id) {
+        const auto body = ParseJson(response.body);
+        return HasSuccessFields(body, message_id) ? std::optional<bool>{true} : std::nullopt;
+    }
+
+    static std::optional<std::pair<s64, s64>> ParseClaimTarget(
+        const std::vector<u8>& bytes) {
+        const auto body = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
+        s64 user_id = -1;
+        s64 character_id = -1;
+        if (!ReadNonnegativeInteger(body, "TargetUserId", user_id) ||
+            !ReadNonnegativeInteger(body, "TargetCharaId", character_id)) {
+            return std::nullopt;
+        }
+        return std::pair{user_id, character_id};
+    }
+
+    bool ClaimRequestMatchesOwnSign(const std::vector<u8>& bytes) const {
+        const auto body = nlohmann::json::parse(bytes.begin(), bytes.end(), nullptr, false);
+        std::string session_id;
+        s64 user_id = -1;
+        s64 character_id = -1;
+        return body.is_object() && ReadString(body, "SessionId", session_id) &&
+               ReadNonnegativeInteger(body, "UserId", user_id) &&
+               ReadNonnegativeInteger(body, "CharaId", character_id) &&
+               session_id == own_sign_.session_id && user_id == own_sign_.user_id &&
+               character_id == own_sign_.character_id;
+    }
+
+    static BbscSummonSignSnapshot ToSnapshot(const Candidate& candidate) {
+        BbscSummonSignSnapshot out;
+        out.valid = true;
+        out.session_id = candidate.session_id;
+        out.user_id = candidate.user_id;
+        out.character_id = candidate.character_id;
+        out.summon_type = candidate.summon_type;
+        return out;
+    }
+
+    static void Wipe(std::string& value) {
+        std::fill(value.begin(), value.end(), '\0');
+        value.clear();
+    }
+
+    void ClearOwnLocked() {
+        Wipe(own_summon_word_);
+        own_sign_ = {};
+        own_sign_.generation = own_generation_;
+    }
+
+    void ClearSearchLocked() {
+        candidates_.clear();
+        search_valid_ = false;
+        search_matches_own_sign_ = false;
+        search_at_ = {};
+    }
+
+    void ClearClaimLocked() {
+        claim_ = {};
+    }
+
+    void InvalidateSearchLocked() {
+        ++search_generation_;
+        ClearSearchLocked();
+        ClearClaimLocked();
+    }
+
+    void ClearLocked() {
+        ClearOwnLocked();
+        InvalidateSearchLocked();
+        ++own_generation_;
+        ++next_claim_token_;
+        context_id_ = 0;
+    }
+
+    void FailTicketLocked(const BbscSummonObserverTicket& ticket) {
+        if (ticket.kind == BbscSummonObserverKind::Create && ticket.token == own_generation_) {
+            ClearOwnLocked();
+            InvalidateSearchLocked();
+        } else if (ticket.kind == BbscSummonObserverKind::Search &&
+                   ticket.token == search_generation_) {
+            ClearSearchLocked();
+            ClearClaimLocked();
+        } else if (ticket.kind == BbscSummonObserverKind::Claim && ticket.token == claim_.token) {
+            claim_.valid = false;
+            claim_.matched_unique_candidate = false;
+            claim_.password_matches_own_sign = false;
+            claim_.candidate = {};
+        }
+    }
+
+    bool SearchIsFreshLocked(std::chrono::steady_clock::time_point now) const {
+        return search_valid_ && now - search_at_ <= SearchLifetime;
+    }
+
+    void ExpireLocked(std::chrono::steady_clock::time_point now) {
+        if (own_sign_.valid && now - own_sign_at_ > OwnSignLifetime) {
+            ClearOwnLocked();
+            InvalidateSearchLocked();
+        }
+        if (search_valid_ && now - search_at_ > SearchLifetime) {
+            ClearSearchLocked();
+            ClearClaimLocked();
+        }
+        if (claim_.valid && now - claim_at_ > ClaimLifetime) {
+            claim_.valid = false;
+            claim_.matched_unique_candidate = false;
+            claim_.password_matches_own_sign = false;
+            claim_.candidate = {};
+        }
+    }
+
+    mutable std::mutex mutex_;
+    int context_id_ = 0;
+    u64 own_generation_ = 0;
+    u64 search_generation_ = 0;
+    u64 next_claim_token_ = 0;
+    u64 last_order_ = 0;
+    BbscSummonSignSnapshot own_sign_;
+    std::string own_summon_word_;
+    std::chrono::steady_clock::time_point own_sign_at_{};
+    bool search_valid_ = false;
+    bool search_matches_own_sign_ = false;
+    std::vector<Candidate> candidates_;
+    std::chrono::steady_clock::time_point search_at_{};
+    BbscSummonClaimSnapshot claim_;
+    std::chrono::steady_clock::time_point claim_at_{};
+};
+
+BbscSummonObserver g_bbsc_summon_observer;
+
+BbscSummonObservationSnapshot GetBbscSummonObservationSnapshot() {
+    return g_bbsc_summon_observer.Snapshot();
+}
+
+std::optional<BbscSummonCapabilityProofSnapshot> GetBbscSummonCapabilityProofs(
+    const std::array<u8, 16>& challenge) {
+    return g_bbsc_summon_observer.Proofs(challenge);
+}
+
+BbscSummonObserverTicket GetBbscSummonObserverTicket(const HttpRequest& request) {
+    return {static_cast<BbscSummonObserverKind>(request.bbsc_observer_kind),
+            request.bbsc_observer_token, request.bbsc_observer_search_generation,
+            request.bbsc_observer_context};
+}
+
+void StoreBbscSummonObserverTicket(HttpRequest& request,
+                                   const BbscSummonObserverTicket& ticket) {
+    request.bbsc_observer_kind = static_cast<int>(ticket.kind);
+    request.bbsc_observer_token = ticket.token;
+    request.bbsc_observer_search_generation = ticket.search_generation;
+    request.bbsc_observer_context = ticket.context_id;
+}
 
 // Extract the path-and-query portion from a full URL
 static std::string ExtractPathFromUrl(const std::string& url) {
@@ -695,6 +1254,10 @@ bool IsBloodborneSummonSearchPath(std::string_view path) {
 
 bool IsBloodborneSummonCreatePath(std::string_view path) {
     return path.find("/summon_messenger/create") != std::string_view::npos;
+}
+
+bool IsBloodborneSummonDeletePath(std::string_view path) {
+    return path.find("/summon_messenger/delete") != std::string_view::npos;
 }
 
 bool PrepareBbscFastSearch(SendRequestPlan& plan) {
@@ -1879,6 +2442,9 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
             plan.method_str = "PATCH";
         }
         plan.path = ExtractPathFromUrl(req.url);
+        if (IsBloodborneSummonPath(plan.path)) {
+            plan.observer_order = ++g_bbsc_http_observer_order;
+        }
         plan.settings = req.settings;
         if (auto conn_it = g_state.connections.find(req.conn_id);
             conn_it != g_state.connections.end()) {
@@ -1888,6 +2454,7 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
             // Inherit headers in tmpl to conn to req order
             if (auto tmpl_it = g_state.templates.find(conn_it->second.tmpl_id);
                 tmpl_it != g_state.templates.end()) {
+                plan.context_id = tmpl_it->second.ctx_id;
                 plan.headers = tmpl_it->second.headers;
                 // Check if the owning context loaded custom CAs - if so the
                 // worker will bypass TLS verification.
@@ -1916,12 +2483,26 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
 
     ApplyBloodborneSeamlessRoute(plan);
 
+    BbscSummonObserverTicket observer_ticket;
+    {
+        // Keep the global HTTP-state -> observer lock order shared with abort,
+        // delete, and context teardown. The observer sees the routed request,
+        // but only after the request is still known to be live.
+        std::lock_guard<std::mutex> lock(g_state.m_mutex);
+        if (!req_ptr->deleted && req_ptr->state == HttpRequestState::Sending &&
+            g_state.active_contexts.contains(plan.context_id)) {
+            observer_ticket = g_bbsc_summon_observer.Begin(plan, plan.context_id,
+                                                           plan.observer_order);
+            StoreBbscSummonObserverTicket(*req_ptr, observer_ticket);
+        }
+    }
+
     const bool online = EmulatorSettings.IsConnectedToNetwork();
     LOG_INFO(Lib_Http, "reqId={} dispatched to async worker [{} {} {}://{}:{}{}]", reqId,
              online ? "ONLINE" : "OFFLINE", HttpMethodName(plan.method), plan.scheme, plan.host,
              plan.port, plan.path);
 
-    std::thread([req_ptr, reqId, plan = std::move(plan), online]() {
+    std::thread([req_ptr, reqId, plan = std::move(plan), online, observer_ticket]() {
         HttpResponse local_res;
         s32 worker_errno = 0;
         u32 success_event_bits = 0; // 0 = no event (offline path uses failure bits)
@@ -2024,6 +2605,8 @@ int PS4_SYSV_ABI sceHttpSendRequest(int reqId, const void* postData, u64 size) {
             req_ptr->cv.notify_all();
             return;
         }
+        g_bbsc_summon_observer.Complete(observer_ticket, plan, local_res, worker_errno);
+        StoreBbscSummonObserverTicket(*req_ptr, {});
         req_ptr->res = std::move(local_res);
         req_ptr->state = HttpRequestState::Sent;
         req_ptr->last_errno = worker_errno;
@@ -2367,6 +2950,7 @@ int PS4_SYSV_ABI sceHttpTerm(int libhttpCtxId) {
         LOG_ERROR(Lib_Http, "Invalid or already-terminated ctxId={}", libhttpCtxId);
         return ORBIS_HTTP_ERROR_INVALID_ID;
     }
+    g_bbsc_summon_observer.InvalidateContext(libhttpCtxId);
     g_state.contexts_with_loaded_certs.erase(libhttpCtxId);
     if (g_state.active_contexts.empty()) {
         // Last context torn down - wipe all dependent objects.
@@ -2763,6 +3347,8 @@ int PS4_SYSV_ABI sceHttpAbortRequest(int reqId) {
     auto& req = *it->second;
 
     if (req.state == HttpRequestState::Created || req.state == HttpRequestState::Sending) {
+        g_bbsc_summon_observer.Cancel(GetBbscSummonObserverTicket(req));
+        StoreBbscSummonObserverTicket(req, {});
         req.state = HttpRequestState::Aborted;
         req.cv.notify_all();
         LOG_INFO(Lib_Http, "reqId={} marked Aborted", reqId);
@@ -3310,6 +3896,11 @@ int PS4_SYSV_ABI sceHttpDeleteRequest(int reqId) {
         return ORBIS_HTTP_ERROR_INVALID_ID;
     }
     auto req_ptr = it->second;
+    if (req_ptr->state == HttpRequestState::Created ||
+        req_ptr->state == HttpRequestState::Sending) {
+        g_bbsc_summon_observer.Cancel(GetBbscSummonObserverTicket(*req_ptr));
+    }
+    StoreBbscSummonObserverTicket(*req_ptr, {});
     if (req_ptr->state == HttpRequestState::Created) {
         LOG_INFO(Lib_Http,
                  "reqId={} abandoned before sceHttpSendRequest (state=Created); "

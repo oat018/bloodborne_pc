@@ -3,7 +3,10 @@
 
 #pragma once
 
+#include <array>
 #include <mutex>
+#include <optional>
+#include <string>
 #include "common/types.h"
 #include "core/libraries/network/ssl.h"
 
@@ -12,6 +15,42 @@ class SymbolsResolver;
 }
 
 namespace Libraries::Http {
+
+// Read-only in-process observation of Bloodborne's most recent successful summon
+// advertisement and selected summon claim. This is internal emulator state, not a
+// libSceHttp entry point; password bytes are never exposed.
+struct BbscSummonSignSnapshot {
+    u64 generation = 0;
+    bool valid = false;
+    std::string session_id;
+    s64 user_id = -1;
+    s64 character_id = -1;
+    s32 summon_type = -1;
+};
+
+struct BbscSummonClaimSnapshot {
+    u64 token = 0;
+    u64 search_generation = 0;
+    bool valid = false;
+    bool matched_unique_candidate = false;
+    bool password_matches_own_sign = false;
+    BbscSummonSignSnapshot candidate;
+};
+
+struct BbscSummonObservationSnapshot {
+    BbscSummonSignSnapshot own_sign;
+    BbscSummonClaimSnapshot claim;
+};
+
+struct BbscSummonCapabilityProofSnapshot {
+    BbscSummonObservationSnapshot observation;
+    std::array<u8, 32> own{};
+    std::array<u8, 32> selected{};
+};
+
+BbscSummonObservationSnapshot GetBbscSummonObservationSnapshot();
+std::optional<BbscSummonCapabilityProofSnapshot> GetBbscSummonCapabilityProofs(
+    const std::array<u8, 16>& challenge);
 
 enum OrbisHttpNBEvents : u32 {
     ORBIS_HTTP_NB_EVENT_IN = 0x00000001U,           // Ready to receive (response data available).

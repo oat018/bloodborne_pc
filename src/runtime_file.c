@@ -99,6 +99,9 @@ int32_t runtime_file_save_receipt(const char *path,BbNetSaveReceipt *out) {
         }
     }
     pthread_mutex_unlock(&receipt_lock);
+    /* A canonical path with empty proof lets managed recovery read and validate an existing
+     * selected save before this process has observed a dirty close. ENOENT remains the result. */
+    if (result==ENOENT) strcpy(out->path,canonical);
     return result;
 }
 

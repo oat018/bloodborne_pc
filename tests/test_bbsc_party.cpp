@@ -105,6 +105,7 @@ static void TestReturnSaveTracker() {
     ReturnSaveTracker tracker;
     assert(!tracker.SerializeBegin(key, 1, 0x1234, 20));
     tracker.Arm(key, 20, destination, false);
+    assert(tracker.Matches(key) && !tracker.Matches(foreign));
     assert(!tracker.ConfirmDestination(key, resolved, resolved, true, true));
     assert(!tracker.ProofFor(key, hash)); // Restart recovery alone is not a selected native return.
     tracker.Arm(key, 20, destination, true);
@@ -165,7 +166,7 @@ static void TestReturnSaveTracker() {
            proof->destination_confirmed && proof->serialization_began_after_restore);
     assert(!tracker.ProofFor(foreign, other_hash));
     tracker.Disarm();
-    assert(!tracker.Armed() && !tracker.ProofFor(key, other_hash));
+    assert(!tracker.Armed() && !tracker.Matches(key) && !tracker.ProofFor(key, other_hash));
     std::puts("PASS: return save provenance requires a matching post-arm serialize hash and selected-character receipt");
 }
 
@@ -234,6 +235,47 @@ static void TestPartyMessageCodec() {
     duplicate.insert(duplicate.end(), golden.begin() + 46, golden.end());
     assert(!DecodeMessage(duplicate));
     std::puts("PASS: versioned party codec validates fixed bytes, lengths, kinds, chunks and event bounds");
+}
+
+static void TestCapabilityCodec() {
+    CapabilityMessage message;
+    message.kind = CapabilityKind::Confirm;
+    message.room = 0x0102030405060708ULL;
+    for (std::uint8_t i = 0; i < message.challenge.size(); ++i) message.challenge[i] = i + 1;
+    for (std::uint8_t i = 0; i < message.own_proof.size(); ++i) message.own_proof[i] = 0x20 + i;
+    const std::vector<std::uint8_t> golden{
+        0x53,0x48,0x41,0x44,0x29,0x01,0x01,0x00,
+        0x08,0x07,0x06,0x05,0x04,0x03,0x02,0x01,
+        0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,0x10,
+        0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x29,0x2a,0x2b,0x2c,0x2d,0x2e,0x2f,
+        0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x3a,0x3b,0x3c,0x3d,0x3e,0x3f,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    };
+    assert(golden.size() == 96 && EncodeCapability(message) == golden);
+    assert(DecodeCapability(golden) == message);
+    for (std::size_t n = 0; n < golden.size(); ++n)
+        assert(!DecodeCapability(std::span(golden).first(n)));
+    auto oversized = golden; oversized.push_back(0);
+    assert(!DecodeCapability(oversized));
+    for (const auto& [offset, value] : {std::pair{0u, 0u}, {4u, 0x28u}, {5u, 2u},
+                                      {6u, 2u}, {7u, 1u}}) {
+        auto bad = golden; bad[offset] = static_cast<std::uint8_t>(value);
+        assert(!DecodeCapability(bad));
+    }
+    for (const auto& [first, last] : {std::pair{8u, 16u}, {16u, 32u}, {32u, 64u}}) {
+        auto zero_required = golden;
+        std::fill(zero_required.begin() + first, zero_required.begin() + last, 0);
+        assert(!DecodeCapability(zero_required));
+    }
+    auto invalid = message; invalid.room = 0; assert(EncodeCapability(invalid).empty());
+    invalid = message; invalid.challenge = {}; assert(EncodeCapability(invalid).empty());
+    invalid = message; invalid.own_proof = {}; assert(EncodeCapability(invalid).empty());
+    invalid = message; invalid.kind = static_cast<CapabilityKind>(2);
+    assert(EncodeCapability(invalid).empty());
+    message.selected_proof[0] = 0xa5;
+    assert(DecodeCapability(EncodeCapability(message)) == message);
+    std::puts("PASS: capability codec uses strict fixed 96-byte v1 framing and optional selected proof");
 }
 
 static void TestOrderedAdmission() {
@@ -357,6 +399,7 @@ int main(int argc, char** argv) {
     if (section == "all" || section == "journal") TestJournal();
     if (section == "all" || section == "protocol") {
         TestPartyMessageCodec();
+        TestCapabilityCodec();
         TestOrderedAdmission();
         TestLateGuestBaseline();
         TestRetriedDelivery();

@@ -4,20 +4,63 @@
 
 **Goal:** Let password-matched friends join across story maps or the Dream, earn only new shared progress, and return safely to their own world after leaving or restarting.
 
-**Current handoff (2026-10-19; supersedes historical status below):** Development
-is paused at the user's requested checkpoint on branch `pre`. Do not package
-AppImage/EXE. On resumption, complete the agreed source features first and stop
-immediately before packaging. Implemented source includes ABI3 save receipts,
-ordered/targeted party protocol foundations, native character-bound home snapshots,
-managed restore hooks and the journal-v4 post-destination save fence. Normal joins
-do not create managed records; admission/event consumers are not enabled. Resume
-with native admission/capability/backup binding, offline module loading and return
-warp/retry, explicit event/item catalog and application, exact managed NG cycle
-isolation, then Windows integration. Win32 journal APIs exist in source, but its
-CMake source inclusion remains under `NOT WIN32`; no Windows build is verified.
-Focused Linux module/party/join/transport checks passed. Exact-point return success
-is unit-tested only; the native join fixture checks mismatch refusal, not a complete
-successful native return. See the current summary in the evidence document.
+**Latest usage-limit handoff (2026-10-20):** Native admission activation is OFF:
+`IsBbscPrivateCoopAdmissionRequired()` returns false. New source includes type-0x29
+capability codec/targeted routing, private-word HMAC proofs, held Matching2 success
+callbacks, a game-thread coordinator, and immutable selected-save backups before
+Prepared journal publication. Do not enable this path from its unit tests alone.
+First distinguish expired private attempts from public searches, resolve the
+same-room asynchronous leave/retry race and dispatcher-stop/enqueue race, then test
+positive guest preparation/callback release and native cancellation. Event/reward
+application remains disabled. Keep the prior source/FSR boundaries below.
+
+**Usage rule (user):** Check the account's 300-minute window periodically during
+active work. When remaining usage is below 10%, stop at a documented checkpoint,
+commit it on `pre`, and push to `origin/pre`. Do not package or call an incomplete,
+disabled implementation feature-complete to meet this checkpoint.
+
+**Current handoff (2026-10-20; authoritative over dated history below):** Stop before
+AppImage/EXE packaging. Linux source includes ABI3 selected-save receipts, ordered
+party transport foundations, character-bound home snapshots, managed offline recovery
+and bounded native-lamp return retry, post-destination serialization/receipt fencing,
+restart-aware managed NG epochs/rollover, and a verified event/item catalog. The
+cap-7 return and receipt path has focused synthetic callback coverage, not live-game
+proof. Managed-cycle caller tests now drive fresh 6→7/7→7, ordinary save-copy
+windows, and restart pre/postimage reconciliation through the production observers;
+they still do not prove live-game NG behavior. Normal joins still do not prepare/admit
+managed homes; capability/password/backup admission and event consumers/application
+remain disabled. The native serializer now has a dynamic flag-span/group capture
+and immutable receipt-gated optional reader with synthetic observer/hook coverage;
+live acquisition and earned-event save application remain unproven. The
+journal source is now included in `bbnet` on Windows, with native path-component
+and reparse-point checks. Windows compilation/linkage/runtime remain unverified;
+recovery hooks are still disabled there. No package is feature-complete today.
+
+Native admission still needs a proven wait/reject path: the existing null-name
+Lua guard skips its handler, but the native caller ignores its return value.
+Do not treat this dispatcher behavior alone as successful native join cancellation.
+
+**Source boundary and comparison references:** Use the BBSC already carried in
+BBPORT under `gpu/bbnet/` as the primary implementation and reference base. The
+inspected [bbport revision
+`8185b88d80573fa300595d5c54450183b4109935`](https://github.com/deadinside28/bloodborne_pc/tree/8185b88d80573fa300595d5c54450183b4109935)
+is the current comparison baseline. The inspected external [CLSAMG22/BBSC revision
+`315f76c38b1ca5843b082f93f47927a9193ad94a`](https://github.com/CLSAMG22/BBSC/tree/315f76c38b1ca5843b082f93f47927a9193ad94a)
+is supplementary only for behavior missing from BBPORT's existing BBSC, not an
+equal or replacement base. These versions are not permanent freezes; update them
+when the comparison reference changes. Do not wholesale replace or merge either tree.
+Keep bbport runtime changes to the two
+necessary bridges: `src/runtime_net.c` loads narrow recovery hooks when offline
+(otherwise offline mode never loads the module), and `src/runtime_file.c` exposes the
+canonical selected mount path before a first dirty close (the module cannot resolve
+the runtime-private `/savedata0` mount). Path-only ENOENT has zero generation/bytes/
+hash and is not committed-save evidence. The runtime tests are
+`out/online-test --bbsc-recovery-offline`, `--bbsc-recovery-module`, and
+`--bbsc-save-host`; they check offline imports/workers, invalid-image fail-closed
+loading, path-only provenance and the later real committed receipt. Future bbport edits
+must document the concrete need, why BBSC cannot provide it, and a focused test. This
+does not ban necessary core changes or require renewed approval. Preserve the existing
+dirty FSR-Vulkan submodule state.
 
 Earlier dated paragraphs and unchecked plan steps are historical design/progress,
 not an authoritative statement that every integration seam remains unchanged.
@@ -28,11 +71,15 @@ areas. Continue implementation without repeated gameplay checkpoint pauses. Keep
 focused build/save-durability/peer-binding/idempotency checks; move the broad
 same-map/cross-map/death/disconnect/restart/NG acceptance matrix after packaging.
 Do not equate deferred manual validation with completed implementation. Remaining
-release work, in order: connect verified identity and journal to native admission
-and return recovery; wire the ordered event channel to first-playable boundaries;
-finish explicit boss/story/item application and native-save acknowledgement;
-implement managed cycle transitions and conflict deferral; port journal durability
-to Windows; build both packages and describe outstanding gameplay checks.
+release work, in order: connect selected-sign observations to an exact peer
+confirmation and a proven native admission gate with backup/home preparation;
+wire the ordered event channel to first-playable boundaries; finish explicit
+boss/story/item application, conflict deferral and native-save acknowledgement;
+connect managed-cycle and return coordination to normal parties; integrate native
+Windows recovery hooks and verify the Windows build. Complete focused integration
+checks and documentation, then stop before packaging under the latest user
+instruction. Broad gameplay checks remain deferred; packaging needs the user's
+subsequent instruction.
 An unavailable ending save defers live NG verification, not independent code work.
 
 **Architecture:** Keep native joins, world presentation, inventory operations, and warps in BBSC's existing game-thread code. Add a small testable party policy/state module and durable journal, connect them to existing HTTP/signaling, and expose only the runtime save/recovery facts the module cannot obtain reliably today. Resolve native and broker integration gates before enabling changes to saves.
@@ -658,3 +705,18 @@ limited to the pure tracker fixture, not a live/native-return integration test. 
 supersedes the earlier status that no native save-confirmation consumer was wired,
 but does not close restart/offline loading/warp/retry. Normal admission, capability,
 backup, catalog/event application, NG7, Windows runtime and broad gameplay remain open.
+
+2026-10-20 cycle-resume follow-up: restart reconciliation rebases process-local ABI3
+generations only after matching selected-save content; pre-image recovery cancels an
+unpersisted transition, expected post-image requires a fresh native SerializeEnd and
+receipt, and equal 7→7 pre/post hashes remain ambiguous and blocked. Home rollover uses
+the immediate prior cycle, keeps completed old journals unchanged, starts the new claim
+set empty, blocks any older pending/unverifiable home, and refuses ordinal-1 re-anchoring
+while a tagged home remains. The Lua increment intent hook is now after the native guard
+and before mutation. Both cycle and return SerializeEnd observers run in the cap-7
+integration fixture, followed by receipt-driven epoch stabilization and return completion.
+`cycle-resume-{build,party,join,transport}.log` and
+`cycle-cap7-return-{build,join}.log` record focused bbport-dev checks. This is synthetic
+callback coverage; no gameplay or Windows build is proven. Admission/capability and event
+application remain disabled, and all per-character provenance can still be lost if a user
+externally deletes every managed record.

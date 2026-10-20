@@ -13,11 +13,16 @@
 #include "core/libraries/np/np_common.h"
 #include "core/libraries/np/np_error.h"
 #include "core/libraries/np/np_matching2/np_matching2_internal.h"
+#include "core/libraries/np/np_matching2/np_matching2_mm.h"
 #include "shadnet.pb.h"
 
 namespace Libraries::Np::NpMatching2 {
 
 NpMatching2State g_state;
+
+namespace {
+constexpr auto kBbscAdmissionTimeout = std::chrono::seconds(30);
+}
 
 void PublishBbscPartyRoom(const ContextObject& ctx) {
     Core::Bloodborne::BbscPartyRoom snapshot;
@@ -34,6 +39,186 @@ void PublishBbscPartyRoom(const ContextObject& ctx) {
         }
     }
     Core::Bloodborne::OnBbscPartyRoomState(std::move(snapshot));
+}
+
+bool ArmBbscAdmission(OrbisNpMatching2ContextId context, OrbisNpMatching2RequestId request) {
+    ContextObject* ctx = ContextManager::Instance().Get(context);
+    if (!ctx || !ctx->started || request == 0) {
+        return false;
+    }
+    std::lock_guard lock(g_state.admission_mutex);
+    if (g_state.admission.contains(context)) {
+        return false;
+    }
+    BbscAdmissionState state{};
+    state.ticket.context = context;
+    state.ticket.incarnation = ctx->incarnation;
+    state.ticket.request = request;
+    state.ticket.nonce = g_state.next_admission_nonce++;
+    if (g_state.next_admission_nonce == 0) {
+        g_state.next_admission_nonce = 1;
+    }
+    g_state.admission.emplace(context, std::move(state));
+    return true;
+}
+
+bool IsBbscAdmissionArmed(OrbisNpMatching2ContextId context,
+                          OrbisNpMatching2RequestId request) {
+    std::lock_guard lock(g_state.admission_mutex);
+    const auto it = g_state.admission.find(context);
+    return it != g_state.admission.end() && it->second.ticket.request == request;
+}
+
+bool HasBbscAdmissionPending(OrbisNpMatching2ContextId context) {
+    std::lock_guard lock(g_state.admission_mutex);
+    return g_state.admission.contains(context);
+}
+
+std::vector<BbscAdmissionTicket> GetPendingBbscAdmissionTickets() {
+    std::vector<BbscAdmissionTicket> tickets;
+    std::lock_guard lock(g_state.admission_mutex);
+    for (const auto& [context, state] : g_state.admission) {
+        if (state.ready) {
+            tickets.push_back(state.ticket);
+        }
+    }
+    return tickets;
+}
+
+bool HoldBbscAdmissionResponse(ContextObject& ctx, OrbisNpMatching2RequestId request,
+                               OrbisNpMatching2Event event,
+                               OrbisNpMatching2RequestCallback callback, void* callback_arg,
+                               void* request_data,
+                               std::shared_ptr<CallbackPayload> payload_owner) {
+    if (event != ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM &&
+        event != ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM_A) {
+        return false;
+    }
+    PendingEvent timeout{};
+    {
+        std::lock_guard lock(g_state.admission_mutex);
+        const auto it = g_state.admission.find(ctx.ctx_id);
+        if (it == g_state.admission.end() || it->second.ready ||
+            it->second.ticket.request != request ||
+            it->second.ticket.incarnation != ctx.incarnation) {
+            return false;
+        }
+        if (!request_data || ctx.room_id == 0) {
+            return false;
+        }
+        const auto room = ctx.room_cache.find(ctx.room_id);
+        if (room == ctx.room_cache.end()) {
+            return false;
+        }
+        const auto owner = room->second.members.find(room->second.signaling_main_member);
+        if (owner == room->second.members.end()) {
+            return false;
+        }
+        auto& state = it->second;
+        state.ticket.room = ctx.room_id;
+        state.ticket.deadline = std::chrono::steady_clock::now() + kBbscAdmissionTimeout;
+        state.ticket.owner = owner->second.np_id.handle;
+        state.ready = true;
+        state.req_event = event;
+        state.request_cb = callback;
+        state.request_cb_arg = callback_arg;
+        state.request_data = request_data;
+        state.payload_owner = std::move(payload_owner);
+        timeout.type = PendingEvent::ADMISSION_TIMEOUT;
+        timeout.ctx_id = ctx.ctx_id;
+        timeout.ctx_incarnation = ctx.incarnation;
+        timeout.fire_at = state.ticket.deadline;
+        timeout.admission_ticket = state.ticket;
+    }
+    ScheduleEvent(std::move(timeout));
+    return true;
+}
+
+bool ResolveBbscAdmission(const BbscAdmissionTicket& ticket, bool admitted) {
+    BbscAdmissionState state{};
+    {
+        std::lock_guard lock(g_state.admission_mutex);
+        const auto it = g_state.admission.find(ticket.context);
+        if (it == g_state.admission.end() || !it->second.ready ||
+            it->second.ticket.incarnation != ticket.incarnation ||
+            it->second.ticket.request != ticket.request || it->second.ticket.room != ticket.room ||
+            it->second.ticket.nonce != ticket.nonce ||
+            it->second.ticket.deadline != ticket.deadline ||
+            std::memcmp(it->second.ticket.owner.data, ticket.owner.data,
+                        sizeof(ticket.owner.data)) != 0) {
+            return false;
+        }
+        state = std::move(it->second);
+        g_state.admission.erase(it);
+    }
+
+    ContextObject* ctx = ContextManager::Instance().Get(ticket.context);
+    if (!ctx || ctx->incarnation != ticket.incarnation) {
+        if (ticket.room != 0) {
+            MmLeaveRoomForAdmission(ticket.context, ticket.incarnation, ticket.room);
+        }
+        return false;
+    }
+    const bool live_room = ctx->started && ticket.room != 0 && ctx->room_id == ticket.room &&
+                           ctx->room_cache.contains(ticket.room);
+    const bool timed_out = std::chrono::steady_clock::now() >= ticket.deadline;
+    bool accept = admitted && !timed_out && live_room;
+    if (!live_room && ticket.room != 0) {
+        MmLeaveRoomForAdmission(ticket.context, ticket.incarnation, ticket.room);
+    }
+    if (accept) {
+        const auto& room = ctx->room_cache.at(ticket.room);
+        const auto owner = room.members.find(room.signaling_main_member);
+        if (owner == room.members.end() ||
+            std::memcmp(owner->second.np_id.handle.data, ticket.owner.data,
+                        sizeof(ticket.owner.data)) != 0) {
+            accept = false;
+        }
+    }
+    if (!accept && live_room) {
+        const s32 leave_rc = MmLeaveRoomForAdmission(ticket.context, ticket.incarnation, ticket.room);
+        if (leave_rc < 0) {
+            LOG_WARNING(Lib_NpMatching2,
+                        "admission rejection leave submit failed ctx={} room={} rc={:#x}",
+                        ticket.context, ticket.room, leave_rc);
+        }
+    }
+
+    PendingEvent callback{};
+    callback.type = PendingEvent::REQUEST_CB;
+    callback.ctx_id = ticket.context;
+    callback.ctx_incarnation = ticket.incarnation;
+    callback.fire_at = std::chrono::steady_clock::now();
+    callback.req_id = ticket.request;
+    callback.req_event = state.req_event;
+    callback.error_code = accept ? ORBIS_OK
+                                 : (timed_out ? ORBIS_NP_MATCHING2_ERROR_REQUEST_TIMEOUT
+                                              : ORBIS_NP_MATCHING2_ERROR_ABORTED);
+    callback.request_cb = state.request_cb;
+    callback.request_cb_arg = state.request_cb_arg;
+    callback.request_data = accept ? state.request_data : nullptr;
+    callback.request_payload_owner = accept ? std::move(state.payload_owner) : nullptr;
+    callback.admission_ticket = ticket;
+    ScheduleEvent(std::move(callback));
+    return accept;
+}
+
+void InvalidateBbscAdmission(OrbisNpMatching2ContextId context, OrbisNpMatching2RoomId room) {
+    std::lock_guard lock(g_state.admission_mutex);
+    const auto it = g_state.admission.find(context);
+    if (it != g_state.admission.end() && (room == 0 || !it->second.ready ||
+                                         it->second.ticket.room == room)) {
+        g_state.admission.erase(it);
+    }
+}
+
+void CancelBbscAdmissionRequest(OrbisNpMatching2ContextId context,
+                                OrbisNpMatching2RequestId request) {
+    std::lock_guard lock(g_state.admission_mutex);
+    const auto it = g_state.admission.find(context);
+    if (it != g_state.admission.end() && it->second.ticket.request == request) {
+        g_state.admission.erase(it);
+    }
 }
 
 namespace {
@@ -133,6 +318,7 @@ void BuildCreateJoinRoomPayloadCommon(ContextObject& ctx,
     room.internalBinAttrs = p.room_bin_attrs.size();
 
     if (ctx.room_id != 0 && ctx.room_id != room.roomId) {
+        InvalidateBbscAdmission(ctx.ctx_id, ctx.room_id);
         ctx.room_cache.erase(ctx.room_id);
     }
     ctx.peers.clear();
@@ -352,6 +538,7 @@ void* BuildLeaveRoomPayload(ContextObject& ctx, const shadnet::LeaveRoomReply& r
     p.leave_room_response->roomId = static_cast<OrbisNpMatching2RoomId>(resp.room_id());
 
     if (ctx.room_id == p.leave_room_response->roomId) {
+        InvalidateBbscAdmission(ctx.ctx_id, ctx.room_id);
         ctx.room_cache.erase(ctx.room_id);
         ctx.peers.clear();
         ctx.room_id = 0;
@@ -1160,6 +1347,10 @@ s32 ContextManager::CreateContext(const OrbisNpId* owner_np_id, OrbisNpServiceLa
     ContextObject& ctx = m_contexts[id];
     ctx.Reset();
     ctx.ctx_id = id;
+    ctx.incarnation = m_next_incarnation++;
+    if (m_next_incarnation == 0) {
+        m_next_incarnation = 1;
+    }
     ctx.a_variant = a_variant;
     ctx.service_label = service_label;
     if (owner_np_id) {
@@ -1193,10 +1384,12 @@ bool ContextManager::Destroy(OrbisNpMatching2ContextId ctx_id) {
         return false;
     }
     if (ctx->stop_pending) {
+        InvalidateBbscAdmission(ctx_id);
         ctx->destroy_pending = true;
         LOG_DEBUG(Lib_NpMatching2, "context destroy deferred until stop callback: id={}", ctx_id);
         return true;
     }
+    InvalidateBbscAdmission(ctx_id);
     Core::Bloodborne::OnBbscPartyRoomState({ctx_id, 0, false, {}, {}});
     m_contexts[ctx_id].Reset();
     m_used[ctx_id] = false;
@@ -1210,6 +1403,7 @@ void ContextManager::CompleteStop(OrbisNpMatching2ContextId ctx_id) {
     if (!ctx) {
         return;
     }
+    InvalidateBbscAdmission(ctx_id);
     ctx->stop_pending = false;
     if (!ctx->destroy_pending) {
         return;
@@ -1245,6 +1439,7 @@ s32 ContextManager::Stop(OrbisNpMatching2ContextId ctx_id) {
     if (!ctx->started) {
         return ORBIS_NP_MATCHING2_ERROR_CONTEXT_NOT_STARTED;
     }
+    InvalidateBbscAdmission(ctx_id);
     ctx->started = false;
     ctx->stop_pending = true;
     Core::Bloodborne::OnBbscPartyRoomState({ctx_id, 0, false, {}, {}});
@@ -1266,6 +1461,9 @@ void ContextManager::ApplyContextCallback(OrbisNpMatching2ContextCallback callba
 
 void ContextManager::Reset() {
     std::lock_guard lock(m_mutex);
+    for (u32 id = 1; id <= kMaxContexts; ++id) {
+        InvalidateBbscAdmission(static_cast<OrbisNpMatching2ContextId>(id));
+    }
     for (auto& ctx : m_contexts) {
         Core::Bloodborne::OnBbscPartyRoomState({ctx.ctx_id, 0, false, {}, {}});
         ctx.Reset();
@@ -1321,9 +1519,15 @@ RequestCallbackInfo ConsumeRequestCallback(ContextObject* ctx) {
 
 namespace {
 
-void FireEvent(const PendingEvent& ev) {
+void FireEvent(PendingEvent ev) {
     ContextObject* ctx = ContextManager::Instance().Get(ev.ctx_id);
-    if (!ctx) {
+    if (!ctx || (ev.ctx_incarnation != 0 && ctx->incarnation != ev.ctx_incarnation)) {
+        if (ev.type == PendingEvent::REQUEST_CB && ev.admission_ticket.nonce != 0 &&
+            ev.error_code == ORBIS_OK) {
+            MmLeaveRoomForAdmission(ev.admission_ticket.context,
+                                    ev.admission_ticket.incarnation,
+                                    ev.admission_ticket.room);
+        }
         LOG_WARNING(Lib_NpMatching2, "FireEvent type={} dropped: ctx={} not found",
                     static_cast<int>(ev.type), ev.ctx_id);
         return;
@@ -1345,6 +1549,26 @@ void FireEvent(const PendingEvent& ev) {
         }
         break;
     case PendingEvent::REQUEST_CB:
+        if (ev.request_cb && ev.admission_ticket.nonce != 0 && ev.error_code == ORBIS_OK) {
+            const auto& ticket = ev.admission_ticket;
+            const auto room = ctx->room_cache.find(ticket.room);
+            bool still_live = ctx->started && ctx->incarnation == ticket.incarnation &&
+                              ctx->room_id == ticket.room && room != ctx->room_cache.end();
+            if (still_live) {
+                const auto owner = room->second.members.find(room->second.signaling_main_member);
+                still_live = owner != room->second.members.end() &&
+                             std::memcmp(owner->second.np_id.handle.data, ticket.owner.data,
+                                         sizeof(ticket.owner.data)) == 0;
+            }
+            const bool timed_out = std::chrono::steady_clock::now() >= ticket.deadline;
+            if (!still_live || timed_out) {
+                MmLeaveRoomForAdmission(ticket.context, ticket.incarnation, ticket.room);
+                ev.error_code = timed_out ? ORBIS_NP_MATCHING2_ERROR_REQUEST_TIMEOUT
+                                          : ORBIS_NP_MATCHING2_ERROR_ABORTED;
+                ev.request_data = nullptr;
+                ev.request_payload_owner.reset();
+            }
+        }
         if (ev.request_cb) {
             LOG_DEBUG(Lib_NpMatching2,
                       "callback REQUEST ctx={} reqId={} event={:#x} err={:#x} data={}", ev.ctx_id,
@@ -1422,6 +1646,9 @@ void FireEvent(const PendingEvent& ev) {
                         ev.room_id);
         }
         break;
+    case PendingEvent::ADMISSION_TIMEOUT:
+        ResolveBbscAdmission(ev.admission_ticket, false);
+        break;
     }
 }
 
@@ -1482,6 +1709,8 @@ void InitEventDispatcher() {
 
 void TermEventDispatcher() {
     if (!g_state.dispatch_running.exchange(false)) {
+        std::lock_guard lock(g_state.admission_mutex);
+        g_state.admission.clear();
         return;
     }
     g_state.queue_cv.notify_all();
@@ -1491,6 +1720,10 @@ void TermEventDispatcher() {
     }
     std::lock_guard lock(g_state.queue_mutex);
     g_state.pending_events.clear();
+    {
+        std::lock_guard admission_lock(g_state.admission_mutex);
+        g_state.admission.clear();
+    }
 }
 
 void ScheduleEvent(PendingEvent ev) {

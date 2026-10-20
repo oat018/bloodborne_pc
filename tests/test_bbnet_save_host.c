@@ -6,8 +6,12 @@
 
 static BbNetHost host;
 static int ready_calls;
+static int network_init_calls;
+static int recovery_init_calls;
+static int recovery_ready_calls;
 
 int bbnet_init(const BbNetHost *value) {
+    ++network_init_calls;
     if (!value || value->abi!=BBNET_ABI_VERSION || !value->save_receipt ||
         getenv("BBSC_TEST_REJECT_INIT")) return -1;
     host=*value;
@@ -16,6 +20,20 @@ int bbnet_init(const BbNetHost *value) {
 
 void bbnet_image_ready(uint64_t base,uint64_t size) { (void)base; (void)size; ++ready_calls; }
 int fixture_ready_calls(void) { return ready_calls; }
+int fixture_network_init_calls(void) { return network_init_calls; }
+
+int bbnet_recovery_init(const BbNetHost *value) {
+    ++recovery_init_calls;
+    if (!value || value->abi!=BBNET_ABI_VERSION || !value->save_receipt ||
+        value->thread_spawn || value->thread_join) return -1;
+    host=*value;
+    return 0;
+}
+void bbnet_recovery_image_ready(uint64_t base,uint64_t size) {
+    (void)base; (void)size; ++recovery_ready_calls;
+}
+int fixture_recovery_init_calls(void) { return recovery_init_calls; }
+int fixture_recovery_ready_calls(void) { return recovery_ready_calls; }
 
 int32_t fixture_save_receipt(const char *path,BbNetSaveReceipt *out) {
     return host.save_receipt ? host.save_receipt(path,out) : ENOSYS;

@@ -195,6 +195,7 @@ static void TestJournalRejectsCorruption(const fs::path& root) {
     assert(lease && StoreJournal(*lease, record, ec));
     const auto bytes = Read(path);
     for (std::size_t i = 0; i < bytes.size(); ++i) {
+        if (i == 4) continue; // v4 and v5 share this no-claim body and remain compatible.
         auto corrupt = bytes;
         corrupt[i] ^= 1;
         Replace(path, corrupt);
@@ -430,6 +431,275 @@ static void TestPreparedWorldSnapshot(const fs::path& root) {
     std::puts("PASS: prepared own-world snapshot binds character and party, rejects corruption, and preserves prior payload on write failure");
 }
 
+static void TestSelectedSaveBackup(const fs::path& root) {
+    const auto journal_path = root / "selected-save-journal.bin";
+    auto record = Record(root);
+    record.key.user = "7";
+    record.key.character = {7, 0, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0};
+    std::error_code ec;
+    auto lease = CharacterLease::Acquire(journal_path, ec);
+    assert(lease && !ec);
+    std::vector<std::uint8_t> save(0x140000, 0x5a);
+    const std::string hash(64, 'a');
+    assert(StoreSelectedSaveBackup(*lease, record.key,
+        (root / "userdata0002").string(), 7, 8, 19, hash, save, ec) && !ec);
+    const auto backup = root / "selected-save-journal.selected-save-19.bin";
+    const auto original = Read(backup);
+    assert(original.size() > save.size());
+    assert(StoreSelectedSaveBackup(*lease, record.key,
+        (root / "userdata0002").string(), 7, 8, 19, hash, save, ec) && !ec);
+    assert(Read(backup) == original);
+    auto changed = save;
+    changed[0] ^= 1;
+    assert(!StoreSelectedSaveBackup(*lease, record.key,
+        (root / "userdata0002").string(), 7, 8, 19, hash, changed, ec) && ec);
+    assert(Read(backup) == original);
+    assert(!StoreSelectedSaveBackup(*lease, record.key,
+        (root / "userdata0002").string(), 7, 8, 19, std::string(64, 'A'), save, ec) && ec);
+    assert(Read(backup) == original);
+    std::puts("PASS: selected-save backup is durable, immutable, and idempotent for exact selected identity/generation/hash bytes");
+}
+
+static void TestManagedCycleEpochFence(const fs::path& root) {
+    const auto path = root / "managed-cycle.bin";
+    auto key = Record(root).key;
+    key.cycle = 6;
+    const std::string before(64, 'a'), after(64, 'b'), later(64, 'c');
+    std::error_code ec;
+    auto lease = CharacterLease::Acquire(path, ec);
+    assert(lease && !ec);
+    ManagedCycleEpoch stable;
+    stable.key = key;
+    stable.epoch = 0;
+    stable.native_cycle = 7;
+    stable.stage = ManagedCycleStage::Stable;
+    assert(StoreManagedCycleEpoch(*lease, stable, ec) && !ec);
+    const auto intent = BeginManagedCycleIntent(stable, 6, 10, before);
+    assert(intent && intent->target_key_cycle == 0x80000001u);
+    assert(StoreManagedCycleEpoch(*lease, *intent, ec) && !ec);
+    const auto applied = ObserveManagedCycleApplied(*intent, 6, 7);
+    assert(applied && StoreManagedCycleEpoch(*lease, *applied, ec) && !ec);
+    const auto serialized = ObserveManagedCycleSerializeEnd(*applied, after, 10);
+    assert(serialized && StoreManagedCycleEpoch(*lease, *serialized, ec) && !ec);
+    assert(!CommitManagedCycleEpoch(*serialized, 11, before, before));
+    assert(!CommitManagedCycleEpoch(*serialized, 11, after, later));
+    const auto committed = CommitManagedCycleEpoch(*serialized, 11, after, after);
+    assert(committed && committed->key.cycle == 0x80000001u && committed->epoch == 1);
+    assert(StoreManagedCycleEpoch(*lease, *committed, ec) && !ec);
+    const auto loaded = LoadManagedCycleEpoch(path, key, ec);
+    assert(loaded && *loaded == *committed);
+
+    const auto ordinary = ObserveManagedCycleSerializeEnd(*committed, later, 11);
+    assert(ordinary && ordinary->stage == ManagedCycleStage::SaveSerialized);
+    assert(StoreManagedCycleEpoch(*lease, *ordinary, ec) && !ec);
+    const auto saved = CommitManagedCycleEpoch(*ordinary, 12, later, later);
+    assert(saved && saved->epoch == 1 && saved->key.cycle == 0x80000001u);
+    assert(StoreManagedCycleEpoch(*lease, *saved, ec) && !ec);
+
+    // Process-local ABI3 generations reset on restart. A content match rebases that
+    // fence, but a recognized pre-image must cancel an unpersisted transition instead
+    // of promoting it based on the previous process's Applied observation.
+    auto old_process_stable = *saved;
+    old_process_stable.serialized_generation = 9;
+    assert(StoreManagedCycleEpoch(*lease, old_process_stable, ec) && !ec);
+    const auto stable_resume = RebaseManagedCycleForResume(old_process_stable, later, 0);
+    assert(stable_resume && stable_resume->stage == ManagedCycleStage::Stable &&
+           stable_resume->serialized_generation == 0);
+    assert(StoreManagedCycleEpoch(*lease, *stable_resume, ec) && !ec);
+    auto restarted_ordinary = ObserveManagedCycleSerializeEnd(*stable_resume, before, 0);
+    assert(restarted_ordinary && restarted_ordinary->stage == ManagedCycleStage::SaveSerialized);
+    assert(StoreManagedCycleEpoch(*lease, *restarted_ordinary, ec) && !ec);
+    restarted_ordinary = RebaseManagedCycleForResume(*restarted_ordinary, later, 0);
+    assert(restarted_ordinary && restarted_ordinary->stage == ManagedCycleStage::Stable);
+    assert(StoreManagedCycleEpoch(*lease, *restarted_ordinary, ec) && !ec);
+    restarted_ordinary = ObserveManagedCycleSerializeEnd(*restarted_ordinary, before, 0);
+    assert(restarted_ordinary && StoreManagedCycleEpoch(*lease, *restarted_ordinary, ec) && !ec);
+    const auto restart_saved = CommitManagedCycleEpoch(*restarted_ordinary, 1, before, before);
+    assert(restart_saved && StoreManagedCycleEpoch(*lease, *restart_saved, ec) && !ec);
+
+    const auto resume_path = root / "managed-cycle-resume.bin";
+    auto resume_lease = CharacterLease::Acquire(resume_path, ec);
+    auto resume_stable = stable;
+    resume_stable.serialized_sha256 = before;
+    assert(resume_lease && StoreManagedCycleEpoch(*resume_lease, resume_stable, ec));
+    auto resume_intent = BeginManagedCycleIntent(resume_stable, 6, 9, before);
+    assert(resume_intent && StoreManagedCycleEpoch(*resume_lease, *resume_intent, ec));
+    auto resume_applied = ObserveManagedCycleApplied(*resume_intent, 6, 7);
+    assert(resume_applied && StoreManagedCycleEpoch(*resume_lease, *resume_applied, ec));
+    auto resume_transition = ObserveManagedCycleSerializeEnd(*resume_applied, after, 9);
+    assert(resume_transition && StoreManagedCycleEpoch(*resume_lease, *resume_transition, ec));
+    auto prehash_resume = RebaseManagedCycleForResume(*resume_transition, before, 0);
+    assert(prehash_resume && prehash_resume->stage == ManagedCycleStage::Stable &&
+           prehash_resume->key == key && prehash_resume->epoch == 0);
+    assert(!CommitManagedCycleEpoch(*prehash_resume, 1, before, before));
+    assert(StoreManagedCycleEpoch(*resume_lease, *prehash_resume, ec) && !ec);
+
+    const auto expected_path = root / "managed-cycle-expected.bin";
+    auto expected_lease = CharacterLease::Acquire(expected_path, ec);
+    assert(expected_lease && StoreManagedCycleEpoch(*expected_lease, resume_stable, ec));
+    assert(StoreManagedCycleEpoch(*expected_lease, *resume_intent, ec));
+    assert(StoreManagedCycleEpoch(*expected_lease, *resume_applied, ec));
+    assert(StoreManagedCycleEpoch(*expected_lease, *resume_transition, ec));
+    auto expected_resume = RebaseManagedCycleForResume(*resume_transition, after, 0);
+    assert(expected_resume && expected_resume->stage == ManagedCycleStage::Applied &&
+           expected_resume->baseline_generation == 0);
+    assert(StoreManagedCycleEpoch(*expected_lease, *expected_resume, ec) && !ec);
+    auto fresh_transition = ObserveManagedCycleSerializeEnd(*expected_resume, after, 0);
+    assert(fresh_transition && StoreManagedCycleEpoch(*expected_lease, *fresh_transition, ec));
+    const auto fresh_commit = CommitManagedCycleEpoch(*fresh_transition, 1, after, after);
+    assert(fresh_commit && fresh_commit->key.cycle == 0x80000001u);
+    assert(StoreManagedCycleEpoch(*expected_lease, *fresh_commit, ec) && !ec);
+
+    auto ambiguous = *resume_transition;
+    ambiguous.serialized_sha256 = before;
+    assert(!RebaseManagedCycleForResume(ambiguous, before, 0));
+    assert(!RebaseManagedCycleForResume(*resume_transition, later, 0));
+
+    const auto next_intent = BeginManagedCycleIntent(*saved, 7, 12, later);
+    assert(next_intent && next_intent->target_key_cycle == 0x80000002u);
+    assert(StoreManagedCycleEpoch(*lease, *next_intent, ec) && !ec);
+    const auto next_applied = ObserveManagedCycleApplied(*next_intent, 7, 7);
+    assert(next_applied && StoreManagedCycleEpoch(*lease, *next_applied, ec) && !ec);
+    assert(!ObserveManagedCycleApplied(*next_intent, 7, 6));
+
+    const auto intact = Read(ManagedCycleEpochPath(path));
+    assert(intact.size() > 16);
+    Replace(ManagedCycleEpochPath(path), intact.substr(0, intact.size() - 1));
+    assert(!LoadManagedCycleEpoch(path, key, ec) && ec);
+    Replace(ManagedCycleEpochPath(path), intact);
+    auto foreign = key;
+    foreign.character[0] ^= 1;
+    assert(!LoadManagedCycleEpoch(path, foreign, ec) && ec);
+
+    const auto prior_path = root / "managed-cycle-prior-home.bin";
+    auto old_home = Record(root);
+    old_home.key = key;
+    old_home.pending.clear();
+    auto prior_lease = CharacterLease::Acquire(prior_path, ec);
+    assert(prior_lease && StoreJournal(*prior_lease, old_home, ec));
+    old_home.phase = Phase::Visiting;
+    assert(StoreJournal(*prior_lease, old_home, ec));
+    old_home.phase = Phase::Returning;
+    assert(StoreJournal(*prior_lease, old_home, ec));
+    old_home.phase = Phase::Complete;
+    old_home.committed = {2200};
+    assert(StoreJournal(*prior_lease, old_home, ec));
+    const auto prior_bytes = Read(prior_path);
+    auto tagged_key = key;
+    tagged_key.cycle = 0x80000001u;
+    const PartyId next_party{7, 8, 9};
+    const Destination origin{0x18010000, 11, 22, 33, 0.6f, -1};
+    const Destination fallback{0x15000000, 0, 0, 0, 0, 1};
+    const auto migrated = MigrateCompletedCycleHome(old_home, tagged_key, next_party,
+                                                     origin, fallback);
+    assert(migrated && migrated->phase == Phase::Prepared && migrated->key == tagged_key &&
+           migrated->retained.empty());
+    auto completed_epoch_one = old_home;
+    completed_epoch_one.key = tagged_key;
+    completed_epoch_one.party = next_party;
+    completed_epoch_one.phase = Phase::Complete;
+    auto tagged_epoch_two = tagged_key;
+    tagged_epoch_two.cycle = 0x80000002u;
+    const auto migrated_epoch_two = MigrateCompletedCycleHome(
+        completed_epoch_one, tagged_epoch_two, PartyId{10, 11, 12}, origin, fallback);
+    assert(migrated_epoch_two && migrated_epoch_two->key == tagged_epoch_two &&
+           migrated_epoch_two->retained.empty());
+    auto pending_old_home = old_home;
+    pending_old_home.phase = Phase::Visiting;
+    assert(!MigrateCompletedCycleHome(pending_old_home, tagged_key, next_party, origin, fallback));
+    auto skipped_cycle = tagged_key;
+    skipped_cycle.cycle = 0x80000002u;
+    assert(!MigrateCompletedCycleHome(old_home, skipped_cycle, next_party, origin, fallback));
+    assert(Read(prior_path) == prior_bytes);
+
+    const auto history_dir = root / "managed-cycle-history";
+    fs::create_directories(history_dir);
+    auto history_key = key;
+    history_key.save_dir = history_dir.string();
+    history_key.cycle = 0x80000001u;
+    static constexpr char cycle_hex[] = "0123456789abcdef";
+    std::string history_character;
+    for (const auto byte : history_key.character) {
+        history_character.push_back(cycle_hex[byte >> 4]);
+        history_character.push_back(cycle_hex[byte & 15]);
+    }
+    const auto history_base = history_dir / ("home-" + std::to_string(history_key.slot) +
+                                               "-" + history_character + ".bin");
+    const auto history_one = history_dir / ("home-" + std::to_string(history_key.slot) +
+        "-" + history_character + "-cycle-80000001.bin");
+    const auto history_two = history_dir / ("home-" + std::to_string(history_key.slot) +
+        "-" + history_character + "-cycle-80000002.bin");
+    auto history_home = old_home;
+    history_home.key = history_key;
+    history_home.phase = Phase::Prepared;
+    history_home.party = {31, 32, 33};
+    history_home.admission = 0;
+    history_home.pending.clear();
+    history_home.committed.clear();
+    history_home.retained.clear();
+    auto history_lease = CharacterLease::Acquire(history_one, ec);
+    assert(history_lease && StoreJournal(*history_lease, history_home, ec));
+    history_lease.reset();
+    auto next_key = history_key;
+    next_key.cycle = 0x80000002u;
+    const bool unresolved_history = HasUnresolvedPriorCycleHome(history_two, next_key, ec);
+    assert(unresolved_history && ec == std::errc::operation_in_progress);
+    history_lease = CharacterLease::Acquire(history_one, ec);
+    assert(history_lease);
+    history_home.phase = Phase::Visiting;
+    assert(StoreJournal(*history_lease, history_home, ec));
+    history_home.phase = Phase::Returning;
+    assert(StoreJournal(*history_lease, history_home, ec));
+    history_home.phase = Phase::Complete;
+    assert(StoreJournal(*history_lease, history_home, ec));
+    history_lease.reset();
+    assert(!HasUnresolvedPriorCycleHome(history_two, next_key, ec) && !ec);
+    auto history_anchor_lease = CharacterLease::Acquire(history_base, ec);
+    ManagedCycleEpoch reanchor;
+    reanchor.key = history_key;
+    reanchor.epoch = 1;
+    reanchor.target_key_cycle = history_key.cycle;
+    reanchor.serialized_sha256 = before;
+    assert(history_anchor_lease && !StoreManagedCycleEpoch(*history_anchor_lease, reanchor, ec) &&
+           ec == std::errc::file_exists);
+    ManagedCycleEpoch prior_cycle;
+    prior_cycle.key = key;
+    prior_cycle.stage = ManagedCycleStage::Stable;
+    assert(StoreManagedCycleEpoch(*prior_lease, prior_cycle, ec)); // Preserve a complete same-cycle home.
+    auto prior_intent = BeginManagedCycleIntent(prior_cycle, 6, 20, before);
+    assert(prior_intent && StoreManagedCycleEpoch(*prior_lease, *prior_intent, ec));
+    auto prior_applied = ObserveManagedCycleApplied(*prior_intent, 6, 7);
+    assert(prior_applied && StoreManagedCycleEpoch(*prior_lease, *prior_applied, ec));
+    auto prior_serialized = ObserveManagedCycleSerializeEnd(*prior_applied, after, 20);
+    assert(prior_serialized && StoreManagedCycleEpoch(*prior_lease, *prior_serialized, ec));
+    auto prior_committed = CommitManagedCycleEpoch(*prior_serialized, 21, after, after);
+    assert(prior_committed && StoreManagedCycleEpoch(*prior_lease, *prior_committed, ec));
+    assert(Read(prior_path) == prior_bytes);
+    ManagedCycleEpoch forbidden_anchor;
+    forbidden_anchor.key = key;
+    forbidden_anchor.key.cycle = 0x80000001u;
+    forbidden_anchor.epoch = 1;
+    forbidden_anchor.target_key_cycle = forbidden_anchor.key.cycle;
+    forbidden_anchor.serialized_sha256 = before;
+    assert(!StoreManagedCycleEpoch(*prior_lease, forbidden_anchor, ec) && ec);
+    assert(Read(prior_path) == prior_bytes);
+    const auto anchor_path = root / "managed-cycle-anchor-old-home.bin";
+    auto anchor_lease = CharacterLease::Acquire(anchor_path, ec);
+    auto anchor_home = old_home;
+    anchor_home.phase = Phase::Prepared;
+    assert(anchor_lease && StoreJournal(*anchor_lease, anchor_home, ec));
+    anchor_home.phase = Phase::Visiting;
+    assert(StoreJournal(*anchor_lease, anchor_home, ec));
+    anchor_home.phase = Phase::Returning;
+    assert(StoreJournal(*anchor_lease, anchor_home, ec));
+    anchor_home.phase = Phase::Complete;
+    assert(StoreJournal(*anchor_lease, anchor_home, ec));
+    assert(!StoreManagedCycleEpoch(*anchor_lease, forbidden_anchor, ec) && ec);
+    assert(LoadJournal(anchor_path, key, ec) == anchor_home);
+    std::puts("PASS: cycle-6 transition can add an intent sidecar beside a complete home; a fresh cap-7 anchor cannot replace prior history");
+    std::puts("PASS: managed NG epoch requires pre-increment intent, applied mutation, serialized hash and matching later receipt; ordinary saves retain proof");
+}
+
 void TestJournal() {
     char pattern[] = "/tmp/bbsc-party-test-XXXXXX";
     const char* made = mkdtemp(pattern);
@@ -441,6 +711,8 @@ void TestJournal() {
     TestLeaseAndRestart(root);
     TestDurableEventAck(root);
     TestPreparedWorldSnapshot(root);
+    TestSelectedSaveBackup(root);
+    TestManagedCycleEpochFence(root);
     fs::remove_all(root);
     std::puts("PASS: journal");
 }

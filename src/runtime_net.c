@@ -44,9 +44,47 @@ static void *module_handle;
 
 /* The game's image is ready (probe.c): the module's hooks in it go in now. */
 void runtime_net_image_ready(uintptr_t base, uint64_t size) {
-    if (!module_handle) return;
-    const BbNetImageReadyFn ready=(BbNetImageReadyFn)dlsym(module_handle,"bbnet_image_ready");
-    if (ready) ready(base,size);
+    if (module_handle) {
+        const BbNetImageReadyFn ready=(BbNetImageReadyFn)dlsym(module_handle,"bbnet_image_ready");
+        if (ready) ready(base,size);
+        return;
+    }
+    /* A pending managed Bloodborne home journal needs a tiny offline hook set. Do not call
+     * bbnet_init or register/resolve any network, HTTP, SSL, PSN, or signaling libraries. */
+    if (runtime_net_enabled() || strcmp(game_serial,"CUSA03173")) return;
+    static int recovery_tried;
+    if (recovery_tried) return;
+    recovery_tried=1;
+    char path[PATH_MAX];
+    const char *forced=getenv("BB_NET_MODULE");
+    if (forced && forced[0]) {
+        snprintf(path,sizeof(path),"%s",forced);
+    } else {
+        char exe[PATH_MAX-32];
+        const ssize_t n=readlink("/proc/self/exe",exe,sizeof(exe)-1);
+        if (n<=0) return;
+        exe[n]=0;
+        char *slash=strrchr(exe,'/');
+        if (slash) *slash=0;
+        snprintf(path,sizeof(path),"%s/gpu/libbbnet.so",exe);
+    }
+    void *module=dlopen(path,RTLD_NOW|RTLD_LOCAL);
+    if (!module) {
+        printf("BBSC recovery: module unavailable (%s); managed recovery stays pending\n",dlerror());
+        return;
+    }
+    const BbNetRecoveryInitFn init=(BbNetRecoveryInitFn)dlsym(module,"bbnet_recovery_init");
+    const BbNetRecoveryImageReadyFn ready=(BbNetRecoveryImageReadyFn)
+        dlsym(module,"bbnet_recovery_image_ready");
+    const BbNetHost host={
+        .abi=BBNET_ABI_VERSION, .app0=game_folder, .serial=game_serial, .title=game_title,
+        .app_ver=game_version, .save_receipt=runtime_file_save_receipt,
+    };
+    if (!init || !ready || init(&host)!=0) {
+        printf("BBSC recovery: %s has no compatible recovery-only entrypoint; journal stays pending\n",path);
+        return;
+    }
+    ready(base,size);
 }
 
 /* The module: BB_NET_MODULE, else gpu/libbbnet.so beside bb-probe (where libbbgpu.so is). */

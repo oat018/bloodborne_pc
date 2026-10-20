@@ -24,12 +24,18 @@
 #include "shadnet.pb.h"
 #include "shadnet/client.h"
 
+namespace Core::Bloodborne {
+bool IsBbscPrivateCoopAdmissionRequired();
+}
+
 namespace Libraries::Np::NpMatching2 {
 
 namespace {
 
 struct PendingRequest {
     OrbisNpMatching2ContextId ctx_id = 0;
+    u64 ctx_incarnation = 0;
+    bool admission_armed = false;
     OrbisNpMatching2RequestId req_id = 0;
     OrbisNpMatching2Event req_event{};
     bool a_variant = false;
@@ -156,11 +162,21 @@ std::string ExtractProtoBytes(const std::vector<u8>& payload, size_t offset = 0)
 void DispatchRequestComplete(const PendingRequest& pr, ShadNet::ErrorType error,
                              const std::vector<u8>& body) {
     ContextObject* ctx = ContextManager::Instance().Get(pr.ctx_id);
-    if (!ctx) {
+    if (!ctx || (pr.admission_armed && ctx->incarnation != pr.ctx_incarnation)) {
+        const bool join_room = pr.req_event == ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM ||
+                               pr.req_event == ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM_A;
+        if (pr.admission_armed && join_room && error == ShadNet::ErrorType::NoError) {
+            shadnet::JoinRoomReply reply;
+            if (reply.ParseFromString(ExtractProtoBytes(body)) && reply.has_details()) {
+                const auto room_id = static_cast<OrbisNpMatching2RoomId>(
+                    reply.details().room_data().room_id());
+                MmLeaveRoomForAdmission(pr.ctx_id, pr.ctx_incarnation, room_id);
+            }
+        }
         return;
     }
 
-    const s32 error_code = (error == ShadNet::ErrorType::NoError) ? 0 : static_cast<s32>(error);
+    s32 error_code = (error == ShadNet::ErrorType::NoError) ? 0 : static_cast<s32>(error);
 
     if (pr.req_event == ORBIS_NP_MATCHING2_CONTEXT_EVENT_STARTED ||
         pr.req_event == ORBIS_NP_MATCHING2_CONTEXT_EVENT_STOPPED) {
@@ -243,9 +259,52 @@ void DispatchRequestComplete(const PendingRequest& pr, ShadNet::ErrorType error,
         ctx->request_payload_override = nullptr;
     }
 
+    const bool join_room = pr.req_event == ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM ||
+                           pr.req_event == ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM_A;
+    if (pr.admission_armed && join_room &&
+        !IsBbscAdmissionArmed(pr.ctx_id, pr.req_id)) {
+        if (error_code == 0) {
+            MmLeaveRoomForAdmission(pr.ctx_id, pr.ctx_incarnation, ctx->room_id);
+        }
+        return;
+    }
+    if (pr.admission_armed && join_room && !ctx->started) {
+        CancelBbscAdmissionRequest(pr.ctx_id, pr.req_id);
+        if (error_code == 0) {
+            MmLeaveRoomForAdmission(pr.ctx_id, pr.ctx_incarnation, ctx->room_id);
+        }
+        return;
+    }
+    if (error_code != 0) {
+        CancelBbscAdmissionRequest(pr.ctx_id, pr.req_id);
+    } else if (pr.admission_armed && join_room) {
+        if (HoldBbscAdmissionResponse(*ctx, pr.req_id, pr.req_event, pr.request_cb,
+                                      pr.request_cb_arg, request_data, request_payload_owner)) {
+            StartMatching2SignalingForRoomPeers(*ctx, ctx->room_id);
+            return;
+        }
+        if (ctx->room_id != 0 && ctx->room_cache.contains(ctx->room_id)) {
+            MmLeaveRoomForAdmission(pr.ctx_id, pr.ctx_incarnation, ctx->room_id);
+        }
+        PendingEvent ev{};
+        ev.type = PendingEvent::REQUEST_CB;
+        ev.ctx_id = pr.ctx_id;
+        ev.ctx_incarnation = pr.ctx_incarnation;
+        ev.fire_at = std::chrono::steady_clock::now();
+        ev.req_id = pr.req_id;
+        ev.req_event = pr.req_event;
+        ev.error_code = ORBIS_NP_MATCHING2_ERROR_ABORTED;
+        ev.request_cb = pr.request_cb;
+        ev.request_cb_arg = pr.request_cb_arg;
+        ScheduleEvent(std::move(ev));
+        CancelBbscAdmissionRequest(pr.ctx_id, pr.req_id);
+        return;
+    }
+
     PendingEvent ev{};
     ev.type = PendingEvent::REQUEST_CB;
     ev.ctx_id = pr.ctx_id;
+    ev.ctx_incarnation = pr.admission_armed ? pr.ctx_incarnation : 0;
     ev.fire_at = std::chrono::steady_clock::now();
     ev.req_id = pr.req_id;
     ev.req_event = pr.req_event;
@@ -256,8 +315,7 @@ void DispatchRequestComplete(const PendingRequest& pr, ShadNet::ErrorType error,
     ev.request_payload_owner = std::move(request_payload_owner);
     ScheduleEvent(std::move(ev));
 
-    if (error_code == 0 && (pr.req_event == ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM ||
-                            pr.req_event == ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM_A)) {
+    if (error_code == 0 && join_room) {
         StartMatching2SignalingForRoomPeers(*ctx, ctx->room_id);
     } else if (error_code == 0 &&
                (pr.req_event == ORBIS_NP_MATCHING2_REQUEST_EVENT_CREATE_JOIN_ROOM ||
@@ -352,6 +410,10 @@ void HandleRoomEvent(const ShadNet::NotifyRoomEvent& n) {
     const auto room_id = static_cast<OrbisNpMatching2RoomId>(n.room_id);
     const auto member_id = static_cast<OrbisNpMatching2RoomMemberId>(n.member_id);
 
+    if (event == ORBIS_NP_MATCHING2_ROOM_EVENT_KICKEDOUT) {
+        InvalidateBbscAdmission(ctx->ctx_id, room_id);
+    }
+
     auto payload_owner = std::make_shared<CallbackPayload>();
     CallbackPayload& p = *payload_owner;
 
@@ -398,6 +460,9 @@ void HandleRoomEvent(const ShadNet::NotifyRoomEvent& n) {
         auto mem_it = room_it->second.members.find(member_id);
         if (mem_it == room_it->second.members.end()) {
             return;
+        }
+        if (member_id == room_it->second.signaling_main_member) {
+            InvalidateBbscAdmission(ctx->ctx_id, room_id);
         }
         BuildMemberUpdate(p, room_it->second, mem_it->second, cause, ctx->a_variant);
         QueueMatching2SignalingEvent(*ctx, room_id, member_id,
@@ -810,6 +875,7 @@ s32 MmSubmitRequest(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId 
         PendingEvent ev{};
         ev.type = PendingEvent::REQUEST_CB;
         ev.ctx_id = ctx_id;
+        ev.ctx_incarnation = IsBbscAdmissionArmed(ctx_id, req_id) ? ctx->incarnation : 0;
         ev.fire_at = std::chrono::steady_clock::now();
         ev.req_id = req_id;
         ev.req_event = req_event;
@@ -818,6 +884,9 @@ s32 MmSubmitRequest(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId 
         ev.request_cb_arg = request_cb.arg;
         ev.request_data = request_data;
         ev.request_payload_owner = std::move(request_payload_owner);
+        if (error_code != ORBIS_OK) {
+            CancelBbscAdmissionRequest(ctx_id, req_id);
+        }
         ScheduleEvent(std::move(ev));
         return ORBIS_OK;
     }
@@ -831,8 +900,9 @@ s32 MmSubmitRequest(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId 
     const u64 pkt_id = client->SubmitRequest(static_cast<ShadNet::CommandType>(cmd), payload);
     {
         std::lock_guard lock(g_mm.pending_mutex);
-        g_mm.pending[pkt_id] = {ctx_id,        req_id, req_event, a_variant, request_cb.callback,
-                                request_cb.arg};
+        g_mm.pending[pkt_id] = {ctx_id, ctx->incarnation,
+                                IsBbscAdmissionArmed(ctx_id, req_id), req_id, req_event, a_variant,
+                                request_cb.callback, request_cb.arg};
     }
     LOG_DEBUG(Lib_NpMatching2, "submit cmd={} pkt_id={} ctx={} reqId={}", static_cast<u16>(cmd),
               pkt_id, ctx_id, req_id);
@@ -962,8 +1032,19 @@ s32 MmJoinRoom(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_i
     }
     req.set_room_password_present(request.roomPasswd != nullptr);
     req.set_join_group_label_present(request.joinGroupLabel != nullptr);
-    return MmSubmitRequest(ctx_id, req_id, ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM,
-                           MmCommand::JoinRoom, MakeProtoPayload(req));
+    if (Core::Bloodborne::IsBbscPrivateCoopAdmissionRequired()) {
+        if (!ArmBbscAdmission(ctx_id, req_id)) {
+            return ORBIS_NP_MATCHING2_ERROR_BUSY;
+        }
+    } else if (HasBbscAdmissionPending(ctx_id)) {
+        return ORBIS_NP_MATCHING2_ERROR_BUSY;
+    }
+    const s32 rc = MmSubmitRequest(ctx_id, req_id, ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM,
+                                   MmCommand::JoinRoom, MakeProtoPayload(req));
+    if (rc < 0) {
+        CancelBbscAdmissionRequest(ctx_id, req_id);
+    }
+    return rc;
 }
 
 s32 MmJoinRoomA(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_id,
@@ -985,8 +1066,19 @@ s32 MmJoinRoomA(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_
     }
     req.set_room_password_present(request.roomPasswd != nullptr);
     req.set_join_group_label_present(request.joinGroupLabel != nullptr);
-    return MmSubmitRequest(ctx_id, req_id, ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM_A,
-                           MmCommand::JoinRoom, MakeProtoPayload(req), true);
+    if (Core::Bloodborne::IsBbscPrivateCoopAdmissionRequired()) {
+        if (!ArmBbscAdmission(ctx_id, req_id)) {
+            return ORBIS_NP_MATCHING2_ERROR_BUSY;
+        }
+    } else if (HasBbscAdmissionPending(ctx_id)) {
+        return ORBIS_NP_MATCHING2_ERROR_BUSY;
+    }
+    const s32 rc = MmSubmitRequest(ctx_id, req_id, ORBIS_NP_MATCHING2_REQUEST_EVENT_JOIN_ROOM_A,
+                                   MmCommand::JoinRoom, MakeProtoPayload(req), true);
+    if (rc < 0) {
+        CancelBbscAdmissionRequest(ctx_id, req_id);
+    }
+    return rc;
 }
 
 s32 MmLeaveRoom(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_id,
@@ -996,6 +1088,32 @@ s32 MmLeaveRoom(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_
     req.set_req_id(req_id);
     return MmSubmitRequest(ctx_id, req_id, ORBIS_NP_MATCHING2_REQUEST_EVENT_LEAVE_ROOM,
                            MmCommand::LeaveRoom, MakeProtoPayload(req));
+}
+
+s32 MmLeaveRoomForAdmission(OrbisNpMatching2ContextId ctx_id, u64 incarnation,
+                            OrbisNpMatching2RoomId room_id) {
+    std::shared_ptr<ShadNet::ShadNetClient> client;
+    {
+        std::lock_guard lock(g_mm.mutex);
+        client = g_mm.client;
+    }
+    if (!client || !client->IsAuthenticated()) {
+        return ORBIS_NP_MATCHING2_ERROR_SERVER_NOT_AVAILABLE;
+    }
+
+    const auto req_id = AllocRequestId();
+    shadnet::LeaveRoomRequest request;
+    request.set_room_id(room_id);
+    request.set_req_id(req_id);
+    const u64 pkt_id = client->SubmitRequest(static_cast<ShadNet::CommandType>(MmCommand::LeaveRoom),
+                                            MakeProtoPayload(request));
+    {
+        std::lock_guard lock(g_mm.pending_mutex);
+        g_mm.pending[pkt_id] = {ctx_id, incarnation, true, req_id,
+                                ORBIS_NP_MATCHING2_REQUEST_EVENT_LEAVE_ROOM, false, nullptr,
+                                nullptr};
+    }
+    return ORBIS_OK;
 }
 
 s32 MmGetWorldInfoList(OrbisNpMatching2ContextId ctx_id, OrbisNpMatching2RequestId req_id,

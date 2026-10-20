@@ -29,6 +29,8 @@
 #include <tuple>
 #include <vector>
 #include <openssl/sha.h>
+#include <openssl/rand.h>
+#include <openssl/crypto.h>
 
 #include "common/logging/log.h"
 #include "common/memory_patcher.h"
@@ -36,6 +38,7 @@
 #include "common/singleton.h"
 #include "core/bbsc_memscan.h"
 #include "core/bbsc_party.h"
+#include "core/bbsc_party_events.h"
 #include "core/bbsc_persistence.h"
 #include "core/bbsc_cinematic.h"
 #include "imgui/bbsc_loading_layer.h"
@@ -43,8 +46,10 @@
 #include "core/debugger.h"
 #include "core/file_format/psf.h"
 #include "core/libraries/np/np_matching2/np_matching2_mm.h"
+#include "core/libraries/np/np_matching2/np_matching2_internal.h"
 #include "core/libraries/np/np_signaling/np_signaling_helpers.h"
 #include "core/libraries/np/np_signaling/np_signaling_bbsc.h"
+#include "core/libraries/network/http.h"
 #include "core/memory.h"
 
 namespace Core::Bloodborne {
@@ -133,6 +138,10 @@ constexpr u64 GlobalStatePointerOffset = 0x05556678;
 constexpr u64 NativeSaveRequestOffset = 0x0156D570;
 constexpr u64 NativeSaveSerializeOffset = 0x0156AA50;
 constexpr u64 NativeSaveSerializeEndOffset = 0x0156B8F3;
+constexpr u64 NativeEventFlagsSerializeBeginOffset = 0x0156AC56;
+constexpr u64 NativeEventFlagsSerializeEndOffset = 0x0156AC94;
+constexpr u64 NativeEventFlagsSerializerCallOffset = 0x0156AC8C;
+constexpr u64 NativeEventFlagsSerializerOffset = 0x01399DE0;
 constexpr u64 NativeSaveLoadOffset = 0x0156B970;
 constexpr u64 NativeSaveCopyOffset = 0x01831977;
 constexpr u64 NativeSlotReserveOffset = 0x01B3E633;
@@ -141,11 +150,13 @@ constexpr u64 NativeSlotClearTaskOffset = 0x01B3F1BE;
 constexpr u64 NativeSlotClearOtherTaskOffset = 0x01B45DFE;
 constexpr u64 NativeCycleIncrementOffset = 0x0131D260;
 constexpr u64 NativeCycleLuaIncrementOffset = 0x01334BB0;
+constexpr u64 NativeCycleLuaIntentOffset = 0x01334BDD;
 constexpr u64 NativeCycleEventIncrementOffset = 0x017C0FD2;
 constexpr u64 NativeCycleAppliedOffset = 0x0131D2A8;
 constexpr u64 NativeCycleLuaAppliedOffset = 0x01334C05;
 constexpr u64 NativeCycleEventAppliedOffset = 0x017C045A;
 constexpr u64 CandidateLocalStatePointerOffset = 0x0553E878;
+constexpr u64 WorldFlagManPointerOffset = 0x0553B100;
 constexpr u64 SummonManagerRootPointerOffset = 0x0553B120;
 constexpr u64 CurrentMapListPointerOffset = 0x0553B148;
 constexpr u64 MatchingStatePointerOffset = 0x05540290;
@@ -357,6 +368,10 @@ constexpr auto Sites = std::to_array<TraceSite>({
     {"BBSC.Save.Serialize", NativeSaveSerializeOffset, TraceKind::SaveLifecycle, StandardR15Prologue, 6},
     {"BBSC.Save.SerializeEnd", NativeSaveSerializeEndOffset, TraceKind::SaveLifecycle,
      {0x88, 0xD8, 0x48, 0x8D, 0x65, 0xD8}, 6},
+    {"BBSC.Save.EventFlagsBegin", NativeEventFlagsSerializeBeginOffset, TraceKind::SaveLifecycle,
+     {0x49, 0x8B, 0x7D, 0x00, 0x48, 0x85, 0xFF}, 7},
+    {"BBSC.Save.EventFlagsEnd", NativeEventFlagsSerializeEndOffset, TraceKind::SaveLifecycle,
+     {0x8B, 0x84, 0x24, 0x30, 0x01, 0x00, 0x00}, 7},
     {"BBSC.Save.Load", NativeSaveLoadOffset, TraceKind::SaveLifecycle, StandardR15Prologue, 6},
     {"BBSC.Save.CopyInput", NativeSaveCopyOffset, TraceKind::SaveLifecycle,
      {0x8D, 0x71, 0x07, 0x83, 0xF9, 0x0A}, 6},
@@ -372,6 +387,9 @@ constexpr auto Sites = std::to_array<TraceSite>({
      {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x10}, 8},
     {"BBSC.Cycle.LuaIncrement", NativeCycleLuaIncrementOffset, TraceKind::SaveLifecycle,
      {0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xEC, 0x10}, 8},
+    // First instruction after the Lua helper's enable guard; before the native counter read/store.
+    {"BBSC.Cycle.LuaIntent", NativeCycleLuaIntentOffset, TraceKind::SaveLifecycle,
+     {0x8B, 0x71, 0x68, 0x31, 0xD2, 0x89, 0xF7, 0xFF, 0xC7, 0x89, 0x79, 0x68}, 12},
     // Start after the RIP-relative root lookup: the native trampoline only copies absolute code.
     {"BBSC.Cycle.EventIncrement", NativeCycleEventIncrementOffset, TraceKind::SaveLifecycle,
      {0x8B, 0x50, 0x68, 0x31, 0xC9, 0x89, 0xD6}, 7},
@@ -851,6 +869,13 @@ std::ofstream capture_file;
 std::filesystem::path capture_path;
 uintptr_t image_base{};
 bool installed{};
+bool bbsc_managed_recovery_hooks_installed{};
+bool bbsc_recovery_only_mode{};
+bool bbsc_offline_return_selected{};
+std::optional<Core::Bbsc::Party::CharacterKey> bbsc_offline_return_key;
+std::optional<Core::Bbsc::Party::PartyId> bbsc_offline_return_party;
+unsigned bbsc_offline_return_warp_attempts{};
+s64 bbsc_offline_return_last_attempt_ms{};
 bool negative_area_patch_installed{};
 bool area_flag_patch_installed{};
 bool responder_bell_area_patch_installed{};
@@ -893,10 +918,15 @@ thread_local HostPlacementRewriteRecord host_placement_rewrite{};
 std::mutex bbsc_party_inbox_mutex;
 std::vector<Core::Bbsc::Party::Peer> bbsc_party_expected_peers;
 std::vector<BbscPartyPacket> bbsc_party_inbox;
+std::vector<BbscCapabilityPacket> bbsc_capability_inbox;
 std::optional<BbscPartyRoom> bbsc_party_room;
 constexpr size_t BbscPartyInboxPerPeer =
     Libraries::Np::NpSignaling::kBbscPartyMaxCatalogEvents +
     Libraries::Np::NpSignaling::kBbscPartyMaxChunks + 4;
+constexpr size_t BbscCapabilityInboxPerPeer = 4;
+bool bbsc_native_coop_hooks_ready{};
+std::optional<std::pair<Core::Bbsc::Party::CharacterKey, std::chrono::steady_clock::time_point>>
+    bbsc_admitted_join_key;
 
 std::mutex seamless_placement_mutex;
 std::optional<SummonPlacementDescriptor> seamless_host_placement;
@@ -3217,11 +3247,31 @@ void ApplyBbscGuestLootView(u32 packed_map, std::string_view why); // see "Guest
 void KeepBbscOwnWorldGroup(u32 key, const u8* live); // see "Own world journal"
 void CaptureBbscOwnWorldBeforeJoin();
 void WriteBbscOwnWorldFile();
-std::optional<Core::Bbsc::Party::CharacterKey> ReadBbscPartyCharacterKey();
+std::optional<Core::Bbsc::Party::CharacterKey> ReadBbscPartyCharacterKey(bool loading_boundary = false);
 #ifndef _WIN32
 std::filesystem::path BbscPartyHomePath(const Core::Bbsc::Party::CharacterKey& key);
 bool BbscHomeForOwnWorld();
 Core::Bbsc::Party::ReturnSaveTracker bbsc_managed_return_save_tracker;
+struct BbscCycleSerializeToken {
+    Core::Bbsc::Party::CharacterKey character;
+    u8 slot{};
+    u64 buffer{};
+    u64 generation{};
+    bool active{};
+};
+BbscCycleSerializeToken bbsc_cycle_serialize_token;
+// Hash equality alone cannot distinguish a fresh in-process preimage from a restart.
+// Retain the exact durable producer provenance until the selected-save receipt commits it.
+struct BbscCycleProcessProvenance {
+    Core::Bbsc::Party::CharacterKey key;
+    std::uint64_t epoch{};
+    std::uint32_t target_key_cycle{};
+    std::uint8_t previous_native_cycle{};
+    std::string baseline_sha256;
+    std::string serialized_sha256;
+    bool active{};
+};
+BbscCycleProcessProvenance bbsc_cycle_process_provenance;
 #endif
 void NoteBbscOwnDreamRestored(u32 key, const u8* live);
 s32 GetSessionState();
@@ -4259,11 +4309,13 @@ struct BbscNativeCharacterIdentity {
     bool operator==(const BbscNativeCharacterIdentity&) const = default;
 };
 
-std::optional<BbscNativeCharacterIdentity> ReadBbscLiveCharacterIdentity() {
+int32_t ReadBbscSelectedSaveReceipt(BbNetSaveReceipt& out);
+
+std::optional<BbscNativeCharacterIdentity> ReadBbscLiveCharacterIdentity(bool loading_boundary = false) {
     namespace fs = std::filesystem;
     if (image_base == 0) return std::nullopt;
     const u64 global = GetGlobalState();
-    if (!ReadablePointer(global, 0x1593) || ReadValue<u8>(global, 8) != 0 ||
+    if (!ReadablePointer(global, 0x1593) || (!loading_boundary && ReadValue<u8>(global, 8) != 0) ||
         ReadValue<u8>(global, 0x1592) == 0) return std::nullopt;
     const s32 slot = ReadValue<s32>(global, 0x1490);
     if (slot < 0 || slot >= 10) return std::nullopt;
@@ -4277,18 +4329,36 @@ std::optional<BbscNativeCharacterIdentity> ReadBbscLiveCharacterIdentity() {
     const s32 cycle = ReadValue<s32>(slots, 0x68);
     if (user == 0 || user >= (u64{1} << 63) || character == 0 ||
         character > 9007199254740991ULL || cycle < 0 || cycle > 7) return std::nullopt;
-    const char* configured = std::getenv("BBSC_SAVE_DIR");
-    if (!configured || !configured[0]) return std::nullopt;
     std::error_code ec;
-    const fs::path dir = fs::canonical(configured, ec);
-    if (ec) return std::nullopt;
-    const fs::path file = dir / fmt::format("userdata{:04}", slot);
+    fs::path file;
+    const char* configured = std::getenv("BBSC_SAVE_DIR");
+    if (configured && configured[0]) {
+        const fs::path dir = fs::canonical(configured, ec);
+        if (ec) return std::nullopt;
+        file = dir / fmt::format("userdata{:04}", slot);
+    } else {
+        // Offline recovery has no BBSC launcher setup. Use only the runtime's selected-file
+        // receipt; never guess a user/profile directory from directory iteration or mtime.
+        BbNetSaveReceipt receipt{};
+        const s32 receipt_result = ReadBbscSelectedSaveReceipt(receipt);
+        const bool path_only = receipt_result == ENOENT && receipt.generation == 0 &&
+                               receipt.error == 0 && receipt.bytes == 0 &&
+                               receipt.sha256[0] == '\0';
+        if ((receipt_result != 0 && !path_only) || receipt.error != 0 ||
+            receipt.path[0] == '\0') return std::nullopt;
+        file = fs::path{receipt.path};
+        const fs::path expected = fmt::format("userdata{:04}", slot);
+        if (file.filename() != expected || fs::is_symlink(file, ec) || ec) return std::nullopt;
+        const fs::path canonical_file = fs::canonical(file, ec);
+        if (ec || canonical_file != file) return std::nullopt;
+        file = canonical_file;
+    }
     return BbscNativeCharacterIdentity{file, slot, user, character, cycle, -1, {}};
 }
 
-std::optional<BbscNativeCharacterIdentity> ReadBbscNativeCharacterIdentity() {
+std::optional<BbscNativeCharacterIdentity> ReadBbscNativeCharacterIdentity(bool loading_boundary = false) {
     namespace fs = std::filesystem;
-    auto identity = ReadBbscLiveCharacterIdentity();
+    auto identity = ReadBbscLiveCharacterIdentity(loading_boundary);
     if (!identity) return std::nullopt;
     const auto& file = identity->save_file;
     std::error_code ec;
@@ -4319,12 +4389,39 @@ Core::Bbsc::Party::CharacterKey BbscPartyCharacterKey(const BbscNativeCharacterI
     return key;
 }
 
-std::optional<Core::Bbsc::Party::CharacterKey> ReadBbscPartyCharacterKey() {
-    const auto identity = ReadBbscNativeCharacterIdentity();
-    // shortcut: capped 7 needs the managed cycle epoch before journal admission can use it.
-    if (!identity || identity->capped_cycle == 7 ||
-        identity->capped_cycle != identity->persisted_capped_cycle) return std::nullopt;
-    return BbscPartyCharacterKey(*identity);
+bool BbscRawIdentityMatchesPartyKey(const BbscNativeCharacterIdentity& identity,
+                                    const Core::Bbsc::Party::CharacterKey& key) {
+    const auto raw = BbscPartyCharacterKey(identity);
+    const bool same_cycle = key.cycle == raw.cycle ||
+        ((key.cycle & 0x80000000u) != 0 && raw.cycle == 7);
+    return same_cycle && key.save_dir == raw.save_dir && key.user == raw.user &&
+           key.slot == raw.slot && key.character == raw.character;
+}
+
+std::optional<Core::Bbsc::Party::CharacterKey> ReadBbscPartyCharacterKey(bool loading_boundary) {
+    const auto identity = ReadBbscNativeCharacterIdentity(loading_boundary);
+    if (!identity || identity->capped_cycle != identity->persisted_capped_cycle) return std::nullopt;
+    auto key = BbscPartyCharacterKey(*identity);
+#ifndef _WIN32
+    const auto native_cycle = key.cycle;
+    key.cycle = 6; // per-character epoch lookup; stable record provides tagged cycle key
+    std::error_code ec;
+    const auto state = Core::Bbsc::Party::LoadManagedCycleEpoch(BbscPartyHomePath(key), key, ec);
+    if (identity->capped_cycle != 7) {
+        if (!state) return ec == std::errc::no_such_file_or_directory
+                              ? std::optional{BbscPartyCharacterKey(*identity)} : std::nullopt;
+        if (state->stage != Core::Bbsc::Party::ManagedCycleStage::Stable ||
+            state->key.cycle != native_cycle) return std::nullopt;
+        return BbscPartyCharacterKey(*identity);
+    }
+    if (!state || state->stage != Core::Bbsc::Party::ManagedCycleStage::Stable ||
+        state->epoch == 0 || (state->key.cycle & 0x80000000u) == 0 ||
+        state->serialized_sha256 != identity->snapshot_sha256) return std::nullopt;
+    key.cycle = state->key.cycle;
+    return key;
+#else
+    return std::nullopt;
+#endif
 }
 
 void TraceBbscNativeCharacterIdentity() {
@@ -4451,6 +4548,7 @@ std::optional<BbscNativeSaveEvidence> ReadBbscNativeSaveEvidence(
         out.stage = "slot-reserved"; // Allocation can still be cancelled; not a character identity.
         out.slot = static_cast<s32>(registers.rdi);
     } else if (offset == NativeCycleIncrementOffset || offset == NativeCycleLuaIncrementOffset ||
+               offset == NativeCycleLuaIntentOffset ||
                offset == NativeCycleEventIncrementOffset || offset == NativeCycleAppliedOffset ||
                offset == NativeCycleLuaAppliedOffset || offset == NativeCycleEventAppliedOffset) {
         const u64 slots = ReadValue<u64>(image_base + PlayerSlotManagerPointerOffset, 0);
@@ -4489,6 +4587,337 @@ std::optional<BbscNativeSaveEvidence> ReadBbscNativeSaveEvidence(
     return out;
 }
 
+struct BbscNativeFlagGroupSlot {
+    u32 key{};
+    u32 slot{};
+    bool operator==(const BbscNativeFlagGroupSlot&) const = default;
+};
+
+struct BbscNativeFlagProof {
+    s32 slot{-1};
+    u64 buffer{};
+    u64 receipt_generation{};
+    std::string selected_path;
+    u32 cursor_start{};
+    u32 span_offset{};
+    u32 span_bytes{};
+    u32 group_count{};
+    std::vector<BbscNativeFlagGroupSlot> groups;
+    std::vector<u8> captured_span;
+    std::string span_sha256;
+    u64 server_user{};
+    u64 server_character{};
+    s32 capped_cycle{-1};
+    std::string save_sha256;
+    u64 receipt_confirmed_generation{};
+    bool callback_started{};
+    bool callback_completed{};
+    bool awaiting_receipt{};
+    bool receipt_confirmed{};
+};
+
+std::optional<BbscNativeFlagProof> bbsc_native_flag_proof;
+
+constexpr size_t BbscNativeProofFlagIdCount = [] {
+    size_t count = Core::Bbsc::Party::kPartyBossCompletionCatalog.size();
+    for (const auto& rule : Core::Bbsc::Party::kPartyUniqueItemCatalog)
+        count += rule.flag_id != Core::Bbsc::Party::kNoItemAcquisitionFlag;
+    return count;
+}();
+constexpr auto BbscNativeProofFlagIds = [] {
+    std::array<u32, BbscNativeProofFlagIdCount> ids{};
+    size_t index = 0;
+    for (const auto& rule : Core::Bbsc::Party::kPartyBossCompletionCatalog)
+        ids[index++] = rule.flag_id;
+    for (const auto& rule : Core::Bbsc::Party::kPartyUniqueItemCatalog)
+        if (rule.flag_id != Core::Bbsc::Party::kNoItemAcquisitionFlag)
+            ids[index++] = rule.flag_id;
+    return ids;
+}();
+constexpr size_t BbscNativeProofGroupKeyCount = [] {
+    size_t count = 0;
+    for (size_t i = 0; i < BbscNativeProofFlagIds.size(); ++i) {
+        const u32 key = BbscNativeProofFlagIds[i] / 1000;
+        bool seen = false;
+        for (size_t previous = 0; previous < i; ++previous)
+            seen |= BbscNativeProofFlagIds[previous] / 1000 == key;
+        if (!seen) ++count;
+    }
+    return count;
+}();
+constexpr auto BbscNativeProofGroupKeys = [] {
+    std::array<u32, BbscNativeProofGroupKeyCount> keys{};
+    size_t count = 0;
+    for (const u32 flag_id : BbscNativeProofFlagIds) {
+        const u32 key = flag_id / 1000;
+        bool seen = false;
+        for (size_t previous = 0; previous < count; ++previous) seen |= keys[previous] == key;
+        if (!seen) keys[count++] = key;
+    }
+    std::ranges::sort(keys);
+    return keys;
+}();
+
+bool BbscNativeFlagProofCallbackSignatureValid() {
+    const u64 size = MemoryPatcher::g_eboot_image_size;
+    if (image_base == 0 || NativeEventFlagsSerializerCallOffset > size ||
+        5 > size - NativeEventFlagsSerializerCallOffset ||
+        NativeEventFlagsSerializerOffset > size || 6 > size - NativeEventFlagsSerializerOffset)
+        return false;
+
+    constexpr std::array<u8, 5> call{0xE8, 0x4F, 0xF1, 0xE2, 0xFF};
+    constexpr std::array<u8, 6> target{0x55, 0x48, 0x89, 0xE5, 0x41, 0x57};
+    const auto matches = [](u64 offset, auto expected) {
+        return std::ranges::equal(expected, std::span<const u8>{
+            reinterpret_cast<const u8*>(image_base + offset), expected.size()});
+    };
+    if (!matches(NativeEventFlagsSerializerCallOffset, call) ||
+        !matches(NativeEventFlagsSerializerOffset, target)) return false;
+
+    s32 displacement{};
+    std::memcpy(&displacement, reinterpret_cast<const void*>(image_base +
+                NativeEventFlagsSerializerCallOffset + 1), sizeof(displacement));
+    const s64 resolved_target = static_cast<s64>(NativeEventFlagsSerializerCallOffset + 5) + displacement;
+    return resolved_target == static_cast<s64>(NativeEventFlagsSerializerOffset);
+}
+
+std::optional<std::vector<BbscNativeFlagGroupSlot>> CaptureBbscNativeFlagGroupSlots(u32& group_count) {
+    const u64 man = ReadValue<u64>(image_base + WorldFlagManPointerOffset, 0);
+    if (!ReadablePointer(man, 0x40) || ReadValue<u32>(man, 0x1C) != 1000 ||
+        ReadValue<u32>(man, 0x20) != 125) return std::nullopt;
+    group_count = ReadValue<u32>(man, 0x24);
+    const u64 storage = ReadValue<u64>(man, 0x28);
+    if (group_count == 0 || group_count > 50'000 ||
+        !ReadablePointer(storage, static_cast<size_t>(group_count) * 125)) return std::nullopt;
+    const u64 head = ReadValue<u64>(man, 0x38);
+    if (!ReadablePointer(head, 0x20)) return std::nullopt;
+
+    std::vector<BbscNativeFlagGroupSlot> groups;
+    std::vector<u64> stack;
+    const auto usable = [](u64 node) {
+        return ReadablePointer(node, 0x38) && ReadValue<u8>(node, 0x19) == 0;
+    };
+    u64 node = ReadValue<u64>(head, 0x08);
+    size_t visited = 0;
+    while (usable(node) || !stack.empty()) {
+        while (usable(node)) {
+            if (stack.size() >= 128 || ++visited > 50'000) return std::nullopt;
+            stack.push_back(node);
+            node = ReadValue<u64>(node, 0x00);
+        }
+        if (stack.empty()) return std::nullopt;
+        node = stack.back();
+        stack.pop_back();
+        const u32 key = ReadValue<u32>(node, 0x20);
+        if (std::ranges::find(BbscNativeProofGroupKeys, key) != BbscNativeProofGroupKeys.end()) {
+            const s32 kind = ReadValue<s32>(node, 0x28);
+            const u32 slot = ReadValue<u32>(node, 0x30);
+            if (kind != 1 || slot >= group_count) return std::nullopt;
+            groups.push_back({key, slot});
+        }
+        node = ReadValue<u64>(node, 0x10);
+    }
+    if (groups.size() != BbscNativeProofGroupKeys.size()) return std::nullopt;
+    std::ranges::sort(groups, {}, &BbscNativeFlagGroupSlot::key);
+    if (std::adjacent_find(groups.begin(), groups.end(), [](const auto& a, const auto& b) {
+            return a.key == b.key;
+        }) != groups.end()) return std::nullopt;
+    std::vector<u32> slots;
+    slots.reserve(groups.size());
+    for (const auto& group : groups) slots.push_back(group.slot);
+    std::ranges::sort(slots);
+    if (std::adjacent_find(slots.begin(), slots.end()) != slots.end()) return std::nullopt;
+    return groups;
+}
+
+std::optional<std::string> BbscSpanSha256(u64 address, u32 bytes) {
+    if (bytes == 0 || !ReadablePointer(address, bytes)) return std::nullopt;
+    std::array<u8, SHA256_DIGEST_LENGTH> digest{};
+    if (!SHA256(reinterpret_cast<const u8*>(address), bytes, digest.data())) return std::nullopt;
+    std::string result;
+    result.reserve(64);
+    for (const u8 byte : digest) result += fmt::format("{:02x}", byte);
+    return result;
+}
+
+void ObserveBbscNativeFlagProof(u64 offset, const GuestRegisterSnapshot& registers) {
+    if (!BbscNativeFlagProofCallbackSignatureValid()) {
+        bbsc_native_flag_proof.reset();
+        return;
+    }
+    try {
+        if (offset == NativeSaveSerializeOffset) {
+            bbsc_native_flag_proof.reset();
+            const auto evidence = ReadBbscNativeSaveEvidence(offset, registers);
+            if (!evidence || evidence->stage != "serialize-begin") return;
+            BbNetSaveReceipt receipt{};
+            const s32 result = ReadBbscSelectedSaveReceipt(receipt);
+            const bool missing = result == ENOENT && receipt.generation == 0 && receipt.error == 0 &&
+                                 receipt.bytes == 0 && receipt.sha256[0] == '\0' && receipt.path[0];
+            if ((result != 0 && !missing) || receipt.error != 0 || !receipt.path[0] ||
+                (result == 0 && (receipt.bytes != 0x140000 ||
+                    std::memchr(receipt.sha256, '\0', sizeof(receipt.sha256)) != receipt.sha256 + 64)) ||
+                std::filesystem::path{receipt.path}.filename() !=
+                    fmt::format("userdata{:04}", evidence->slot)) return;
+            BbscNativeFlagProof proof{};
+            proof.slot = evidence->slot;
+            proof.buffer = evidence->buffer;
+            proof.receipt_generation = receipt.generation;
+            proof.selected_path = receipt.path;
+            bbsc_native_flag_proof = std::move(proof);
+            return;
+        }
+        if (!bbsc_native_flag_proof) return;
+        auto& proof = *bbsc_native_flag_proof;
+        if (offset == NativeEventFlagsSerializeBeginOffset) {
+            if (proof.callback_started || !ReadablePointer(registers.rsp, 0x138)) {
+                bbsc_native_flag_proof.reset();
+                return;
+            }
+            const u64 stream = registers.rsp + 0x100;
+            const u64 stream_buffer = ReadValue<u64>(stream, 0x10);
+            const u32 capacity = ReadValue<u32>(stream, 0x18);
+            const u32 cursor = ReadValue<u32>(stream, 0x30);
+            const u32 caller_cursor = ReadValue<u32>(registers.rsp, 0xD4);
+            if (stream_buffer != proof.buffer || capacity != 0x140000 || cursor != caller_cursor) {
+                bbsc_native_flag_proof.reset();
+                return;
+            }
+            u32 group_count = 0;
+            auto groups = CaptureBbscNativeFlagGroupSlots(group_count);
+            if (!groups) {
+                bbsc_native_flag_proof.reset(); // Missing/ambiguous selected entries or selected kind 2 fail closed.
+                return;
+            }
+            proof.cursor_start = cursor;
+            proof.group_count = group_count;
+            proof.groups = std::move(*groups);
+            proof.callback_started = true;
+            return;
+        }
+        if (offset == NativeEventFlagsSerializeEndOffset) {
+            if (!proof.callback_started || proof.callback_completed ||
+                !ReadablePointer(registers.rsp, 0x138) ||
+                (registers.r13 & 0xFF) == 0) {
+                bbsc_native_flag_proof.reset();
+                return;
+            }
+            const u32 cursor = ReadValue<u32>(registers.rsp, 0x130);
+            const u32 saved_cursor = ReadValue<u32>(registers.rsp, 0xD4);
+            const u32 expected_bytes = proof.group_count * 125 + 1;
+            if (saved_cursor != proof.cursor_start || cursor < saved_cursor ||
+                cursor - saved_cursor != expected_bytes || cursor > 0x140000 ||
+                proof.buffer > std::numeric_limits<u64>::max() - cursor) {
+                bbsc_native_flag_proof.reset();
+                return;
+            }
+            proof.span_offset = saved_cursor;
+            proof.span_bytes = expected_bytes;
+            const auto hash = BbscSpanSha256(proof.buffer + proof.span_offset, proof.span_bytes);
+            if (!hash) {
+                bbsc_native_flag_proof.reset();
+                return;
+            }
+            u32 current_group_count = 0;
+            const auto current_groups = CaptureBbscNativeFlagGroupSlots(current_group_count);
+            if (!current_groups || current_group_count != proof.group_count ||
+                *current_groups != proof.groups) {
+                bbsc_native_flag_proof.reset(); // Map changes across the callback boundary are ambiguous.
+                return;
+            }
+            proof.span_sha256 = *hash;
+            proof.callback_completed = true;
+            return;
+        }
+        if (offset == NativeSaveSerializeEndOffset) {
+            const auto evidence = ReadBbscNativeSaveEvidence(offset, registers);
+            if (!proof.callback_completed || !proof.span_bytes || !evidence ||
+                evidence->stage != "serialize-end" || evidence->success != 1 ||
+                evidence->slot != proof.slot || evidence->buffer != proof.buffer || !evidence->snapshot) {
+                bbsc_native_flag_proof.reset();
+                return;
+            }
+            const auto hash = BbscSpanSha256(proof.buffer + proof.span_offset, proof.span_bytes);
+            if (!hash || *hash != proof.span_sha256) {
+                bbsc_native_flag_proof.reset();
+                return;
+            }
+            proof.server_user = evidence->snapshot->server_user;
+            proof.server_character = evidence->snapshot->server_character;
+            proof.capped_cycle = evidence->snapshot->capped_cycle;
+            proof.save_sha256 = evidence->snapshot->sha256;
+            proof.awaiting_receipt = true;
+            return;
+        }
+    } catch (...) {
+        bbsc_native_flag_proof.reset();
+    }
+}
+
+void TickBbscNativeFlagProofReceipt() {
+    if (!bbsc_native_flag_proof || !bbsc_native_flag_proof->awaiting_receipt ||
+        bbsc_native_flag_proof->receipt_confirmed) return;
+    auto& proof = *bbsc_native_flag_proof;
+    BbNetSaveReceipt receipt{};
+    if (ReadBbscSelectedSaveReceipt(receipt) != 0 || receipt.error != 0 ||
+        receipt.bytes != 0x140000 || receipt.generation <= proof.receipt_generation ||
+        std::memchr(receipt.sha256, '\0', sizeof(receipt.sha256)) != receipt.sha256 + 64 ||
+        receipt.path != proof.selected_path || receipt.sha256 != proof.save_sha256) return;
+    const auto hash = BbscSpanSha256(proof.buffer + proof.span_offset, proof.span_bytes);
+    if (!hash || *hash != proof.span_sha256) return;
+    try {
+        proof.captured_span.assign(reinterpret_cast<const u8*>(proof.buffer + proof.span_offset),
+                                   reinterpret_cast<const u8*>(proof.buffer + proof.span_offset +
+                                                               proof.span_bytes));
+    } catch (...) {
+        bbsc_native_flag_proof.reset();
+        return;
+    }
+    proof.receipt_confirmed = true;
+    proof.receipt_confirmed_generation = receipt.generation;
+    std::string group_slots;
+    for (const auto& group : proof.groups) {
+        if (!group_slots.empty()) group_slots += ',';
+        group_slots += fmt::format("{}:{}", group.key, group.slot);
+    }
+    LOG_INFO(Debug, "BBSC native event-flag proof: slot {} path {} buffer {:#x} identity {}:{} cycle {} "
+                    "span {:#x}+{:#x} sha256 {} save receipt generation {} sha256 {} groups [{}]",
+             proof.slot, proof.selected_path, proof.buffer, proof.server_user, proof.server_character,
+             proof.capped_cycle, proof.span_offset, proof.span_bytes, proof.span_sha256,
+             receipt.generation, proof.save_sha256, group_slots);
+}
+
+std::optional<bool> ReadBbscProvenNativeEventFlag(u32 flag_id) {
+    if (std::ranges::find(BbscNativeProofFlagIds, flag_id) == BbscNativeProofFlagIds.end() ||
+        !bbsc_native_flag_proof) return std::nullopt;
+    const auto& proof = *bbsc_native_flag_proof;
+    if (!proof.receipt_confirmed || proof.captured_span.size() != proof.span_bytes ||
+        proof.span_bytes != proof.group_count * 125 + 1) return std::nullopt;
+    try {
+        BbNetSaveReceipt receipt{};
+        if (ReadBbscSelectedSaveReceipt(receipt) != 0 || receipt.error != 0 ||
+            receipt.bytes != 0x140000 || receipt.generation < proof.receipt_confirmed_generation ||
+            std::memchr(receipt.sha256, '\0', sizeof(receipt.sha256)) != receipt.sha256 + 64 ||
+            receipt.path != proof.selected_path || receipt.sha256 != proof.save_sha256) return std::nullopt;
+        const auto identity = ReadBbscNativeCharacterIdentity();
+        if (!identity || identity->slot != proof.slot ||
+            identity->save_file.string() != proof.selected_path ||
+            identity->server_user != proof.server_user ||
+            identity->server_character != proof.server_character ||
+            identity->capped_cycle != proof.capped_cycle ||
+            identity->snapshot_sha256 != proof.save_sha256) return std::nullopt;
+        const u32 group_key = flag_id / 1000;
+        const auto group = std::ranges::find(proof.groups, group_key, &BbscNativeFlagGroupSlot::key);
+        if (group == proof.groups.end()) return std::nullopt;
+        const u32 within_group = flag_id % 1000;
+        const size_t byte_offset = static_cast<size_t>(group->slot) * 125 + within_group / 8;
+        if (byte_offset >= proof.captured_span.size() - 1) return std::nullopt;
+        return ((proof.captured_span[byte_offset] >> (7 - (within_group % 8))) & 1) != 0;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
 bool BbscSaveIdentityTraceEnabled() {
     static const bool enabled = EnvFlagEnabled("SHADPS4_BBSC_IDENTITY_TRACE");
     return enabled;
@@ -4522,10 +4951,34 @@ void TraceBbscNativeSaveEvidence(u64 offset, const GuestRegisterSnapshot& regist
 }
 
 bool IsBbscPostRestoreSaveSite(u64 offset) {
-    return offset == NativeSaveSerializeOffset || offset == NativeSaveSerializeEndOffset;
+    return offset == NativeSaveSerializeOffset || offset == NativeSaveSerializeEndOffset ||
+           offset == NativeEventFlagsSerializeBeginOffset ||
+           offset == NativeEventFlagsSerializeEndOffset;
+}
+
+bool IsBbscManagedCycleSite(u64 offset) {
+    return offset == NativeSaveSerializeOffset || offset == NativeSaveSerializeEndOffset ||
+           offset == NativeCycleIncrementOffset || offset == NativeCycleLuaIntentOffset ||
+           offset == NativeCycleEventIncrementOffset || offset == NativeCycleAppliedOffset ||
+           offset == NativeCycleLuaAppliedOffset || offset == NativeCycleEventAppliedOffset;
+}
+
+bool ShouldInstallBbscTraceSite(const TraceSite& site, bool identity_trace_enabled) {
+    return site.kind != TraceKind::SaveLifecycle || identity_trace_enabled ||
+           IsBbscPostRestoreSaveSite(site.offset) || IsBbscManagedCycleSite(site.offset);
+}
+
+bool IsManagedRecoveryProvidedTraceSite(const TraceSite& site) {
+    return bbsc_managed_recovery_hooks_installed && IsBbscManagedCycleSite(site.offset);
 }
 
 #ifndef _WIN32
+Core::Bbsc::Party::CharacterKey BbscCycleLookupKey(
+    const BbscNativeCharacterIdentity& identity);
+bool BbscManagedCycleAllowsReturnSerialization(
+    const BbscNativeCharacterIdentity& identity,
+    const Core::Bbsc::Party::CharacterKey& return_key);
+
 void ObserveBbscManagedReturnSerialization(u64 offset, const GuestRegisterSnapshot& registers) {
     using namespace Core::Bbsc::Party;
     if (!bbsc_managed_return_save_tracker.Armed() ||
@@ -4536,8 +4989,11 @@ void ObserveBbscManagedReturnSerialization(u64 offset, const GuestRegisterSnapsh
             bbsc_managed_return_save_tracker.AbortSerialization();
             return;
         }
-        const auto live_key = ReadBbscPartyCharacterKey();
-        if (!live_key || evidence->slot != live_key->slot) {
+        const auto& return_key = bbsc_managed_return_save_tracker.Key();
+        const auto identity = ReadBbscNativeCharacterIdentity();
+        if (!identity || !BbscRawIdentityMatchesPartyKey(*identity, return_key) ||
+            !BbscManagedCycleAllowsReturnSerialization(*identity, return_key) ||
+            evidence->slot != return_key.slot) {
             bbsc_managed_return_save_tracker.AbortSerialization();
             return;
         }
@@ -4546,8 +5002,8 @@ void ObserveBbscManagedReturnSerialization(u64 offset, const GuestRegisterSnapsh
             const s32 receipt_result = ReadBbscSelectedSaveReceipt(receipt);
             u64 current_generation = 0;
             if (receipt_result == 0) {
-                const auto expected_save = (std::filesystem::path{live_key->save_dir} /
-                                            ("userdata000" + std::to_string(live_key->slot))).string();
+                const auto expected_save = (std::filesystem::path{return_key.save_dir} /
+                                            ("userdata000" + std::to_string(return_key.slot))).string();
                 if (receipt.path != expected_save) {
                     bbsc_managed_return_save_tracker.AbortSerialization();
                     return;
@@ -4558,7 +5014,7 @@ void ObserveBbscManagedReturnSerialization(u64 offset, const GuestRegisterSnapsh
                 return;
             }
             if (evidence->stage != "serialize-begin" || evidence->bytes != 0x140000 ||
-                !bbsc_managed_return_save_tracker.SerializeBegin(*live_key, evidence->slot,
+                !bbsc_managed_return_save_tracker.SerializeBegin(return_key, evidence->slot,
                     static_cast<std::uintptr_t>(evidence->buffer), current_generation)) {
                 bbsc_managed_return_save_tracker.AbortSerialization();
             }
@@ -4568,20 +5024,17 @@ void ObserveBbscManagedReturnSerialization(u64 offset, const GuestRegisterSnapsh
             bbsc_managed_return_save_tracker.AbortSerialization();
             return;
         }
-        const auto identity = ReadBbscLiveCharacterIdentity();
-        if (!identity || identity->server_user != evidence->snapshot->server_user ||
+        if (identity->server_user != evidence->snapshot->server_user ||
             identity->server_character != evidence->snapshot->server_character ||
             identity->capped_cycle != evidence->snapshot->capped_cycle) {
             bbsc_managed_return_save_tracker.AbortSerialization();
             return;
         }
-        auto serialized_identity = *identity;
-        serialized_identity.server_user = evidence->snapshot->server_user;
-        serialized_identity.server_character = evidence->snapshot->server_character;
-        serialized_identity.capped_cycle = evidence->snapshot->capped_cycle;
-        const auto serialized_key = BbscPartyCharacterKey(serialized_identity);
+        // The native identity has been rechecked against the armed tagged epoch. The
+        // serialized native cycle is capped at 7 and cannot itself name that epoch.
+        const auto& serialized_key = return_key;
         if (!bbsc_managed_return_save_tracker.SerializeEnd(
-                *live_key, serialized_key, evidence->slot,
+                return_key, serialized_key, evidence->slot,
                 static_cast<std::uintptr_t>(evidence->buffer), evidence->success == 1,
                 evidence->snapshot->sha256)) {
             bbsc_managed_return_save_tracker.AbortSerialization();
@@ -4590,6 +5043,341 @@ void ObserveBbscManagedReturnSerialization(u64 offset, const GuestRegisterSnapsh
         }
     } catch (...) {
         bbsc_managed_return_save_tracker.AbortSerialization();
+    }
+}
+
+Core::Bbsc::Party::CharacterKey BbscCycleLookupKey(
+    const BbscNativeCharacterIdentity& identity) {
+    auto key = BbscPartyCharacterKey(identity);
+    // The journal path is per selected character. Use a valid native representative for
+    // capped-7 lookups; the persisted cycle record supplies the tagged epoch key.
+    if (key.cycle == 7) key.cycle = 6;
+    return key;
+}
+
+bool BbscManagedCycleAllowsReturnSerialization(
+    const BbscNativeCharacterIdentity& identity,
+    const Core::Bbsc::Party::CharacterKey& return_key) {
+    using namespace Core::Bbsc::Party;
+    if ((return_key.cycle & 0x80000000u) == 0) return true;
+    if (!BbscRawIdentityMatchesPartyKey(identity, return_key) ||
+        identity.capped_cycle != 7 || identity.persisted_capped_cycle != 7) return false;
+    const auto lookup = BbscCycleLookupKey(identity);
+    std::error_code ec;
+    const auto state = LoadManagedCycleEpoch(BbscPartyHomePath(lookup), lookup, ec);
+    return state && state->key == return_key &&
+        (state->stage == ManagedCycleStage::Stable ||
+         state->stage == ManagedCycleStage::SaveSerialized);
+}
+
+bool BbscCycleReceiptMatches(const Core::Bbsc::Party::CharacterKey& key,
+                             const BbscNativeCharacterIdentity& identity,
+                             BbNetSaveReceipt& receipt) {
+    const s32 result = ReadBbscSelectedSaveReceipt(receipt);
+    const auto expected_path = (std::filesystem::path{key.save_dir} /
+                                ("userdata000" + std::to_string(key.slot))).string();
+    if (result == ENOENT) return false;
+    return result == 0 && receipt.error == 0 && receipt.bytes == 0x140000 &&
+           receipt.generation != 0 && receipt.path == expected_path &&
+           identity.snapshot_sha256 == receipt.sha256;
+}
+
+bool BbscCycleSameSubject(const Core::Bbsc::Party::CharacterKey& left,
+                          const Core::Bbsc::Party::CharacterKey& right) {
+    return left.save_dir == right.save_dir && left.user == right.user &&
+           left.slot == right.slot && left.character == right.character;
+}
+
+bool BbscCycleProcessMatches(const Core::Bbsc::Party::ManagedCycleEpoch& state,
+                             const Core::Bbsc::Party::CharacterKey& lookup_key) {
+    const auto& provenance = bbsc_cycle_process_provenance;
+    if (!provenance.active || !BbscCycleSameSubject(provenance.key, lookup_key) ||
+        provenance.epoch != state.epoch ||
+        provenance.target_key_cycle != state.target_key_cycle) return false;
+    if (state.stage == Core::Bbsc::Party::ManagedCycleStage::Intent ||
+        state.stage == Core::Bbsc::Party::ManagedCycleStage::Applied)
+        return provenance.baseline_sha256 == state.baseline_sha256 &&
+               provenance.serialized_sha256.empty();
+    if (state.stage == Core::Bbsc::Party::ManagedCycleStage::TransitionSerialized ||
+        state.stage == Core::Bbsc::Party::ManagedCycleStage::SaveSerialized)
+        return provenance.baseline_sha256 == state.baseline_sha256 &&
+               provenance.serialized_sha256 == state.serialized_sha256;
+    return false;
+}
+
+void SetBbscCycleProcessProvenance(const Core::Bbsc::Party::ManagedCycleEpoch& state,
+                                   std::uint8_t previous_native_cycle,
+                                   const Core::Bbsc::Party::CharacterKey& lookup_key) {
+    bbsc_cycle_process_provenance = {lookup_key, state.epoch, state.target_key_cycle,
+        previous_native_cycle, state.baseline_sha256, state.serialized_sha256, true};
+}
+
+void ObserveBbscManagedCycleEvidence(u64 offset, const GuestRegisterSnapshot& registers) {
+    using namespace Core::Bbsc::Party;
+    if (offset != NativeCycleIncrementOffset && offset != NativeCycleLuaIncrementOffset &&
+        offset != NativeCycleLuaIntentOffset &&
+        offset != NativeCycleEventIncrementOffset && offset != NativeCycleAppliedOffset &&
+        offset != NativeCycleLuaAppliedOffset && offset != NativeCycleEventAppliedOffset &&
+        offset != NativeSaveSerializeOffset && offset != NativeSaveSerializeEndOffset) return;
+    try {
+        const auto evidence = ReadBbscNativeSaveEvidence(offset, registers);
+        const auto identity = ReadBbscNativeCharacterIdentity();
+        if (!evidence || !identity || identity->slot != evidence->slot) {
+            if (offset == NativeSaveSerializeOffset || offset == NativeSaveSerializeEndOffset) {
+                bbsc_cycle_serialize_token = {};
+                if (identity && bbsc_cycle_process_provenance.active &&
+                    !BbscCycleSameSubject(bbsc_cycle_process_provenance.key,
+                                          BbscCycleLookupKey(*identity)))
+                    bbsc_cycle_process_provenance = {};
+            }
+            return;
+        }
+        auto key = BbscCycleLookupKey(*identity);
+        if (bbsc_cycle_process_provenance.active &&
+            !BbscCycleSameSubject(bbsc_cycle_process_provenance.key, key))
+            bbsc_cycle_process_provenance = {};
+        const auto journal = BbscPartyHomePath(key);
+        std::error_code ec;
+        auto lease = CharacterLease::Acquire(journal, ec);
+        if (!lease) {
+            bbsc_cycle_serialize_token = {};
+            return;
+        }
+        auto state = LoadManagedCycleEpoch(journal, key, ec);
+        const bool increment_entry = offset == NativeCycleIncrementOffset ||
+                                     offset == NativeCycleLuaIntentOffset ||
+                                     offset == NativeCycleEventIncrementOffset;
+        const bool increment_applied = offset == NativeCycleAppliedOffset ||
+                                       offset == NativeCycleLuaAppliedOffset ||
+                                       offset == NativeCycleEventAppliedOffset;
+        if (increment_entry) {
+            const auto previous = static_cast<u8>(evidence->live_capped_cycle);
+            if (previous < 6 || previous > 7 || identity->persisted_capped_cycle != previous ||
+                identity->capped_cycle != previous ||
+                identity->snapshot_sha256.size() != 64) return;
+            if (!state && ec == std::errc::no_such_file_or_directory && previous == 6) {
+                ManagedCycleEpoch anchor;
+                anchor.key = key;
+                anchor.key.cycle = 6;
+                anchor.stage = ManagedCycleStage::Stable;
+                if (!StoreManagedCycleEpoch(*lease, anchor, ec)) return;
+                state = anchor;
+            }
+            if (!state || state->stage != ManagedCycleStage::Stable ||
+                (previous == 6 && state->key.cycle != 6) ||
+                (previous == 7 && (state->key.cycle & 0x80000000u) == 0)) return;
+            if (state->epoch != 0 && state->serialized_sha256 != identity->snapshot_sha256) return;
+            BbNetSaveReceipt receipt{};
+            const auto result = ReadBbscSelectedSaveReceipt(receipt);
+            u64 generation = 0;
+            if (result == 0) {
+                const auto expected = (std::filesystem::path{key.save_dir} /
+                                       ("userdata000" + std::to_string(key.slot))).string();
+                if (receipt.path != expected || receipt.sha256 != identity->snapshot_sha256 ||
+                    receipt.bytes != 0x140000 || receipt.error != 0) return;
+                generation = receipt.generation;
+            } else if (result != ENOENT) return;
+            const auto intent = BeginManagedCycleIntent(*state, previous, generation,
+                                                        identity->snapshot_sha256);
+            if (intent && StoreManagedCycleEpoch(*lease, *intent, ec)) {
+                SetBbscCycleProcessProvenance(*intent, previous, key);
+                LOG_INFO(Debug, "BBSC managed cycle: durable increment intent for native count {}", previous);
+            }
+            return;
+        }
+        if (increment_applied) {
+            if (!state || state->stage != ManagedCycleStage::Intent ||
+                identity->capped_cycle != 7) return;
+            const auto applied = ObserveManagedCycleApplied(
+                *state, static_cast<u8>(evidence->previous_capped_cycle),
+                static_cast<u8>(evidence->live_capped_cycle));
+            if (applied && StoreManagedCycleEpoch(*lease, *applied, ec)) {
+                SetBbscCycleProcessProvenance(*applied,
+                    static_cast<u8>(evidence->previous_capped_cycle), key);
+                LOG_INFO(Debug, "BBSC managed cycle: native increment applied; awaiting save hash/receipt");
+            }
+            return;
+        }
+        if (offset == NativeSaveSerializeOffset) {
+            bbsc_cycle_serialize_token = {};
+            if (evidence->stage != "serialize-begin" || evidence->buffer == 0 ||
+                evidence->bytes != 0x140000 || identity->capped_cycle != 7 || !state ||
+                (state->stage != ManagedCycleStage::Applied &&
+                 state->stage != ManagedCycleStage::TransitionSerialized &&
+                 state->stage != ManagedCycleStage::SaveSerialized &&
+                 !(state->stage == ManagedCycleStage::Stable &&
+                   (state->key.cycle & 0x80000000u)))) return;
+            BbNetSaveReceipt receipt{};
+            u64 generation = 0;
+            const s32 result = ReadBbscSelectedSaveReceipt(receipt);
+            const auto expected = (std::filesystem::path{key.save_dir} /
+                                   ("userdata000" + std::to_string(key.slot))).string();
+            if (result == 0) {
+                if (receipt.path != expected || receipt.bytes != 0x140000 || receipt.error != 0 ||
+                    receipt.sha256 != identity->snapshot_sha256) return;
+                generation = receipt.generation;
+            } else if (result != ENOENT) return;
+            if (state->stage == ManagedCycleStage::Stable && identity->persisted_capped_cycle != 7)
+                return;
+            const bool active_process = BbscCycleProcessMatches(*state, key);
+            if (!active_process) {
+                // Applied + preimage is only a restart cancellation for a native-6
+                // character. A live cap-7 image with an unknown producer is not proof.
+                if (state->stage == ManagedCycleStage::Applied &&
+                    (identity->capped_cycle != 6 || identity->persisted_capped_cycle != 6)) return;
+                const auto rebased = RebaseManagedCycleForResume(*state,
+                    identity->snapshot_sha256, generation);
+                if (!rebased || !StoreManagedCycleEpoch(*lease, *rebased, ec)) return;
+                state = rebased;
+                if (state->stage == ManagedCycleStage::Applied ||
+                    state->stage == ManagedCycleStage::SaveSerialized)
+                    SetBbscCycleProcessProvenance(*state, identity->capped_cycle, key);
+            }
+            const auto& expected_hash = state->stage == ManagedCycleStage::Applied ||
+                                               state->stage == ManagedCycleStage::SaveSerialized
+                                           ? state->baseline_sha256 : state->serialized_sha256;
+            if (identity->snapshot_sha256 != expected_hash) return;
+            bbsc_cycle_serialize_token = {key, static_cast<u8>(evidence->slot), evidence->buffer,
+                                          generation, true};
+            return;
+        }
+        if (offset == NativeSaveSerializeEndOffset) {
+            const auto token = bbsc_cycle_serialize_token;
+            bbsc_cycle_serialize_token = {};
+            if (!token.active || token.character != key || token.slot != evidence->slot ||
+                token.buffer != evidence->buffer || evidence->stage != "serialize-end" ||
+                evidence->success != 1 || !evidence->snapshot ||
+                evidence->snapshot->server_user != identity->server_user ||
+                evidence->snapshot->server_character != identity->server_character ||
+                evidence->snapshot->capped_cycle != 7 || !state) return;
+            const auto serialized = ObserveManagedCycleSerializeEnd(
+                *state, evidence->snapshot->sha256, token.generation);
+            if (serialized && StoreManagedCycleEpoch(*lease, *serialized, ec)) {
+                SetBbscCycleProcessProvenance(*serialized,
+                    bbsc_cycle_process_provenance.active
+                        ? bbsc_cycle_process_provenance.previous_native_cycle
+                        : identity->capped_cycle,
+                    key);
+                LOG_INFO(Debug, "BBSC managed cycle: expected serialized hash is durable before save copy");
+            }
+        }
+    } catch (...) {
+        bbsc_cycle_serialize_token = {};
+        LOG_ERROR(Debug, "BBSC managed cycle evidence failed; co-op identity remains unavailable");
+    }
+}
+
+void TickBbscManagedCycleReceipt() {
+    using namespace Core::Bbsc::Party;
+    try {
+        const auto identity = ReadBbscNativeCharacterIdentity();
+        if (!identity) return;
+        auto key = BbscCycleLookupKey(*identity);
+        if (bbsc_cycle_process_provenance.active &&
+            !BbscCycleSameSubject(bbsc_cycle_process_provenance.key, key))
+            bbsc_cycle_process_provenance = {};
+        const auto journal = BbscPartyHomePath(key);
+        std::error_code ec;
+        auto state = LoadManagedCycleEpoch(journal, key, ec);
+        const bool active_process = state && BbscCycleProcessMatches(*state, key);
+        if (bbsc_cycle_process_provenance.active && !active_process && state &&
+            BbscCycleSameSubject(bbsc_cycle_process_provenance.key, key))
+            bbsc_cycle_process_provenance = {};
+
+        // A restart from the recognized preimage of a native 6->7 transition may
+        // cancel that candidate and resume native NG6. Never use a cap-7 image or
+        // an unknown hash to infer whether the saturated 7->7 increment persisted.
+        if (!active_process && identity->capped_cycle == 6 &&
+            identity->persisted_capped_cycle == 6 && state &&
+            (state->stage == ManagedCycleStage::Intent ||
+             state->stage == ManagedCycleStage::Applied ||
+             state->stage == ManagedCycleStage::TransitionSerialized ||
+             state->stage == ManagedCycleStage::SaveSerialized)) {
+            BbNetSaveReceipt selected{};
+            const s32 selected_result = ReadBbscSelectedSaveReceipt(selected);
+            u64 generation = 0;
+            const auto expected_path = (std::filesystem::path{key.save_dir} /
+                                        ("userdata000" + std::to_string(key.slot))).string();
+            if (selected_result == 0) {
+                if (selected.path != expected_path || selected.bytes != 0x140000 ||
+                    selected.error != 0 || selected.sha256 != identity->snapshot_sha256) return;
+                generation = selected.generation;
+            } else if (selected_result != ENOENT || selected.path != expected_path ||
+                       selected.generation != 0 || selected.bytes != 0 ||
+                       selected.sha256[0] != '\0') return;
+            const auto resumed = RebaseManagedCycleForResume(*state,
+                identity->snapshot_sha256, generation);
+            if (!resumed || resumed->stage != ManagedCycleStage::Stable) return;
+            auto lease = CharacterLease::Acquire(journal, ec);
+            if (lease && StoreManagedCycleEpoch(*lease, *resumed, ec)) {
+                bbsc_cycle_process_provenance = {};
+                LOG_INFO(Debug, "BBSC managed cycle: recognized native-6 preimage after restart; candidate epoch was not saved");
+            }
+            return;
+        }
+
+        // Keep an in-process expected preimage alive through native SerializeEnd and
+        // the asynchronous copy receipt. Reconciliation here would mistake normal
+        // copy latency for a restart and erase freshly observed producer provenance.
+        if (active_process && state->stage != ManagedCycleStage::TransitionSerialized &&
+            state->stage != ManagedCycleStage::SaveSerialized) return;
+        if (identity->capped_cycle != 7 || identity->persisted_capped_cycle != 7) return;
+        if (!state && ec == std::errc::no_such_file_or_directory) {
+            // Establish only a new managed namespace anchor. StoreManagedCycleEpoch rejects
+            // this if any prior home journal exists, even a completed one. This records no
+            // historical NG number; it binds only the selected current cap-7 save hash.
+            BbNetSaveReceipt receipt{};
+            const s32 result = ReadBbscSelectedSaveReceipt(receipt);
+            u64 generation = 0;
+            const auto expected_path = (std::filesystem::path{key.save_dir} /
+                                        ("userdata000" + std::to_string(key.slot))).string();
+            if (result == 0) {
+                if (receipt.path != expected_path || receipt.bytes != 0x140000 ||
+                    receipt.error != 0 || receipt.sha256 != identity->snapshot_sha256) return;
+                generation = receipt.generation;
+            } else if (result != ENOENT) return;
+            ManagedCycleEpoch anchor;
+            anchor.key = key;
+            anchor.key.cycle = 0x80000001u;
+            anchor.epoch = 1;
+            anchor.target_key_cycle = anchor.key.cycle;
+            anchor.serialized_generation = generation;
+            anchor.serialized_sha256 = identity->snapshot_sha256;
+            auto lease = CharacterLease::Acquire(journal, ec);
+            if (lease && StoreManagedCycleEpoch(*lease, anchor, ec))
+                LOG_INFO(Debug, "BBSC managed cycle: anchored new ordinal 1 to selected capped-7 save; historical NG count is unknown");
+            return;
+        }
+        if (!state || (state->stage != ManagedCycleStage::TransitionSerialized &&
+                       state->stage != ManagedCycleStage::SaveSerialized)) return;
+        BbNetSaveReceipt receipt{};
+        if (!BbscCycleReceiptMatches(key, *identity, receipt)) return;
+        if (identity->snapshot_sha256 == state->serialized_sha256) {
+            const auto committed = CommitManagedCycleEpoch(*state, receipt.generation,
+                                                           receipt.sha256, identity->snapshot_sha256);
+            if (committed) {
+                auto lease = CharacterLease::Acquire(journal, ec);
+                if (lease && StoreManagedCycleEpoch(*lease, *committed, ec)) {
+                    bbsc_cycle_process_provenance = {};
+                    LOG_INFO(Debug, "BBSC managed cycle: selected save receipt committed managed epoch {}",
+                             committed->epoch);
+                }
+                return;
+            }
+        }
+        if (active_process) return;
+        const auto rebased = RebaseManagedCycleForResume(*state, identity->snapshot_sha256,
+                                                         receipt.generation);
+        if (!rebased) return;
+        auto lease = CharacterLease::Acquire(journal, ec);
+        if (lease && StoreManagedCycleEpoch(*lease, *rebased, ec)) {
+            if (rebased->stage == ManagedCycleStage::Applied ||
+                rebased->stage == ManagedCycleStage::SaveSerialized)
+                SetBbscCycleProcessProvenance(*rebased, identity->capped_cycle, key);
+            LOG_INFO(Debug, "BBSC managed cycle: recognized selected hash; requiring a new serialize/receipt in this process");
+        }
+    } catch (...) {
+        LOG_ERROR(Debug, "BBSC managed cycle receipt check failed closed");
     }
 }
 #endif
@@ -5393,7 +6181,6 @@ void TickBbscFollowHost() {
 // is before the new map's events first run. Global groups (flags below 100000: story, NPC quests)
 // are left alone. Only the live table of the host's world changes: while a guest, the save is
 // written from the own-world snapshot (0x0156AA50, global+0x1592 == 0), as in vanilla co-op.
-constexpr u64 WorldFlagManPointerOffset = 0x0553B100;
 constexpr std::array<u32, 4> BbscWorldFlagKinds{1, 6, 7, 5};
 constexpr size_t BbscWorldGroupCount = BbscWorldFlagKinds.size() * 10;
 constexpr size_t BbscWorldAppliedGroups = 30; // kinds 1, 6, 7; the item pickups (kind 5) after them
@@ -6368,6 +7155,7 @@ struct BbscManagedOwnWorldRecovery {
     std::map<u32, std::array<u8, BbscWorldGroupBytes>> groups;
     Core::Bbsc::Party::CharacterLease lease;
     u64 baseline_generation{};
+    Core::Bbsc::Party::PartyId party{};
     Core::Bbsc::Party::Destination destination;
     bool native_return_selected{};
 };
@@ -6440,6 +7228,7 @@ std::optional<BbscManagedOwnWorldRecovery> LoadBbscManagedOwnWorldRecovery(
     if (!BeginReturnSaveFence(*record, baseline_generation) ||
         !StoreJournal(*lease, *record, ec)) return std::nullopt;
     return BbscManagedOwnWorldRecovery{std::move(*groups), std::move(*lease), baseline_generation,
+                                       record->party,
                                        record->fallback, record->native_return_selected};
 }
 #endif
@@ -6558,6 +7347,11 @@ void TickBbscManagedReturnSaveReceipt() {
     auto record = LoadJournal(path, *key, ec);
     if (!record || !ConfirmReturnedSave(*record, *proof) || !StoreJournal(*lease, *record, ec)) return;
     bbsc_managed_return_save_tracker.Disarm();
+    bbsc_offline_return_selected = false;
+    bbsc_offline_return_key.reset();
+    bbsc_offline_return_party.reset();
+    bbsc_offline_return_warp_attempts = 0;
+    bbsc_offline_return_last_attempt_ms = 0;
     LOG_INFO(Debug, "BBSC managed return: native home placement and selected-character post-restore save are confirmed; journal completed");
 }
 #endif
@@ -6610,7 +7404,9 @@ void TickBbscOwnWorld() {
 // events read the flags (and before shared progress merges the host's into them).
 void RestoreBbscOwnWorldAtLoad(bool managed_recovery_boundary = false) {
     if (!BbscHomeForOwnWorld()) return;
-    const auto key = ReadBbscPartyCharacterKey();
+    // The respawn resolver executes during native loading. Keep ordinary readiness strict, but
+    // permit that one verified boundary while still requiring exact selected-save/native IDs.
+    const auto key = ReadBbscPartyCharacterKey(managed_recovery_boundary);
 #ifndef _WIN32
     const auto managed_state = key ? InspectBbscManagedHome(*key) : BbscManagedHomeState::Missing;
     if (key && managed_state == BbscManagedHomeState::Pending) {
@@ -6625,8 +7421,18 @@ void RestoreBbscOwnWorldAtLoad(bool managed_recovery_boundary = false) {
                 const size_t expected_groups = bbsc_own_world.size();
                 const size_t restored = RestoreBbscOwnWorld("managed restart recovery");
                 if (expected_groups != 0 && restored == expected_groups) {
+                    const bool same_return = bbsc_offline_return_key &&
+                        *bbsc_offline_return_key == *key && bbsc_offline_return_party &&
+                        *bbsc_offline_return_party == recovery->party;
+                    if (!same_return) {
+                        bbsc_offline_return_warp_attempts = 0;
+                        bbsc_offline_return_last_attempt_ms = 0;
+                    }
                     bbsc_managed_return_save_tracker.Arm(*key, recovery->baseline_generation,
                         recovery->destination, recovery->native_return_selected);
+                    bbsc_offline_return_selected = false;
+                    bbsc_offline_return_key = *key;
+                    bbsc_offline_return_party = recovery->party;
                 }
             }
         }
@@ -7124,13 +7930,59 @@ struct BbscPreparedPartyHome {
 std::filesystem::path BbscPartyHomePath(const Core::Bbsc::Party::CharacterKey& key) {
     std::string id;
     for (auto byte : key.character) id += fmt::format("{:02x}", byte);
-    return std::filesystem::path{key.save_dir} / ".bbsc-party" /
-           fmt::format("home-{}-{}.bin", key.slot, id);
+    const auto name = (key.cycle & 0x80000000u)
+        ? fmt::format("home-{}-{}-cycle-{:08x}.bin", key.slot, id, key.cycle)
+        : fmt::format("home-{}-{}.bin", key.slot, id);
+    return std::filesystem::path{key.save_dir} / ".bbsc-party" / name;
+}
+
+bool StoreBbscSelectedSaveBackup(const Core::Bbsc::Party::CharacterLease& lease,
+                                 const Core::Bbsc::Party::CharacterKey& key,
+                                 const BbscNativeCharacterIdentity& identity,
+                                 std::error_code& ec) {
+    BbNetSaveReceipt before{};
+    const auto receipt_result = ReadBbscSelectedSaveReceipt(before);
+    if (receipt_result != 0 || before.error != 0 || before.generation == 0 ||
+        before.bytes != 0x140000 || before.path != identity.save_file.string() ||
+        before.sha256[0] == '\0') {
+        ec = std::make_error_code(std::errc::no_message_available);
+        return false;
+    }
+    std::ifstream input(identity.save_file, std::ios::binary | std::ios::ate);
+    if (!input || input.tellg() != 0x140000) {
+        ec = std::make_error_code(std::errc::bad_message);
+        return false;
+    }
+    std::vector<u8> bytes(0x140000);
+    input.seekg(0);
+    if (!input.read(reinterpret_cast<char*>(bytes.data()), bytes.size())) {
+        ec = std::make_error_code(std::errc::io_error);
+        return false;
+    }
+    const auto saved = ReadBbscSerializedSnapshot(bytes);
+    if (!saved || saved->server_user != identity.server_user ||
+        saved->server_character != identity.server_character ||
+        saved->capped_cycle != identity.capped_cycle || saved->sha256 != before.sha256) {
+        ec = std::make_error_code(std::errc::bad_message);
+        return false;
+    }
+    BbNetSaveReceipt after{};
+    if (ReadBbscSelectedSaveReceipt(after) != 0 || after.error != 0 ||
+        after.generation != before.generation || after.bytes != before.bytes ||
+        std::string_view{after.path} != before.path ||
+        std::string_view{after.sha256} != before.sha256) {
+        ec = std::make_error_code(std::errc::state_not_recoverable);
+        return false;
+    }
+    return Core::Bbsc::Party::StoreSelectedSaveBackup(
+        lease, key, before.path, identity.server_user, identity.server_character,
+        before.generation, before.sha256, bytes, ec);
 }
 
 // The caller still needs capability, backup and native admission checks before it may proceed.
 std::optional<BbscPreparedPartyHome> PrepareBbscNativePartyHome(
-    Core::Bbsc::Party::PartyId party, std::error_code& ec) {
+    Core::Bbsc::Party::PartyId party, std::error_code& ec,
+    bool backup_selected_save = false) {
     using namespace Core::Bbsc::Party;
     ec.clear();
     const auto key = ReadBbscPartyCharacterKey();
@@ -7159,6 +8011,27 @@ std::optional<BbscPreparedPartyHome> PrepareBbscNativePartyHome(
         }
     }
     const auto path = BbscPartyHomePath(*key);
+    std::optional<CharacterLease> old_cycle_lease;
+    std::optional<Journal> old_cycle_home;
+    if (key->cycle & 0x80000000u) {
+        if (HasUnresolvedPriorCycleHome(path, *key, ec)) {
+            if (!ec) ec = std::make_error_code(std::errc::operation_in_progress);
+            return std::nullopt;
+        }
+        if (ec) return std::nullopt;
+        auto old_key = *key;
+        const auto ordinal = key->cycle & 0x7fffffffu;
+        old_key.cycle = ordinal == 1 ? 6 : (0x80000000u | (ordinal - 1));
+        const auto old_path = BbscPartyHomePath(old_key);
+        old_cycle_lease = CharacterLease::Acquire(old_path, ec);
+        if (!old_cycle_lease) return std::nullopt;
+        old_cycle_home = LoadJournal(old_path, old_key, ec);
+        if (!old_cycle_home && ec != std::errc::no_such_file_or_directory) return std::nullopt;
+        if (old_cycle_home && old_cycle_home->phase != Phase::Complete) {
+            ec = std::make_error_code(std::errc::operation_in_progress);
+            return std::nullopt;
+        }
+    }
     auto lease = CharacterLease::Acquire(path, ec);
     if (!lease) return std::nullopt;
     const auto previous = LoadJournal(path, *key, ec);
@@ -7176,10 +8049,19 @@ std::optional<BbscPreparedPartyHome> PrepareBbscNativePartyHome(
         record = *next;
     } else {
         if (ec != std::errc::no_such_file_or_directory) return std::nullopt;
-        record.key = *key;
-        record.party = party;
-        record.origin = home;
-        record.fallback = lamp;
+        if (old_cycle_home) {
+            const auto migrated = MigrateCompletedCycleHome(*old_cycle_home, *key, party, home, lamp);
+            if (!migrated) {
+                ec = std::make_error_code(std::errc::invalid_argument);
+                return std::nullopt;
+            }
+            record = *migrated;
+        } else {
+            record.key = *key;
+            record.party = party;
+            record.origin = home;
+            record.fallback = lamp;
+        }
     }
     const auto payload = SerializeBbscOwnWorldSnapshot();
     if (!payload ||
@@ -7187,32 +8069,66 @@ std::optional<BbscPreparedPartyHome> PrepareBbscNativePartyHome(
         if (!ec) ec = std::make_error_code(std::errc::no_message_available);
         return std::nullopt;
     }
+    if (backup_selected_save) {
+        const auto identity = ReadBbscNativeCharacterIdentity();
+        if (!identity || !BbscRawIdentityMatchesPartyKey(*identity, *key) ||
+            !StoreBbscSelectedSaveBackup(*lease, *key, *identity, ec)) return std::nullopt;
+    }
     if (!StoreJournal(*lease, record, ec)) return std::nullopt;
     return BbscPreparedPartyHome{std::move(record), std::move(*lease)};
 }
 
 bool ApplyBbscPartyRecoveryJoinGuard(const GuestRegisterSnapshot& registers) {
     if (ReadGuestAscii(registers.rsi, 64) != "JoinSession_White") return false;
-    const auto identity = ReadBbscLiveCharacterIdentity();
-    if (!identity) return false; // No managed character binding; the existing join path is unchanged.
-    const auto key = BbscPartyCharacterKey(*identity); // Lookup only; never authorizes cycle adoption.
-    const auto path = BbscPartyHomePath(key);
-    std::error_code ec;
-    const auto status = std::filesystem::symlink_status(path, ec);
-    if (ec == std::errc::no_such_file_or_directory ||
-        (!ec && status.type() == std::filesystem::file_type::not_found)) return false;
-    bool blocked = true;
-    const auto persisted = !ec && std::filesystem::is_regular_file(status)
-        ? ReadBbscNativeCharacterIdentity() : std::nullopt;
-    if (persisted && persisted->capped_cycle < 7 &&
-        persisted->capped_cycle == persisted->persisted_capped_cycle &&
-        BbscPartyCharacterKey(*persisted) == key) {
-        auto lease = Core::Bbsc::Party::CharacterLease::Acquire(path, ec);
-        if (lease) {
-            const auto record = Core::Bbsc::Party::LoadJournal(path, key, ec);
-            blocked = !record || record->phase != Core::Bbsc::Party::Phase::Complete;
+    const auto live = ReadBbscLiveCharacterIdentity();
+    if (!live) return false; // No selected character binding: preserve legacy joins.
+    const auto strong_key = ReadBbscPartyCharacterKey();
+    auto lookup_key = BbscPartyCharacterKey(*live); // IDs/slot locate a record even if its save proof is bad.
+    std::optional<Core::Bbsc::Party::CharacterKey> key = strong_key;
+    if (!key && live->capped_cycle == 7) {
+        auto epoch_key = lookup_key;
+        epoch_key.cycle = 6;
+        std::error_code epoch_error;
+        const auto epoch = Core::Bbsc::Party::LoadManagedCycleEpoch(
+            BbscPartyHomePath(epoch_key), epoch_key, epoch_error);
+        if (epoch && epoch->stage == Core::Bbsc::Party::ManagedCycleStage::Stable && epoch->epoch != 0)
+            key = epoch->key;
+        else {
+            const_cast<GuestRegisterSnapshot&>(registers).rsi = 0;
+            LOG_WARNING(Debug, "BBSC join blocked: saturated native cycle has no verified managed epoch");
+            return true;
         }
     }
+    if (!key) key = lookup_key;
+    const auto path = BbscPartyHomePath(*key);
+    std::error_code ec;
+    const auto status = std::filesystem::symlink_status(path, ec);
+    const bool missing = ec == std::errc::no_such_file_or_directory ||
+        (!ec && status.type() == std::filesystem::file_type::not_found);
+    bool blocked = false;
+    if (ec && !missing) blocked = true;
+    if (key->cycle & 0x80000000u) {
+        std::error_code history_error;
+        if (Core::Bbsc::Party::HasUnresolvedPriorCycleHome(path, *key, history_error)) blocked = true;
+        if (history_error) { ec = history_error; blocked = true; }
+    }
+    if (!missing && !blocked) {
+        if (status.type() != std::filesystem::file_type::regular) {
+            blocked = true;
+        } else {
+            auto lease = Core::Bbsc::Party::CharacterLease::Acquire(path, ec);
+            const auto record = lease ? Core::Bbsc::Party::LoadJournal(path, *key, ec) : std::nullopt;
+            if (!record || record->phase != Core::Bbsc::Party::Phase::Complete) {
+                blocked = true;
+            } else {
+                const auto persisted = ReadBbscNativeCharacterIdentity();
+                blocked = !strong_key || !persisted ||
+                    persisted->capped_cycle != persisted->persisted_capped_cycle ||
+                    BbscPartyCharacterKey(*persisted) != *strong_key || *strong_key != *key;
+            }
+        }
+    }
+    if (missing && !blocked) return false; // No matching managed record: legacy join semantics.
     if (!blocked) return false;
     // 01339898 branches on a null name to the native zero-return epilogue at 01339B22.
     const_cast<GuestRegisterSnapshot&>(registers).rsi = 0;
@@ -9019,6 +9935,158 @@ std::optional<Core::Bbsc::Party::Destination> BeginBbscManagedReturnSelection() 
     if (!StoreJournal(*lease, *record, ec))
         return std::nullopt;
     return record->fallback;
+}
+
+bool ApplyBbscOfflineRecoveryReturnAtSelector() {
+    using namespace Core::Bbsc::Party;
+    const u64 global = GetGlobalState();
+    if (!HasMemoryAccess(global + 0x1520, sizeof(u8), MemoryProt::CpuReadWrite) ||
+        !HasMemoryAccess(global + 0x1528, sizeof(s32), MemoryProt::CpuReadWrite)) return false;
+    const auto key = ReadBbscPartyCharacterKey();
+    if (!key || !bbsc_managed_return_save_tracker.Matches(*key) ||
+        (bbsc_offline_return_key && *bbsc_offline_return_key != *key)) {
+        bbsc_managed_return_save_tracker.Disarm();
+        bbsc_offline_return_selected = false;
+        bbsc_offline_return_key.reset();
+        bbsc_offline_return_party.reset();
+        bbsc_offline_return_warp_attempts = 0;
+        return false;
+    }
+    const auto path = BbscPartyHomePath(*key);
+    std::error_code ec;
+    auto lease = CharacterLease::Acquire(path, ec);
+    if (!lease) return false;
+    auto record = LoadJournal(path, *key, ec);
+    const auto expected = bbsc_managed_return_save_tracker.ExpectedDestination();
+    if (!record || record->phase != Phase::Returning ||
+        record->world_snapshot.bytes == 0 || !expected || record->fallback != *expected ||
+        (bbsc_offline_return_party && *bbsc_offline_return_party != record->party)) return false;
+    if (!record->native_return_selected) {
+        BbNetSaveReceipt receipt{};
+        const s32 result = ReadBbscSelectedSaveReceipt(receipt);
+        u64 generation = 0;
+        const auto expected_save = (std::filesystem::path{key->save_dir} /
+                                    ("userdata000" + std::to_string(key->slot))).string();
+        if (result == 0) {
+            if (receipt.path != expected_save || receipt.error != 0) return false;
+            generation = receipt.generation;
+        } else if (result != ENOENT) {
+            return false;
+        }
+        if (!BeginReturnSaveFence(*record, generation)) return false;
+        record->native_return_selected = true;
+        if (!StoreJournal(*lease, *record, ec)) return false;
+        bbsc_managed_return_save_tracker.Arm(*key, record->save_generation,
+                                              record->fallback, true);
+        bbsc_offline_return_warp_attempts = 0;
+    }
+    const auto destination = expected;
+    if (!destination || destination->map == 0 || destination->lamp < 0) return false;
+    // SummonedPlacement.SelectMap's verified zero flag branch resolves this native point ID and
+    // its packed map itself. Never pass the record's zero/off-map XYZ metadata to the engine.
+    WriteValue<s32>(global, 0x1528, destination->lamp);
+    WriteValue<u8>(global, 0x1520, 0);
+    bbsc_offline_return_selected = true;
+    bbsc_offline_return_key = *key;
+    bbsc_offline_return_party = record->party;
+    LOG_INFO(Debug, "BBSC offline recovery: selected native respawn point {} for map {:#x}",
+             destination->lamp, destination->map);
+    return true;
+}
+
+void TickBbscOfflineManagedReturnWarp() {
+    using namespace Core::Bbsc::Party;
+    if (!bbsc_managed_return_save_tracker.Armed()) return;
+    const u64 global = GetGlobalState();
+    if (ReadValue<u8>(global, 0x08) != 0) return; // Preserve tracker across native loading.
+    const auto key = ReadBbscPartyCharacterKey();
+    if (!key || !bbsc_managed_return_save_tracker.Matches(*key) ||
+        (bbsc_offline_return_key && *bbsc_offline_return_key != *key)) {
+        bbsc_managed_return_save_tracker.Disarm();
+        bbsc_offline_return_selected = false;
+        bbsc_offline_return_key.reset();
+        bbsc_offline_return_party.reset();
+        bbsc_offline_return_warp_attempts = 0;
+        return;
+    }
+    const auto expected = bbsc_managed_return_save_tracker.ExpectedDestination();
+    const auto path = BbscPartyHomePath(*key);
+    std::error_code ec;
+    auto lease = CharacterLease::Acquire(path, ec);
+    auto record = lease ? LoadJournal(path, *key, ec) : std::nullopt;
+    if (!record || record->phase != Phase::Returning || record->world_snapshot.bytes == 0 ||
+        !expected || record->fallback != *expected ||
+        (bbsc_offline_return_party && *bbsc_offline_return_party != record->party)) {
+        // Keep the durable journal pending, but never apply an old character's selector to a new one.
+        bbsc_managed_return_save_tracker.Disarm();
+        bbsc_offline_return_selected = false;
+        bbsc_offline_return_key.reset();
+        bbsc_offline_return_party.reset();
+        bbsc_offline_return_warp_attempts = 0;
+        LOG_WARNING(Debug, "BBSC managed return: current character journal is missing, foreign, or invalid; native reload withheld");
+        return;
+    }
+    if (bbsc_managed_return_save_tracker.DestinationConfirmed()) return;
+    if (bbsc_offline_return_warp_attempts >= 3) return;
+    const s64 now = SteadyNowMs();
+    if (now - bbsc_offline_return_last_attempt_ms < 5'000) return;
+    if (!BbscHomeForOwnWorld() || ReadValue<u8>(global, 0x08) != 0 ||
+        !HasMemoryAccess(global + 0x1520, sizeof(u8), MemoryProt::CpuReadWrite) ||
+        !HasMemoryAccess(global + 0x1528, sizeof(s32), MemoryProt::CpuReadWrite)) return;
+    const u64 player = GetLocalPlayerCharacter();
+    if (player == 0 || GetCharacterHp(player) <= 0) return;
+    const auto destination = expected;
+    if (!destination || destination->map == 0 || destination->lamp < 0 || image_base == 0 ||
+        SelectSummonedPlacementOffset >= MemoryPatcher::g_eboot_image_size ||
+        StageTransitionOffset >= MemoryPatcher::g_eboot_image_size) return;
+
+    // A load can arrive at a saved host location without visiting the selector hook. Persist the
+    // native point choice here, then ask the game's own selector and StageTransition to reload.
+    // The fallback is a point ID only; this path never manufactures XYZ coordinates.
+    if (!record->native_return_selected) {
+        BbNetSaveReceipt receipt{};
+        const s32 result = ReadBbscSelectedSaveReceipt(receipt);
+        u64 generation = 0;
+        const auto expected_save = (std::filesystem::path{key->save_dir} /
+                                    ("userdata000" + std::to_string(key->slot))).string();
+        if (result == 0) {
+            if (receipt.path != expected_save || receipt.error != 0) return;
+            generation = receipt.generation;
+        } else if (result != ENOENT) {
+            return;
+        }
+        if (!BeginReturnSaveFence(*record, generation)) return;
+        record->native_return_selected = true;
+        if (!StoreJournal(*lease, *record, ec)) return;
+        bbsc_managed_return_save_tracker.Arm(*key, record->save_generation,
+                                              record->fallback, true);
+        bbsc_offline_return_warp_attempts = 0;
+    }
+    WriteValue<u8>(global, 0x1520, 0);
+    WriteValue<s32>(global, 0x1528, destination->lamp);
+    bbsc_offline_return_selected = true;
+    bbsc_offline_return_key = *key;
+    bbsc_offline_return_party = record->party;
+    using PlacementSelector = bool PS4_SYSV_ABI (*)(u64 context, s32 warp_info_id);
+    using StageTransition = s32 PS4_SYSV_ABI (*)();
+    const bool selected = reinterpret_cast<PlacementSelector>(image_base + SelectSummonedPlacementOffset)(0, -1);
+    const u32 selected_map = ReadValue<u32>(global, 0x0C);
+    if (!selected || selected_map != destination->map) {
+        LOG_WARNING(Debug, "BBSC offline recovery: native selector returned {} for map {:#x}, expected {:#x}; retrying",
+                    selected, selected_map, destination->map);
+        bbsc_offline_return_last_attempt_ms = now;
+        ++bbsc_offline_return_warp_attempts;
+        return;
+    }
+    const s32 transition = reinterpret_cast<StageTransition>(image_base + StageTransitionOffset)();
+    bbsc_offline_return_last_attempt_ms = now;
+    ++bbsc_offline_return_warp_attempts;
+    LOG_INFO(Debug, "BBSC offline recovery: native return reload requested for respawn point {} map {:#x}; transition {} loading {}",
+             destination->lamp, destination->map, transition,
+             ReadValue<u8>(global, 0x08) != 0);
+    if (bbsc_offline_return_warp_attempts == 3) {
+        LOG_WARNING(Debug, "BBSC managed return: reached 3 native reload attempts without confirmed destination; journal remains pending for manual recovery");
+    }
 }
 #endif
 
@@ -14617,7 +15685,9 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
 
     const auto& site = Sites[tag];
     if (site.kind == TraceKind::SaveLifecycle) {
+        ObserveBbscNativeFlagProof(site.offset, *registers);
 #ifndef _WIN32
+        ObserveBbscManagedCycleEvidence(site.offset, *registers);
         ObserveBbscManagedReturnSerialization(site.offset, *registers);
 #endif
         TraceBbscNativeSaveEvidence(site.offset, *registers);
@@ -14666,7 +15736,14 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         ApplyBbscSharedProgressAtLoad();
     }
     if (site.offset == 0x01332C1B) { // SummonedPlacement.SelectMap: a load picks its map
-        GuardBbscStrayForcedWarp(*registers);
+        if (bbsc_recovery_only_mode ||
+            (bbsc_managed_recovery_hooks_installed && !EnvFlagEnabled("BB_BBSC"))) {
+#ifndef _WIN32
+            ApplyBbscOfflineRecoveryReturnAtSelector();
+#endif
+        } else {
+            GuardBbscStrayForcedWarp(*registers);
+        }
     }
     if (site.offset == BbscPersistNoOpOffset) {
         if (ArmBbscRejoin()) {
@@ -14674,6 +15751,17 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         }
     }
     if (site.offset == BbscGameTickOffset) {
+        if (EnvFlagEnabled("BB_BBSC")) TickBbscAdmissionCoordinator();
+#ifndef _WIN32
+        TickBbscNativeFlagProofReceipt();
+        TickBbscManagedCycleReceipt();
+        if (bbsc_recovery_only_mode ||
+            (bbsc_managed_recovery_hooks_installed && !EnvFlagEnabled("BB_BBSC"))) {
+            TickBbscManagedReturnSaveReceipt();
+            TickBbscOfflineManagedReturnWarp();
+            return; // Recovery-only mode must not fan out into online/co-op ticks.
+        }
+#endif
         bbsc_tick_map.store(GetCurrentPackedMap(), std::memory_order_release);
         TickBbscRelayHostLock();
         TickBbscBossRewards();
@@ -14773,8 +15861,16 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
         // Only session-relevant Lua events; the dispatcher also runs gameplay events.
         const std::string name = ReadGuestAscii(registers->rsi, 64);
         if (name == "JoinSession_White") {
+            bool admitted = false;
+            if (bbsc_admitted_join_key) {
+                if (std::chrono::steady_clock::now() <= bbsc_admitted_join_key->second) {
+                    const auto key = ReadBbscPartyCharacterKey();
+                    admitted = key && *key == bbsc_admitted_join_key->first;
+                }
+                bbsc_admitted_join_key.reset();
+            }
 #ifndef _WIN32
-            if (ApplyBbscPartyRecoveryJoinGuard(*registers)) {
+            if (!admitted && ApplyBbscPartyRecoveryJoinGuard(*registers)) {
                 BbscAnnounce(u"Co-op blocked: finish character recovery first.", "pending recovery");
                 return;
             }
@@ -15353,11 +16449,143 @@ void PS4_SYSV_ABI TraceEntry(u64 tag, const GuestRegisterSnapshot* registers) {
     }
 }
 
+bool VerifySites();
+
+void PS4_SYSV_ABI BbscManagedRecoveryTraceEntry(u64 tag,
+                                                const GuestRegisterSnapshot* registers) {
+#ifndef _WIN32
+    if (!bbsc_managed_recovery_hooks_installed || registers == nullptr || tag >= Sites.size())
+        return;
+    try {
+        const u64 offset = Sites[tag].offset;
+        if (offset == NativeSaveSerializeOffset || offset == NativeSaveSerializeEndOffset ||
+            offset == NativeEventFlagsSerializeBeginOffset ||
+            offset == NativeEventFlagsSerializeEndOffset) {
+            ObserveBbscNativeFlagProof(offset, *registers);
+            ObserveBbscManagedCycleEvidence(offset, *registers);
+            ObserveBbscManagedReturnSerialization(offset, *registers);
+        } else if (offset == NativeCycleIncrementOffset ||
+                   offset == NativeCycleLuaIntentOffset ||
+                   offset == NativeCycleEventIncrementOffset ||
+                   offset == NativeCycleAppliedOffset ||
+                   offset == NativeCycleLuaAppliedOffset ||
+                   offset == NativeCycleEventAppliedOffset) {
+            ObserveBbscManagedCycleEvidence(offset, *registers);
+        } else if (offset == 0x01938F65) {
+            RestoreBbscOwnWorldAtLoad(true);
+        } else if (offset == 0x01332C1B) {
+            if (bbsc_recovery_only_mode) {
+                ApplyBbscOfflineRecoveryReturnAtSelector();
+            } else {
+                GuardBbscStrayForcedWarp(*registers);
+            }
+        } else if (offset == BbscGameTickOffset) {
+            // Recovery-only deliberately avoids the normal co-op/network/gameplay tick fan-out.
+            TickBbscNativeFlagProofReceipt();
+            TickBbscManagedReturnSaveReceipt();
+            TickBbscManagedCycleReceipt();
+            TickBbscOfflineManagedReturnWarp();
+        }
+    } catch (...) {
+        LOG_ERROR(Debug, "BBSC recovery observer failed at native site {:#x}; guest continues",
+                  Sites[tag].offset);
+    }
+#else
+    (void)tag;
+    (void)registers;
+#endif
+}
+
+bool InstallBbscManagedRecoveryHooksImpl(bool recovery_only) {
+#ifdef _WIN32
+    (void)recovery_only;
+    return false; // Win32 persistence/recovery is not integrated or validated yet.
+#else
+    if (bbsc_managed_recovery_hooks_installed) {
+        bbsc_recovery_only_mode = recovery_only;
+        return true;
+    }
+    image_base = MemoryPatcher::g_eboot_address;
+    if (image_base == 0 || MemoryPatcher::g_game_serial != "CUSA03173")
+        return false;
+    const auto* param_sfo = Common::Singleton<PSF>::Instance();
+    if (param_sfo->GetString("APP_VER").value_or("Unknown") != "01.09") return false;
+
+    constexpr std::array<u64, 13> offsets{
+        BbscGameTickOffset, 0x01938F65, 0x01332C1B,
+        NativeSaveSerializeOffset, NativeSaveSerializeEndOffset,
+        NativeEventFlagsSerializeBeginOffset, NativeEventFlagsSerializeEndOffset,
+        NativeCycleIncrementOffset, NativeCycleLuaIntentOffset, NativeCycleEventIncrementOffset,
+        NativeCycleAppliedOffset, NativeCycleLuaAppliedOffset, NativeCycleEventAppliedOffset};
+    std::array<const TraceSite*, offsets.size()> sites{};
+    for (std::size_t i = 0; i < offsets.size(); ++i) {
+        const auto found = std::ranges::find_if(Sites, [=](const TraceSite& site) {
+            return site.offset == offsets[i];
+        });
+        if (found == Sites.end() || found->offset > MemoryPatcher::g_eboot_image_size ||
+            found->prologue_size > MemoryPatcher::g_eboot_image_size - found->offset) {
+            LOG_ERROR(Debug, "BBSC recovery: required native hook site {:#x} is unavailable",
+                      offsets[i]);
+            return false;
+        }
+        const auto expected = std::span<const u8>{found->prologue.data(), found->prologue_size};
+        const auto actual = std::span<const u8>{
+            reinterpret_cast<const u8*>(image_base + found->offset), found->prologue_size};
+        if (!std::ranges::equal(actual, expected)) {
+            LOG_ERROR(Debug, "BBSC recovery: required native hook signature mismatch at {:#x}",
+                      found->offset);
+            return false;
+        }
+        sites[i] = &*found;
+    }
+    // The recovery tick calls these two native functions directly. Validate their known 1.09
+    // prologues as part of recovery activation, not merely their offsets or unrelated patch set.
+    for (const u64 required_call : {SelectSummonedPlacementOffset, StageTransitionOffset}) {
+        const auto found = std::ranges::find_if(CrossMapNativeCalls, [=](const auto& call) {
+            return call.offset == required_call;
+        });
+        if (found == CrossMapNativeCalls.end() || found->offset >= MemoryPatcher::g_eboot_image_size ||
+            found->prologue_size > MemoryPatcher::g_eboot_image_size - found->offset) {
+            LOG_ERROR(Debug, "BBSC recovery: required native call {:#x} has no verified signature",
+                      required_call);
+            return false;
+        }
+        const auto expected = std::span<const u8>{found->prologue.data(), found->prologue_size};
+        const auto actual = std::span<const u8>{
+            reinterpret_cast<const u8*>(image_base + found->offset), found->prologue_size};
+        if (!std::ranges::equal(actual, expected)) {
+            LOG_ERROR(Debug, "BBSC recovery: native call signature mismatch at {:#x}", required_call);
+            return false;
+        }
+    }
+    // Diagnostic trace, when already installed, covers these same sites with TraceEntry.
+    if (installed) {
+        bbsc_recovery_only_mode = recovery_only;
+        bbsc_managed_recovery_hooks_installed = true;
+        return true;
+    }
+    for (const TraceSite* site : sites) {
+        const auto expected = std::span<const u8>{site->prologue.data(), site->prologue_size};
+        const auto index = static_cast<u64>(site - Sites.data());
+        if (!InstallGuestCodeHook(reinterpret_cast<void*>(image_base + site->offset), expected,
+                                  index, BbscManagedRecoveryTraceEntry)) {
+            LOG_ERROR(Debug, "BBSC recovery: failed to install native hook {} at {:#x}",
+                      site->name, site->offset);
+            return false;
+        }
+    }
+    bbsc_recovery_only_mode = recovery_only;
+    bbsc_managed_recovery_hooks_installed = true;
+    LOG_INFO(Debug, "BBSC {} recovery hooks installed for native home restore/return/save",
+             recovery_only ? "offline-only" : "managed");
+    return true;
+#endif
+}
+
 bool VerifySites() {
     const auto image_size = MemoryPatcher::g_eboot_image_size;
     for (const auto& site : Sites) {
-        if (site.kind == TraceKind::SaveLifecycle && !BbscSaveIdentityTraceEnabled() &&
-            !IsBbscPostRestoreSaveSite(site.offset)) continue;
+        if (!ShouldInstallBbscTraceSite(site, BbscSaveIdentityTraceEnabled())) continue;
         if ((summon_build_host_placement_hook_installed && site.offset == SummonBuildEntryOffset) ||
             (cross_map_guest_handoff_hook_installed && site.offset == CrossMapGuestHandoffOffset) ||
             (summon_reload_state_hook_installed &&
@@ -15410,6 +16638,10 @@ bool BbscConnectFirstPlacementFresh() {
 
 } // namespace
 
+bool InstallBbscManagedRecoveryHooks(bool recovery_only) {
+    return InstallBbscManagedRecoveryHooksImpl(recovery_only);
+}
+
 void OnBbscPartyRoomState(BbscPartyRoom room) {
     std::scoped_lock lock{bbsc_party_inbox_mutex};
     if (bbsc_party_room && bbsc_party_room->context != room.context) return;
@@ -15425,17 +16657,22 @@ void OnBbscPartyRoomState(BbscPartyRoom room) {
         bbsc_party_room.reset();
         bbsc_party_expected_peers.clear();
         bbsc_party_inbox.clear();
+        bbsc_capability_inbox.clear();
         return;
     }
     if (!bbsc_party_room || bbsc_party_room->room != room.room ||
         bbsc_party_room->owner != room.owner || bbsc_party_room->is_host != room.is_host) {
         bbsc_party_expected_peers.clear();
         bbsc_party_inbox.clear();
+        bbsc_capability_inbox.clear();
     } else {
         std::erase_if(bbsc_party_expected_peers, [&](const auto& peer) {
             return std::ranges::find(room.members, peer.online_id) == room.members.end();
         });
         std::erase_if(bbsc_party_inbox, [](const auto& packet) {
+            return std::ranges::find(bbsc_party_expected_peers, packet.peer) == bbsc_party_expected_peers.end();
+        });
+        std::erase_if(bbsc_capability_inbox, [](const auto& packet) {
             return std::ranges::find(bbsc_party_expected_peers, packet.peer) == bbsc_party_expected_peers.end();
         });
     }
@@ -15445,6 +16682,41 @@ void OnBbscPartyRoomState(BbscPartyRoom room) {
 std::optional<BbscPartyRoom> GetBbscPartyRoomState() {
     std::scoped_lock lock{bbsc_party_inbox_mutex};
     return bbsc_party_room;
+}
+
+bool IsBbscPrivateCoopAdmissionRequired() {
+    // shortcut: private claims that expire are indistinguishable from public searches here; keep
+    // the native gate disabled until the observer exposes an exact pending-private-join state.
+    return false;
+}
+
+void TickBbscPartyPeerSelection() {
+    static s64 last_refresh_ms = 0;
+    const auto room = GetBbscPartyRoomState();
+    if (!room) {
+        SetBbscPartyPeers({});
+        return;
+    }
+    const s64 now = SteadyNowMs();
+    if (now - last_refresh_ms < 500) return;
+    last_refresh_ms = now;
+
+    // A guest accepts only its published room owner. A host accepts each actual room member.
+    // Never pick the first established signaling connection: the helper rejects ambiguous account
+    // mappings and the game-thread inbox requires exact account+connection equality.
+    std::vector<Core::Bbsc::Party::Peer> peers;
+    const auto accounts = room->is_host ? std::span<const std::string>{room->members}
+                                        : std::span<const std::string>{&room->owner, 1};
+    peers.reserve(accounts.size());
+    for (const auto& account : accounts) {
+        const auto peer = Libraries::Np::NpSignaling::Helpers::FindBbscPartyPeer(account);
+        if (!peer) {
+            SetBbscPartyPeers({});
+            return;
+        }
+        peers.push_back(*peer);
+    }
+    if (!SetBbscPartyPeers(peers)) SetBbscPartyPeers({});
 }
 
 bool SetBbscPartyPeers(std::span<const Core::Bbsc::Party::Peer> peers) {
@@ -15467,10 +16739,14 @@ bool SetBbscPartyPeers(std::span<const Core::Bbsc::Party::Peer> peers) {
     if (!valid) {
         bbsc_party_expected_peers.clear();
         bbsc_party_inbox.clear();
+        bbsc_capability_inbox.clear();
         return false;
     }
     bbsc_party_expected_peers.assign(peers.begin(), peers.end());
     std::erase_if(bbsc_party_inbox, [](const auto& queued) {
+        return std::ranges::find(bbsc_party_expected_peers, queued.peer) == bbsc_party_expected_peers.end();
+    });
+    std::erase_if(bbsc_capability_inbox, [](const auto& queued) {
         return std::ranges::find(bbsc_party_expected_peers, queued.peer) == bbsc_party_expected_peers.end();
     });
     return true;
@@ -15478,6 +16754,21 @@ bool SetBbscPartyPeers(std::span<const Core::Bbsc::Party::Peer> peers) {
 
 void OnBbscPartyPacket(const Core::Bbsc::Party::Peer& peer, const void* packet, std::uint32_t size) {
     if (!packet || !Core::Bbsc::Party::ValidPeer(peer)) return;
+    if (size == Libraries::Np::NpSignaling::kBbscCapabilityPacketBytes &&
+        static_cast<const u8*>(packet)[4] == Libraries::Np::NpSignaling::kSignalingBbscCapabilityType) {
+        BbscCapabilityPacket copied{peer};
+        std::memcpy(copied.bytes.data(), packet, copied.bytes.size());
+        std::scoped_lock lock{bbsc_party_inbox_mutex};
+        if (std::ranges::find(bbsc_party_expected_peers, peer) == bbsc_party_expected_peers.end()) return;
+        size_t count = 0;
+        for (const auto& queued : bbsc_capability_inbox) {
+            if (queued.peer != peer) continue;
+            if (queued.bytes == copied.bytes) return;
+            ++count;
+        }
+        if (count < BbscCapabilityInboxPerPeer) bbsc_capability_inbox.push_back(std::move(copied));
+        return;
+    }
     auto message = Core::Bbsc::Party::DecodeMessage({static_cast<const u8*>(packet), size});
     if (!message) return;
     std::scoped_lock lock{bbsc_party_inbox_mutex};
@@ -15497,6 +16788,236 @@ std::vector<BbscPartyPacket> TakeBbscPartyPackets() {
     std::vector<BbscPartyPacket> pending;
     pending.swap(bbsc_party_inbox);
     return pending;
+}
+
+std::vector<BbscCapabilityPacket> TakeBbscCapabilityPackets() {
+    std::scoped_lock lock{bbsc_party_inbox_mutex};
+    std::vector<BbscCapabilityPacket> pending;
+    pending.swap(bbsc_capability_inbox);
+    return pending;
+}
+
+namespace {
+using AdmissionTicket = Libraries::Np::NpMatching2::BbscAdmissionTicket;
+using Capability = Core::Bbsc::Party::CapabilityMessage;
+using CapabilityKind = Core::Bbsc::Party::CapabilityKind;
+struct AdmissionAttempt {
+    AdmissionTicket ticket;
+    std::array<u8, 16> challenge{};
+    Libraries::Http::BbscSummonCapabilityProofSnapshot proofs;
+    Core::Bbsc::Party::CharacterKey key;
+    s64 last_probe_ms{};
+    unsigned probes{};
+};
+std::map<std::int32_t, AdmissionAttempt> bbsc_admission_attempts;
+
+bool ProofIsZero(const std::array<u8, 32>& proof) {
+    return std::ranges::all_of(proof, [](u8 byte) { return byte == 0; });
+}
+
+std::string OnlineId(const Libraries::Np::OrbisNpOnlineId& id) {
+    const size_t size = strnlen(id.data, sizeof(id.data));
+    if (size == 0 || size == sizeof(id.data)) return {};
+    return {id.data, size};
+}
+
+bool SameAdmissionTicket(const AdmissionTicket& a, const AdmissionTicket& b) {
+    return a.context == b.context && a.incarnation == b.incarnation &&
+           a.request == b.request && a.room == b.room && a.nonce == b.nonce &&
+           a.deadline == b.deadline && std::memcmp(&a.owner, &b.owner, sizeof(a.owner)) == 0;
+}
+
+std::optional<Core::Bbsc::Party::Peer> CurrentPartyPeer(std::string_view account) {
+    std::scoped_lock lock{bbsc_party_inbox_mutex};
+    const auto found = std::ranges::find_if(bbsc_party_expected_peers, [&](const auto& peer) {
+        return peer.online_id == account;
+    });
+    return found == bbsc_party_expected_peers.end()
+               ? std::nullopt
+               : std::optional<Core::Bbsc::Party::Peer>{*found};
+}
+
+bool RoomContainsPeer(const BbscPartyRoom& room, const Core::Bbsc::Party::Peer& peer) {
+    return std::ranges::find(room.members, peer.online_id) != room.members.end();
+}
+
+void ReplyToCapabilityProbes(const BbscPartyRoom& room,
+                             std::span<const BbscCapabilityPacket> packets) {
+    if (!room.is_host || !bbsc_native_coop_hooks_ready) return;
+    for (const auto& packet : packets) {
+        if (!RoomContainsPeer(room, packet.peer)) continue;
+        const auto probe = Core::Bbsc::Party::DecodeCapability(packet.bytes);
+        if (!probe || probe->kind != CapabilityKind::Probe || probe->room != room.room) continue;
+        const auto peer = CurrentPartyPeer(packet.peer.online_id);
+        if (!peer || *peer != packet.peer) continue;
+        const auto proofs = Libraries::Http::GetBbscSummonCapabilityProofs(probe->challenge);
+        if (!proofs || ProofIsZero(proofs->selected) ||
+            CRYPTO_memcmp(probe->own_proof.data(), proofs->selected.data(), 32) != 0 ||
+            (!ProofIsZero(probe->selected_proof) &&
+             CRYPTO_memcmp(probe->selected_proof.data(), proofs->own.data(), 32) != 0)) continue;
+        Capability confirm;
+        confirm.kind = CapabilityKind::Confirm;
+        confirm.room = room.room;
+        confirm.challenge = probe->challenge;
+        confirm.own_proof = proofs->own;
+        confirm.selected_proof = proofs->selected;
+        const auto encoded = Core::Bbsc::Party::EncodeCapability(confirm);
+        Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+            packet.peer, encoded.data(), static_cast<u32>(encoded.size()));
+    }
+}
+
+bool ProofsStillCurrent(const AdmissionAttempt& attempt,
+                        const Libraries::Http::BbscSummonCapabilityProofSnapshot& proofs) {
+    const auto& old = attempt.proofs.observation;
+    const auto& now = proofs.observation;
+    return now.own_sign.valid && now.own_sign.summon_type == 0 &&
+           now.own_sign.generation == old.own_sign.generation &&
+           now.own_sign.session_id == old.own_sign.session_id &&
+           now.own_sign.user_id == old.own_sign.user_id &&
+           now.own_sign.character_id == old.own_sign.character_id &&
+           now.claim.valid && now.claim.matched_unique_candidate &&
+           now.claim.password_matches_own_sign &&
+           now.claim.token == old.claim.token &&
+           now.claim.search_generation == old.claim.search_generation &&
+           now.claim.candidate.session_id == old.claim.candidate.session_id &&
+           now.claim.candidate.user_id == old.claim.candidate.user_id &&
+           now.claim.candidate.character_id == old.claim.candidate.character_id &&
+           CRYPTO_memcmp(proofs.own.data(), attempt.proofs.own.data(), 32) == 0 &&
+           CRYPTO_memcmp(proofs.selected.data(), attempt.proofs.selected.data(), 32) == 0;
+}
+
+void RejectAdmission(const AdmissionTicket& ticket) {
+    Libraries::Np::NpMatching2::ResolveBbscAdmission(ticket, false);
+}
+
+bool AdmitConfirmedTicket(AdmissionAttempt& attempt) {
+#ifdef _WIN32
+    (void)attempt;
+    return false;
+#else
+    auto& ticket = attempt.ticket;
+    std::array<u8, 16> party{};
+    if (RAND_bytes(party.data(), static_cast<int>(party.size())) != 1 ||
+        std::ranges::all_of(party, [](u8 byte) { return byte == 0; })) return false;
+    std::error_code ec;
+    auto home = PrepareBbscNativePartyHome(party, ec, true);
+    if (!home || home->record.key != attempt.key || ticket.nonce == 0) return false;
+    const auto current_proofs = Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge);
+    const auto current_key = ReadBbscPartyCharacterKey(false);
+    if (!current_proofs || !ProofsStillCurrent(attempt, *current_proofs) ||
+        !current_key || *current_key != attempt.key) return false;
+    home->record.admission = ticket.nonce;
+    home->record.phase = Core::Bbsc::Party::Phase::Visiting;
+    if (!Core::Bbsc::Party::StoreJournal(home->lease, home->record, ec)) return false;
+
+    bbsc_admitted_join_key = std::pair{home->record.key,
+                                        std::chrono::steady_clock::now() + std::chrono::seconds(30)};
+    const bool resolved = Libraries::Np::NpMatching2::ResolveBbscAdmission(ticket, true);
+    if (!resolved) bbsc_admitted_join_key.reset();
+    return resolved;
+#endif
+}
+} // namespace
+
+void TickBbscAdmissionCoordinator() {
+    if (!EnvFlagEnabled("BB_BBSC") || !bbsc_native_coop_hooks_ready) return;
+    TickBbscPartyPeerSelection();
+    const auto tickets = Libraries::Np::NpMatching2::GetPendingBbscAdmissionTickets();
+    const auto now = std::chrono::steady_clock::now();
+    std::erase_if(bbsc_admission_attempts, [&](const auto& entry) {
+        return std::ranges::none_of(tickets, [&](const auto& ticket) {
+            return SameAdmissionTicket(entry.second.ticket, ticket);
+        });
+    });
+    for (const auto& ticket : tickets) {
+        auto it = bbsc_admission_attempts.find(ticket.context);
+        if (it == bbsc_admission_attempts.end() || !SameAdmissionTicket(it->second.ticket, ticket)) {
+            AdmissionAttempt attempt;
+            attempt.ticket = ticket;
+            const auto room = GetBbscPartyRoomState();
+            const auto own = ReadBbscPartyCharacterKey(false);
+            const auto proofs = RAND_bytes(attempt.challenge.data(),
+                                            static_cast<int>(attempt.challenge.size())) == 1
+                ? Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge)
+                : std::nullopt;
+            if (!room || room->context != ticket.context || room->room != ticket.room ||
+                room->is_host || room->owner != OnlineId(ticket.owner) ||
+                !std::ranges::contains(room->members, room->owner) || !own || !proofs ||
+                ProofIsZero(proofs->own) || ProofIsZero(proofs->selected) ||
+                !proofs->observation.claim.valid ||
+                !proofs->observation.claim.matched_unique_candidate ||
+                !proofs->observation.claim.password_matches_own_sign) {
+                RejectAdmission(ticket);
+                continue;
+            }
+            attempt.key = *own;
+            attempt.proofs = *proofs;
+            it = bbsc_admission_attempts.insert_or_assign(ticket.context, std::move(attempt)).first;
+        }
+    }
+
+    const auto room = GetBbscPartyRoomState();
+    const auto packets = TakeBbscCapabilityPackets();
+    if (room) ReplyToCapabilityProbes(*room, packets);
+    for (auto it = bbsc_admission_attempts.begin(); it != bbsc_admission_attempts.end();) {
+        const auto context = it->first;
+        auto& attempt = it->second;
+        const auto peer = CurrentPartyPeer(OnlineId(attempt.ticket.owner));
+        const bool valid_room = room && !room->is_host && room->context == attempt.ticket.context &&
+            room->room == attempt.ticket.room && room->owner == OnlineId(attempt.ticket.owner) &&
+            peer && RoomContainsPeer(*room, *peer);
+        if (!valid_room || now >= attempt.ticket.deadline) {
+            const auto ticket = attempt.ticket;
+            RejectAdmission(ticket);
+            it = bbsc_admission_attempts.erase(it);
+            continue;
+        }
+        bool completed = false;
+        bool rejected = false;
+        for (const auto& packet : packets) {
+            if (packet.peer != *peer) continue;
+            const auto confirm = Core::Bbsc::Party::DecodeCapability(packet.bytes);
+            if (!confirm || confirm->kind != CapabilityKind::Confirm ||
+                confirm->room != attempt.ticket.room || confirm->challenge != attempt.challenge ||
+                ProofIsZero(confirm->own_proof) || ProofIsZero(attempt.proofs.selected) ||
+                CRYPTO_memcmp(confirm->selected_proof.data(), attempt.proofs.own.data(), 32) != 0 ||
+                CRYPTO_memcmp(attempt.proofs.selected.data(), confirm->own_proof.data(), 32) != 0) continue;
+            const auto current = Libraries::Http::GetBbscSummonCapabilityProofs(attempt.challenge);
+            const auto identity = ReadBbscPartyCharacterKey(false);
+            if (!current || !ProofsStillCurrent(attempt, *current) || !identity || *identity != attempt.key) {
+                rejected = true;
+                break;
+            }
+            completed = AdmitConfirmedTicket(attempt);
+            rejected = !completed;
+            break;
+        }
+        if (completed || rejected) {
+            if (rejected) RejectAdmission(attempt.ticket);
+            it = bbsc_admission_attempts.erase(it);
+            continue;
+        }
+        if (attempt.probes >= 24) {
+            RejectAdmission(attempt.ticket);
+            it = bbsc_admission_attempts.erase(it);
+            continue;
+        }
+        if (SteadyNowMs() - attempt.last_probe_ms >= 500) {
+            Capability probe;
+            probe.kind = CapabilityKind::Probe;
+            probe.room = attempt.ticket.room;
+            probe.challenge = attempt.challenge;
+            probe.own_proof = attempt.proofs.own;
+            probe.selected_proof = attempt.proofs.selected;
+            const auto encoded = Core::Bbsc::Party::EncodeCapability(probe);
+            Libraries::Np::NpSignaling::Helpers::SendBbscPartyToPeer(
+                *peer, encoded.data(), static_cast<u32>(encoded.size()));
+            attempt.last_probe_ms = SteadyNowMs();
+            ++attempt.probes;
+        }
+        ++it;
+    }
 }
 
 void OnBbscHostBossPacket(std::int32_t boss) {
@@ -16347,6 +17868,7 @@ void InstallSeamlessCoopPatches() {
     summon_build_world_state_patch_installed = true;
     summon_build_negative_event_patch_installed = true;
     stage_transition_keep_matching_patch_installed = true;
+    bbsc_native_coop_hooks_ready = true;
     LOG_INFO(Debug,
              "Bloodborne seamless patches enabled Beckoning, Small Resonant, and Sinister Bell "
              "use, active search, cross-map candidate selection, and native summon construction "
@@ -16455,9 +17977,12 @@ void InstallReverseEngineeringTrace() {
     size_t hook_count = 0, expected_count = 0;
     for (size_t index = 0; index < Sites.size(); ++index) {
         const auto& site = Sites[index];
-        if (site.kind == TraceKind::SaveLifecycle && !BbscSaveIdentityTraceEnabled() &&
-            !IsBbscPostRestoreSaveSite(site.offset)) continue;
+        if (!ShouldInstallBbscTraceSite(site, BbscSaveIdentityTraceEnabled())) continue;
         ++expected_count;
+        if (IsManagedRecoveryProvidedTraceSite(site)) {
+            ++hook_count;
+            continue;
+        }
         if ((summon_build_host_placement_hook_installed && site.offset == SummonBuildEntryOffset) ||
             (cross_map_guest_handoff_hook_installed && site.offset == CrossMapGuestHandoffOffset) ||
             (summon_reload_state_hook_installed &&
