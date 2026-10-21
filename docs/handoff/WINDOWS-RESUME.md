@@ -1,6 +1,6 @@
 # Resume BBSC development on Windows
 
-Updated: 2026-10-21 (Asia/Bangkok). This file replaces dependence on the old Codex session, subagents, distrobox and Linux absolute paths.
+Updated: 2026-10-22 (Asia/Bangkok). This file replaces dependence on the old Codex session, subagents, distrobox and Linux absolute paths.
 
 ## Windows checkpoint after migration setup
 
@@ -68,7 +68,7 @@ The Linux checkout retains a 119-line uncommitted change in `gpu/third_party/fsr
 
 ## New-session prompt
 
-> Read AGENTS.md, docs/handoff/WINDOWS-RESUME.md and docs/WINDOWS-PROGRESS.md. Resume the detailed Windows execution plan at its first incomplete task (currently W05) when implementation is requested. Use the verified pinned upstream baseline; do not redo completed setup. W03 owns unresolved native caller/interface discovery. Preserve origin/pre and unrelated FSR work. Use gpt-6-luna for substantial independent tasks and stop before packaging. Do not open the game while the user's no-game instruction remains active; G1–G3 are future user gameplay gates. Keep source/evidence gaps explicit and checkpoint/push origin/windows below 10% remaining in the 5-hour window. Do not treat historical BBSC as already migrated.
+> Read AGENTS.md, docs/handoff/WINDOWS-RESUME.md and docs/WINDOWS-PROGRESS.md. Resume the detailed Windows execution plan at its first incomplete task (currently W06) when implementation is requested. Use the verified pinned upstream baseline; do not redo completed setup. W03 owns unresolved native caller/interface discovery. Preserve origin/pre and unrelated FSR work. Use gpt-6-luna for substantial independent tasks and stop before packaging. Do not open the game while the user's no-game instruction remains active; G1–G3 are future user gameplay gates. Keep source/evidence gaps explicit and checkpoint/push origin/windows below 10% remaining in the 5-hour window. Do not treat historical BBSC as already migrated.
 
 ## Handoff acceptance
 
