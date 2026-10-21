@@ -1,5 +1,7 @@
 # BBSC: Bloodborne seamless co-op in the port
 
+> **Windows direction amendment — 2026-10-21:** On branch `windows`, follow the [Windows-only migration plan](superpowers/plans/2026-10-21-bbsc-windows-only-migration.md) using Supermedo/bloodborne_pc. Earlier platform, upstream, distrobox, packaging and `origin/pre` instructions below describe the historical Linux baseline and are superseded on this branch. Product requirements remain in force. Existing test results do not establish Windows readiness; this amendment does not migrate runtime code.
+
 BBSC (seamless co-op for Bloodborne, GPL-2.0-or-later; https://seamlesshunt.com) keeps a co-op
 session alive through deaths, lamps, area changes, bosses and the Hunter's Dream, for up to five
 hunters. It is written for shadp2p (a shadPS4 fork); the port carries it in its online module.

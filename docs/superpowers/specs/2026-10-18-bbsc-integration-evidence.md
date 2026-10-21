@@ -1,5 +1,7 @@
 # BBSC integration evidence and checkpoints
 
+> **Windows direction amendment — 2026-10-21:** On branch `windows`, follow the [Windows-only migration plan](../plans/2026-10-21-bbsc-windows-only-migration.md) using Supermedo/bloodborne_pc. Earlier platform, upstream, distrobox, packaging and `origin/pre` instructions below describe the historical Linux baseline and are superseded on this branch. Product requirements remain in force. Existing test results do not establish Windows readiness; this amendment does not migrate runtime code.
+
 ## Current checkpoint summary (2026-10-21)
 
 This summary is authoritative; later numbered sections and 2026-10-19 paragraphs

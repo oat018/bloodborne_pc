@@ -1,5 +1,7 @@
 # BBSC Anywhere Co-op Implementation Plan
 
+> **Windows direction amendment — 2026-10-21:** On branch `windows`, follow the [Windows-only migration plan](2026-10-21-bbsc-windows-only-migration.md) using Supermedo/bloodborne_pc. Earlier platform, upstream, distrobox, packaging and `origin/pre` instructions below describe the historical Linux baseline and are superseded on this branch. Product requirements remain in force. Existing test results do not establish Windows readiness; this amendment does not migrate runtime code.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let password-matched friends join across story maps or the Dream, earn only new shared progress, and return safely to their own world after leaving or restarting.

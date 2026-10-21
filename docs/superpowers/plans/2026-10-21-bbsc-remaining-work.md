@@ -1,5 +1,7 @@
 # BBSC Remaining Work Implementation Plan
 
+> **Windows direction amendment — 2026-10-21:** On branch `windows`, follow the [Windows-only migration plan](2026-10-21-bbsc-windows-only-migration.md) using Supermedo/bloodborne_pc. Earlier platform, upstream, distrobox, packaging and `origin/pre` instructions below describe the historical Linux baseline and are superseded on this branch. Product requirements remain in force. Existing test results do not establish Windows readiness; this amendment does not migrate runtime code.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans. Track completion with the checkboxes below.
 
 **Goal:** Complete the agreed BBSC features and stop immediately before AppImage/EXE packaging.

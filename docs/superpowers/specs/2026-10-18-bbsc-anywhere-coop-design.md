@@ -1,5 +1,7 @@
 # BBSC: password co-op across story maps, shared progress, and safe return
 
+> **Windows direction amendment — 2026-10-21:** On branch `windows`, follow the [Windows-only migration plan](../plans/2026-10-21-bbsc-windows-only-migration.md) using Supermedo/bloodborne_pc. Earlier platform, upstream, distrobox, packaging and `origin/pre` instructions below describe the historical Linux baseline and are superseded on this branch. Product requirements remain in force. Existing test results do not establish Windows readiness; this amendment does not migrate runtime code.
+
 Date: 2026-10-18
 
 Status: written design approved by the user on 2026-10-18. Implementation planning
