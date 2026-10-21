@@ -117,10 +117,10 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Interfaces:** preserve `Core::Bbsc::Party::{Message, CapabilityMessage, Peer, CharacterKey, Admission, Delivery}`, `EncodeMessage`/`DecodeMessage`, `EncodeCapability`/`DecodeCapability`, `CanCrossMapMatch`, `IsSupportedStoryMap`, and the 22-event/3-item candidate catalogs from historical headers. Separate declarations from unrelated vendor-state dependencies as needed, updating both protocol consumers together.
 
-- [ ] Add failing tests for malformed/oversized/duplicate packet data, wrong peer/party/admission, ordering/replay, expiry, closed admission resurrection, password mismatch/empty password and unsupported maps.
-- [ ] Port policy and wire encoding with those existing types; do not wire native hooks or import Linux vendor directories. Preserve sender/receiver declaration compatibility.
-- [ ] Retain catalog assertions: 22 boss rows, three unique-item candidates, deferred endgame mutations, and no automatic Cord consumption. Candidate fixture success does not approve an in-game grant mapping.
-- [ ] Register `bbsc-party-policy-test` and `bbsc-party-events-test` with assertions enabled. Add them to the runner's BBSC group; run both, review and commit.
+- [x] Add failing tests for malformed/oversized/duplicate packet data, wrong peer/party/admission, ordering/replay, expiry, closed admission resurrection, password mismatch/empty password and unsupported maps.
+- [x] Port policy and wire encoding with those existing types; do not wire native hooks or import Linux vendor directories. Preserve sender/receiver declaration compatibility.
+- [x] Retain catalog assertions: 22 boss rows, three unique-item candidates, deferred endgame mutations, and no automatic Cord consumption. Candidate fixture success does not approve an in-game grant mapping.
+- [x] Register `bbsc-party-policy-test` and `bbsc-party-events-test` with assertions enabled. Add them to the runner's BBSC group; run both, review and commit.
 
 **Acceptance:** both targets build and exit 0 under CLANG64; fixture evidence is labeled portable Windows policy, not live networking or native progress.
 

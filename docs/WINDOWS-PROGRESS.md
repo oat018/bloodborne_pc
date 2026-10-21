@@ -1,6 +1,6 @@
 # BBSC Windows progress
 
-Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01–W03 verified in their stated scope; W04 portable policy READY.** No game launch is authorized.
+Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: Usage checkpoint: W01–W04 VERIFIED in their stated scope; stopped with 9% five-hour quota remaining. W05 READY, not started.** No game launch is authorized.
 
 ## Read this first
 
@@ -18,8 +18,8 @@ Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01–W03 verified in 
 | W01 | Separate integration branch/worktree and reviewed file/history map | VERIFIED | No | Managed `codex/bbsc-windows-integration` at upstream pin, reviewed [ownership/history map](handoff/WINDOWS-INTEGRATION-BASE.md). Explicit documentation paths copied; runtime unchanged. |
 | W02 | Windows no-game harness and reproducible runner | VERIFIED | No | Nine targets BUILD/RUN PASS, four SPIR-V validators PASS; baseline exit 0, Python 51 PASS/1 SKIP; runner regression 3 PASS. Detailed evidence below. |
 | W03 | Exact static adapter/caller/thread/lifetime contracts | VERIFIED (source map only) | No for source map | [Reviewed contract map](handoff/WINDOWS-ADAPTER-CONTRACT.md); actual native world consumer/identity/grant/UI contracts remain blocked for G1–G3. No guessed adapter APIs approved. |
-| W04 | Portable party/protocol/catalog and focused targets | READY | No | Catalog-only fixture already passes; full policy/transport integration is not ported. |
-| W05 | Windows locking/journal/backups/receipts and identity fixtures | WAIT_DEP W03/W04 | No for fixtures | Actual Windows child-process interruption and filesystem semantics must be proven. |
+| W04 | Portable party/protocol/catalog and focused targets | VERIFIED | No | Portable policy/protocol/catalog targets pass; reviewed unknown-event guards. No live transport/native qualification. |
+| W05 | Windows locking/journal/backups/receipts and identity fixtures | READY | No for fixtures | Next: fresh temporary-profile filesystem RED tests; use W03 source owners and preserve unresolved native receipt/identity gates. Not started at usage stop. |
 | W06 | Static HTTP/Matching2/signaling/transport integration | WAIT_DEP W03/W04/W05 | No for mocks | Selective BBSC hunks; no copied Linux vendor tree; activation stays OFF. |
 | W07 | Native ABI/tick/scanner/selected-character adapter | WAIT_DEP W03/W05/W06 | Fixtures no; live later | No assumed native offsets or worker-as-game-thread substitution. |
 | W08 | Admission/first-playable coordination and rejection fixtures | WAIT_DEP W05/W06/W07 | Fixtures no; G1 yes | Prove all entry routes; callback enqueue is not cancellation. |
@@ -31,7 +31,7 @@ Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01–W03 verified in 
 - [x] W01 integration workspace/history map
 - [x] W02 Windows test harness
 - [x] W03 adapter contract map
-- [ ] W04 portable policy
+- [x] W04 portable policy
 - [ ] W05 durable storage/identity
 - [ ] W06 network/session integration
 - [ ] W07 native adapters
@@ -140,3 +140,29 @@ Commands (CLANG64): `bash ./build.sh` from `C:/bbsc-w02` (junction to managed in
 Runner unittest discovery exited 0, 3 PASS (implementer and independent controller run); explicit `-Group bbsc` exited 1 with MISSING as required before W04/W06. `-Group all` NOT RUN in W02; it currently includes the baseline plus unavailable-BBSC failure. Historical gameserver 8-case and catalog evidence retain their separate pins; not rerun or relabeled. Private evidence: integration `.superpowers/w02-report.md`, `w02-baseline-final.log`, `w02-bbsc-unavailable.log`, `out/gpu-build.log`; controller `.superpowers/sdd/2026-10-21-bbsc-windows-execution/w02-controller-runner-check.md`. Initial RED/setup failures and review fixes are recorded above. Expected upstream build-script FSR patch diff stays private/uncommitted, gitlink pin unchanged; historical archival patch untouched.
 
 Independent Luna source/evidence re-review found no remaining blocker after RAII restoration and fresh shader-output fixes. Whitespace/scope check PASS. W04 is next READY; W05 remains WAIT_DEP W04, with real native identity/receipt/grant qualification still pending G1–G3. No game launch, packaging or server deployment. Latest usage five-hour 21%, weekly 41% remaining; continue while above requested stop threshold.
+
+W02 publication: implementation commit `2b48dd8dd0eb4213be9275184e489177779111aa` on local integration branch; controller evidence commit `88961c59a88800356c8a5f80d99e48be53b27ec1` pushed and equals `origin/windows`. Runtime integration is still not merged into `windows`. W04 now IN_PROGRESS with a fresh Luna implementer; owns portable policy/protocol headers and sources, focused tests, CMake target additions and runner BBSC group only. Native adapters remain untouched. Follow the reviewed W03 blocked facts.
+
+Publication limitation: automatic approval review rejected a separate remote push of local `codex/bbsc-windows-integration` (currently `2b48dd8`), stating that unmerged code/worktree publication to an additional branch was outside explicit authorization and could be sensitive egress. No remote integration branch was created; no workaround attempted. Requested user choice for optional integration-branch backup. Required documentation checkpoints to `origin/windows` remain published. Local code commits are preserved; W04 offline work continues. The combined rejected command did not execute its preceding copy, so tracker synchronization is retried as a standalone file operation only.
+
+User publication decision: keep `codex/bbsc-windows-integration` local for now. Do not retry remote integration-branch publication. Continue authorized documentation checkpoints on `origin/windows`; local W02 code remains preserved in `2b48dd8`. Latest usage five-hour 17%, weekly 40% remaining; W04 continues with stop-below-10 instruction communicated to owner.
+
+### W04 ongoing checkpoint
+
+Tested integration `2b48dd8` plus W04 diff. Selected portable party/catalog sources moved to new `gpu/bbnet/bbsc/` home; canonical `bbsc_protocol.h` preserves historical v1 0x28/0x29 wire types/enums/sizes. Both policy/events targets BUILD/RUN PASS; BBSC runner 2 PASS/0 FAIL/SKIP/MISSING, fixture-only. Initial attempted RED was environmental (missing CMake PATH), explicitly NOT a behavioral RED; subsequent link and DLL PATH setup failures recorded privately. No native hooks/vendor source touched.
+
+Independent early review found unchecked arbitrary nonzero EventId at Admission::Accept/Earn, requiring a catalog-boundary rejection test/filter or proven downstream validation. Also required explicit different-nonempty-password and oversized-packet assertions. Returned these for real behavioral RED/fix; no W04 acceptance checkbox closed. Private report `.superpowers/w04-report.md`, runner `.superpowers/w04-bbsc-run.log`. Latest usage14% primary; stop new work below10 and checkpoint status honestly. W04 remains IN_PROGRESS; no native/game evidence inferred.
+
+W04 review fix: meaningful behavioral RED reproduced when Admission accepted unknown event `0xDEADBEEF`; GREEN after catalog membership guards at Admission baseline/event receive and Delivery baseline/Push boundaries. Added real oversized packet, capability framing, differing-password and same-map assertions. Both focused builds/executions and BBSC group PASS (2/0/0/0). Independent Luna re-review accepted guards and confirmed all three item-source events are in the 22-row catalog; no substantive source blocker. Controller incremental native build and combined runner verification are the final checkpoint checks, currently running/pending. Usage latest12% five-hour; no new task dispatched before closing this checkpoint.
+
+### W04 verified / usage stop checkpoint — 2026-10-21
+
+VERIFIED for portable Windows policy only. Tested source integration `2b48dd8dd0eb4213be9275184e489177779111aa` plus reviewed W04 diff. Added selective party/policy/catalog source under `gpu/bbnet/bbsc/`, canonical shared wire header, two assertion-enabled test targets and actual runner BBSC group. Preserved historical message/capability API, framing, 22 boss/3 item candidate catalogs, deferred endgame choices and Cord preserve-only behavior. Unknown IDs now rejected at all Admission/Delivery catalog boundaries. No native hooks/vendor transport or save writes added; managed admission remains OFF.
+
+Behavioral RED: added unknown `0xDEADBEEF` acceptance assertion failed before catalog guard; GREEN after narrow fix. Other initial CMake PATH/link/DLL errors were setup failures, not falsely labeled behavioral RED. Focused builds/direct runs exit 0; `-Group bbsc` exit 0, 2 PASS/0 FAIL/SKIP/MISSING. Independent Luna re-review accepted wire compatibility, guard coverage and password/map rules; no substantive blocker.
+
+Controller final checks at the same source+diff: CLANG64 `bash build.sh` from junction `C:/bbsc-w02` exited 0 (331 native build steps; no generated executable launched); evidence `.superpowers/w04-native-build.log` and `out/gpu-build.log`. `powershell -NoProfile -ExecutionPolicy Bypass -File C:/bbsc-w02/scripts/test_windows_no_game.ps1 -Group all -RepoRoot C:/bbsc-w02 -BuildDir C:/bbsc-w02/out/gpu -SummaryPath C:/bbsc-w02/.superpowers/w04-all-final.log` exited 0: 25 command PASS, 1 SKIP, 0 FAIL/MISSING. Includes nine upstream BUILD/RUN pairs, four fresh SPIR-V validations, Python 52 cases (51 PASS/1 SKIP real ELF) and both portable BBSC runs. Private report `.superpowers/w04-report.md`, focused runner `w04-bbsc-run.log`. C++ executable command counts are not individual assertion counts. Required game gates remain unpassed; catalog fixture is not native item-grant evidence.
+
+STOP: usage tool reports 91% used / 9% remaining in the five-hour window (weekly 39% remaining). User requested stop below10%; no W05 work started or agents active on implementation. W05 READY; exact resume is its filesystem/process RED fixtures with copied temporary profiles, then narrow Windows persistence implementation under W03 source-backed owners. Do not invent native selected-slot/serializer/receipt contracts; G1–G3 remain future user gameplay gates. No game launch, packaging or server deployment. Integration branch stays local per user choice; only documentation checkpoints publish to origin/windows. Final commit/publication verification follows.
+
+Final local implementation checkpoint: `50317971cc073f41791e7e8a5fded543a2e0ebd1` on `codex/bbsc-windows-integration`; not pushed by explicit user choice. Its non-submodule status is clean. Final staged whitespace check found only an extra EOF blank line in the newly imported party header; removed it (whitespace-only, no behavior change) and staged check then passed. Controller checkpoint document links: 22 checked, 0 missing; whitespace PASS. Expected upstream build-script FSR working-tree patches remain uncommitted at unchanged gitlink, separate from historical archival work. No W05 work started. Publication below concerns documentation on origin/windows only, never a claim the local implementation is remotely backed up or merged.
