@@ -12,6 +12,8 @@
 
 **Resume on a new Windows machine:** Read the [handoff and setup checklist](../../handoff/WINDOWS-RESUME.md) before starting step 1.
 
+**Verified preparation and next work (2026-10-21):** Native pinned upstream build and basic copied-profile gameplay now have evidence. Use the [detailed Windows execution plan](2026-10-21-bbsc-windows-execution.md) and [progress tracker](../../WINDOWS-PROGRESS.md) for task IDs, real no-game test results and future gameplay gates. This direction document remains authoritative for scope; completed setup is not a completed BBSC port.
+
 ## Global constraints
 
 - Direction approved on 2026-10-21: Windows only. AppImage and Linux release parity leave the active release scope; existing Linux code and historical evidence are retained.
@@ -58,10 +60,10 @@ A failed join must not mutate the guest world. Pending recovery must remain usab
 
 **Inspect:** old `gpu/bbnet/`, `tests/test_bbsc*`, runtime bridges and new `gpu/bbnet/vendor/shadps4/`, `gpu/CMakeLists.txt`, launcher/build scripts.
 
-- [ ] Compare a clean pinned upstream checkout with the old BBSC checkpoint; record actual existing BBSC components separately from general network support.
-- [ ] Write a file-by-file migration manifest: reuse, adapt, superseded or deferred, including callers, tests, build registration and fixtures.
+- [x] Compare a clean pinned upstream checkout with the old BBSC checkpoint; record actual existing BBSC components separately from general network support.
+- [x] Write a file-by-file migration manifest: reuse, adapt, superseded or deferred, including callers, tests, build registration and fixtures.
 - [ ] Define the static runtime/BBSC interface and a selective patch sequence. Preserve history when integrating; do not blindly cherry-pick the entire Linux integration or replace unrelated upstream code.
-- [ ] Record Windows paths, profile layout and available native machine/runner. Availability has not yet been established.
+- [x] Record Windows paths, profile layout and available native machine/runner. See the setup report and test matrix; native adapter contracts remain W03 discovery work.
 
 **Exit:** reviewed migration manifest and exact source/build pins, with no assumed native offsets or unverified APIs.
 
@@ -69,9 +71,9 @@ A failed join must not mutate the guest world. Pending recovery must remain usab
 
 **Files:** upstream `build.sh`, `msys2-env.sh`, `gpu/CMakeLists.txt`; baseline evidence document.
 
-- [ ] In a clean Windows checkout, follow the pinned MSYS2 CLANG64 guide and run `bash build.sh` before introducing BBSC changes.
-- [ ] Record tool versions, command, output paths and baseline launch result using a copied test profile. Separate upstream failures from migration failures.
-- [ ] Identify which existing portable tests build on Windows; Linux-only test programs need adaptation or an explicit gap.
+- [x] In a clean Windows checkout, follow the pinned MSYS2 CLANG64 guide and run `bash build.sh` before introducing BBSC changes.
+- [x] Record tool versions, command, output paths and baseline launch result using a copied test profile. Separate upstream failures from migration failures.
+- [x] Identify which existing portable tests build on Windows; Linux-only test programs need adaptation or an explicit gap. The test matrix records four upstream target passes, five compile failures, the selected Python results and all historical BBSC source classifications; this is an inventory, not a full-suite PASS.
 
 **Exit:** reproducible native Windows baseline build and launch evidence. No packaging yet.
 

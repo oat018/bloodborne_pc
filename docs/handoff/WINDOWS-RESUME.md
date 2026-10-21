@@ -2,6 +2,12 @@
 
 Updated: 2026-10-21 (Asia/Bangkok). This file replaces dependence on the old Codex session, subagents, distrobox and Linux absolute paths.
 
+## Windows checkpoint after migration setup
+
+The Windows machine, pinned upstream build and copied-profile basic gameplay are now verified; the historical BBSC runtime is still not integrated on that upstream. Read the [progress tracker](../WINDOWS-PROGRESS.md), [detailed execution plan](../superpowers/plans/2026-10-21-bbsc-windows-execution.md), [test matrix](WINDOWS-TEST-MATRIX.md) and [setup evidence](WINDOWS-SETUP-2026-10-21.md) before starting new work. W00 is complete for preparation only; W01 is the next implementation task. Native adapter discovery remains open, and future G1–G3 gameplay gates are mandatory. The current user instruction is to finish non-game preflight/planning and wait, with no further game launch now.
+
+The older new-machine instructions below are retained for repeat setup/history; their statements that build/profile availability are unverified describe the original handoff, not the current evidence. Source pins and preservation/activation/packaging constraints still apply.
+
 ## Current state and source of truth
 
 - Active branch: `windows`; push target: `origin/windows` in `kaoitp/bloodborne_pc`.
@@ -9,7 +15,7 @@ Updated: 2026-10-21 (Asia/Bangkok). This file replaces dependence on the old Cod
 - Historical runtime checkpoint: `ea8ac53801e49b5dc79c072971c0e05efcd7651f`; historical documentation checkpoint: `a37b419ec03b1286c3d7accd954487de6d6d6429` on `pre`. Direction document first published in `263df6d`.
 - Runtime migration has NOT begun. Native managed admission is OFF. Permanent progress/item application and Windows native recovery remain incomplete. Old Linux tests and user gameplay confirmations are not Windows validation.
 - Follow [the ordered Windows migration plan](../superpowers/plans/2026-10-21-bbsc-windows-only-migration.md). Its platform/upstream rules supersede the older plans; approved product behavior remains unchanged.
-- Existing implementation, tests, catalogs, journal/backup/receipt helpers and gameserver sources are tracked. No outstanding subagent result is required to start step 1; reconcile any later-discovered notes with source and committed evidence.
+- Existing implementation, tests, catalogs, journal/backup/receipt helpers and gameserver sources are tracked. No outstanding subagent result blocks resumption. Source/test inventory is now recorded; W01 is the next implementation task, while W03 will define exact adapter interfaces after caller discovery. Reconcile any later-discovered notes with source and committed evidence.
 
 ## Before erasing Linux
 
@@ -46,7 +52,7 @@ Do not run the historical tree's build script as if migration were complete. Fir
 git worktree add --detach ../bloodborne_pc-upstream-windows de2e38af055f09f819946951075c6bb119e62ae6
 ```
 
-Use the pinned `packaging/windows/README.md` in that worktree for current dependency commands. Native Windows MSYS2 **CLANG64** is the baseline environment; run `bash build.sh` there after installing its documented dependencies. Record baseline output before adapting BBSC. That script initializes submodules/applies patches; keep it away from uncommitted FSR work. The detailed next task is step 1 of the migration plan: inventory and write the old-to-new file/caller/test/build manifest. Runtime migration and packaging require their own later evidence; do not automatically merge all upstream changes or run `package.sh` now.
+Use the pinned `packaging/windows/README.md` in that worktree for dependency commands. Native Windows MSYS2 **CLANG64** is the baseline environment. Build/profile evidence and the initial old-to-new file/caller/test/build inventory now exist; do not repeat setup automatically. Keep build scripts away from unrelated FSR work. Follow W01 then the detailed dependencies; W03 owns unresolved adapter declarations and native caller discovery. Runtime migration and packaging require their own later evidence; do not automatically merge all upstream changes or run `package.sh` now.
 
 ## Saves, test profiles and servers
 
@@ -63,7 +69,7 @@ The Linux checkout retains a 119-line uncommitted change in `gpu/third_party/fsr
 
 ## New-session prompt
 
-> Read AGENTS.md and docs/handoff/WINDOWS-RESUME.md. Continue the Windows-only BBSC migration plan at step 1 using Supermedo's pinned Windows base. Inspect source before edits and prepare the migration manifest, preserving origin/pre and unrelated FSR work. Use gpt-6-luna subagents for substantial independent work if available; handle small work directly. Stop before EXE packaging. Keep source/evidence gaps explicit, and checkpoint/commit/push origin/windows if the 5-hour remaining usage falls below 10%. Do not treat the historical implementation as already migrated.
+> Read AGENTS.md, docs/handoff/WINDOWS-RESUME.md and docs/WINDOWS-PROGRESS.md. Resume the detailed Windows execution plan at its first incomplete task (currently W01) when implementation is requested. Use the verified pinned upstream baseline; do not redo completed setup. W03 owns unresolved native caller/interface discovery. Preserve origin/pre and unrelated FSR work. Use gpt-6-luna for substantial independent tasks and stop before packaging. Do not open the game while the user's no-game instruction remains active; G1–G3 are future user gameplay gates. Keep source/evidence gaps explicit and checkpoint/push origin/windows below 10% remaining in the 5-hour window. Do not treat historical BBSC as already migrated.
 
 ## Handoff acceptance
 

@@ -23,7 +23,7 @@ Git's archived FSR patch bytes hash to `025696793a698f2a6f5915314d269c8b77dd4d93
 - Restored 18 save/metadata files into `C:/Projects/bloodborne_pc/.superpowers/windows-profiles/baseline-offline`; every copied file's size and SHA-256 matched its archived member. Original archive untouched. Per-file manifest is private beside the profile. Private server connectivity has not been established.
 - Managed admission stays disabled. No runtime code migration, server redeployment or EXE/ZIP packaging has been performed.
 
-Next: review the migration manifest and inventory portable Windows tests. Basic copied-profile gameplay is user-confirmed; post-write reload and recovery evidence remain open. Follow the ordered migration plan for implementation.
+Next: follow W01 in the [detailed execution plan](../superpowers/plans/2026-10-21-bbsc-windows-execution.md) after the user's next instruction. Source/test inventory and no-game preflight are recorded in the [progress tracker](../WINDOWS-PROGRESS.md) and [test matrix](WINDOWS-TEST-MATRIX.md). Basic copied-profile gameplay is user-confirmed; post-write reload and recovery evidence remain open. No game was opened during the planning pass.
 
 ## Baseline invocation
 
