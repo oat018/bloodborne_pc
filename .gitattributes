@@ -1,0 +1,2 @@
+# Preserve the archived patch bytes and checksum across Windows checkouts.
+docs/handoff/fsr-vulkan-local-work.patch -text
