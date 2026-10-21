@@ -75,16 +75,16 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Dependencies:** W01. **Game:** no.
 
-**Files:** modify `tests/test_gpu_runtime_stubs.cpp`, `tests/test_upscaler_support.cpp`, `gpu/CMakeLists.txt`; create `scripts/test_windows_no_game.ps1`; add a fixture runner test in `tests/test_windows_no_game_runner.py` if needed for selection/failure propagation.
+**Files:** modify `tests/test_gpu_runtime_stubs.cpp`, `tests/test_upscaler_support.cpp`, `gpu/CMakeLists.txt`, `.gitignore` (ignore private runner evidence); create `scripts/test_windows_no_game.ps1`; add a fixture runner test in `tests/test_windows_no_game_runner.py` if needed for selection/failure propagation.
 
 **Interfaces:** consumes existing nine upstream target names and Win32 compatibility definitions. Produces a runner that accepts explicit test groups (`baseline`, `bbsc`, `all`), records each command's exit and returns nonzero on failure. The runner must not invoke `run.py`, a launcher, or `bb-probe`; unavailable future BBSC targets are a reported missing group, not a pass.
 
-- [ ] Reproduce the recorded RED builds: four renderer test targets fail on `sigjmp_buf`; `upscaler-support-test` fails on `setenv`/`unsetenv`. Add assertions for writable temporary paths and environment restoration.
-- [ ] Adapt the stub declaration to the actual Windows fault-recovery type from `src/compat_win.h`; retain the POSIX branch. Replace test-only environment/temp assumptions using Windows-supported calls and actual temp paths. Resolve further link gaps against the real symbols, without weakening runtime ABI checks or assertions.
-- [ ] Ensure every assertion-based target has `-UNDEBUG`, including `motion-shader-test`. Classify CPU-only, SPIR-V generation and headless Vulkan-device tests separately; the source comment saying no device is required is inaccurate for three targets.
-- [ ] Build all nine targets. Run CPU targets directly; run `motion-shader-test` with an isolated output directory and validate generated `.spv` files with installed `spirv-val`; run the three headless Vulkan tests without game windows.
-- [ ] Add the runner with explicit allowlisted commands, isolated TEMP/TMP and durable per-test summaries. Test that a failing child, missing target and skipped prerequisite remain visible and cannot yield an all-pass summary.
-- [ ] Run the six audited upstream Python modules through the baseline group. Retain the eight gameserver-ID tests and direct historical catalog run as separately pinned reference evidence; the integration BBSC group remains unavailable until W04/W06 introduce its actual sources/targets. Recheck the native build, review and commit.
+- [x] Reproduce the recorded RED builds: four renderer test targets fail on `sigjmp_buf`; `upscaler-support-test` fails on `setenv`/`unsetenv`. Add assertions for writable temporary paths and environment restoration.
+- [x] Adapt the stub declaration to the actual Windows fault-recovery type from `src/compat_win.h`; retain the POSIX branch. Replace test-only environment/temp assumptions using Windows-supported calls and actual temp paths. Resolve further link gaps against the real symbols, without weakening runtime ABI checks or assertions.
+- [x] Ensure every assertion-based target has `-UNDEBUG`, including `motion-shader-test`. Classify CPU-only, SPIR-V generation and headless Vulkan-device tests separately; the source comment saying no device is required is inaccurate for three targets.
+- [x] Build all nine targets. Run CPU targets directly; run `motion-shader-test` with an isolated output directory and validate generated `.spv` files with installed `spirv-val`; run the three headless Vulkan tests without game windows.
+- [x] Add the runner with explicit allowlisted commands, isolated TEMP/TMP and durable per-test summaries. Test that a failing child, missing target and skipped prerequisite remain visible and cannot yield an all-pass summary.
+- [x] Run the six audited upstream Python modules through the baseline group. Retain the eight gameserver-ID tests and direct historical catalog run as separately pinned reference evidence; the integration BBSC group remains unavailable until W04/W06 introduce its actual sources/targets. Recheck the native build, review and commit.
 
 **W02 environment ruling (2026-10-21):** The managed worktree's long absolute path can exceed Ninja's Windows path limit. A short junction alias to the same checkout is permitted; record its resolved target and do not create a second source copy. Run upstream build preparation/patches as required before treating dependency compile failures as test regressions. Acceptance and native/game boundaries are unchanged.
 

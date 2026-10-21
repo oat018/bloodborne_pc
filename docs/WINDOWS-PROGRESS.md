@@ -1,6 +1,6 @@
 # BBSC Windows progress
 
-Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01/W03 source preparation verified; W02 harness IN_PROGRESS.** No game launch is authorized.
+Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01–W03 verified in their stated scope; W04 portable policy READY.** No game launch is authorized.
 
 ## Read this first
 
@@ -16,9 +16,9 @@ Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01/W03 source prepara
 |---|---|---|---|---|
 | W00 | Native baseline, copied-profile preparation, source/test inventory | VERIFIED | Already tested by user | Native build exit 0; characters and basic gameplay user-confirmed; no-game results below. Full test parity and BBSC are outside this checkbox. |
 | W01 | Separate integration branch/worktree and reviewed file/history map | VERIFIED | No | Managed `codex/bbsc-windows-integration` at upstream pin, reviewed [ownership/history map](handoff/WINDOWS-INTEGRATION-BASE.md). Explicit documentation paths copied; runtime unchanged. |
-| W02 | Windows no-game harness and reproducible runner | IN_PROGRESS | No | Resolve five upstream target compile failures; all assertion tests keep `-UNDEBUG`; add explicit group/failure reporting. |
+| W02 | Windows no-game harness and reproducible runner | VERIFIED | No | Nine targets BUILD/RUN PASS, four SPIR-V validators PASS; baseline exit 0, Python 51 PASS/1 SKIP; runner regression 3 PASS. Detailed evidence below. |
 | W03 | Exact static adapter/caller/thread/lifetime contracts | VERIFIED (source map only) | No for source map | [Reviewed contract map](handoff/WINDOWS-ADAPTER-CONTRACT.md); actual native world consumer/identity/grant/UI contracts remain blocked for G1–G3. No guessed adapter APIs approved. |
-| W04 | Portable party/protocol/catalog and focused targets | WAIT_DEP W02 | No | Catalog-only fixture already passes; full policy/transport integration is not ported. |
+| W04 | Portable party/protocol/catalog and focused targets | READY | No | Catalog-only fixture already passes; full policy/transport integration is not ported. |
 | W05 | Windows locking/journal/backups/receipts and identity fixtures | WAIT_DEP W03/W04 | No for fixtures | Actual Windows child-process interruption and filesystem semantics must be proven. |
 | W06 | Static HTTP/Matching2/signaling/transport integration | WAIT_DEP W03/W04/W05 | No for mocks | Selective BBSC hunks; no copied Linux vendor tree; activation stays OFF. |
 | W07 | Native ABI/tick/scanner/selected-character adapter | WAIT_DEP W03/W05/W06 | Fixtures no; live later | No assumed native offsets or worker-as-game-thread substitution. |
@@ -29,7 +29,7 @@ Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01/W03 source prepara
 
 - [x] W00 preparation and evidence inventory
 - [x] W01 integration workspace/history map
-- [ ] W02 Windows test harness
+- [x] W02 Windows test harness
 - [x] W03 adapter contract map
 - [ ] W04 portable policy
 - [ ] W05 durable storage/identity
@@ -117,3 +117,26 @@ W03 second review: active/fallback registration and close-result corrections acc
 VERIFIED for source discovery only, after independent Luna review and two correction passes. Inspected upstream `de2e38af055f09f819946951075c6bb119e62ae6` and historical `ea8ac53801e49b5dc79c072971c0e05efcd7651f` via `git show`, `git grep -n`, `git ls-tree`; controller source at `45e9de3` plus documentation diff. Map covers real THD/vendor registration, request/server/peer effects before callbacks, callback worker/teardown, loader image ownership, THD guest-memory accesses, title/user/save mount/commit, and blocked native/UI/recovery ownership. Concrete native diagnostics remain G1–G3; no API invented or admission enabled.
 
 Documentation link/content/whitespace checks PASS; runtime tests/build NOT RUN (source-discovery task); fixture/native/game evidence remains separate. W03 review explicitly accepted complete source mapping while unresolved native observations stay blocked. W02 remains IN_PROGRESS; W04 waits W02; W05 waits W04 and cannot assume native receipt qualification. Latest usage: five-hour 29%, weekly 42% remaining. No game launched, no packaging/server deployment.
+
+W03 publication: integration docs commit `d91f501`, controller `27d0c77` pushed and `HEAD` equals `origin/windows`; `origin/pre` remains `a37b419ec03b1286c3d7accd954487de6d6d6429`. W02 early independent review requested two fixes before acceptance: assert environment restoration after the RAII object is destroyed, and use fresh shader output to prevent stale SPIR-V from satisfying current-run evidence. Runner records must label CPU/shader/headless Vulkan categories. Implementer is addressing these; W02 remains IN_PROGRESS, full suite/build evidence pending.
+
+
+W02 support scope: added /.superpowers/ ignore to integration .gitignore because upstream lacks it and the runner writes private durable summaries there. git check-ignore .superpowers/w02-report.md PASS; plan file ownership updated. This prevents accidental evidence/profile tracking without changing runtime behavior.
+
+W02 build milestone: implementer reports full `bash build.sh` PASS (365 steps; development bb-probe/bb-gpu-capabilities/bb-play outputs produced, none executed). Source integration `d91f501` (documentation-only successor to `ae563c8`) plus uncommitted W02 code; final accepted code SHA/evidence pending. First baseline runner attempt FAIL: Python argv flattening, missing CLANG64 DLL PATH (`0xC0000135`), shader output freshness and three headless Vulkan targets' unresolved runtime/`bb_setjmp`/`CreateFileMapping2` linkage. Implementer added runner argv/PATH/fresh-output/category handling and test-only aborting stubs; reviewer checking exact ABI and unreachable-path behavior. Full baseline rerun underway; do not infer all tests PASS from full build. W02 remains IN_PROGRESS.
+
+W02 scoped source re-review: no remaining source blocker. RAII restoration now asserted after scope, shader output uses fresh GUID directory and exact four nonempty outputs, CPU/shader/headless categories recorded. Reviewer cross-checked new Windows stub declarations against runtime and Windows ABI; they abort if called and cannot emulate successful runtime memory/thread behavior. Execution is still the acceptance gate: any abort is a FAIL to investigate, not waive. Latest usage 25% five-hour / 41% weekly remaining.
+
+Controller independent W02 runner verification: at integration `d91f501` plus uncommitted current W02 diff, command `C:/msys64/clang64/bin/python.exe -m unittest discover -s tests -p test_windows_no_game_runner.py -v` with CLANG64 DLL PATH exited 0; 3 tests PASS in 45.959s, 0 skips. Cases: failing child, missing prerequisite, missing target cannot produce passing group. Tool output is independent execution evidence; full baseline acceptance still awaits implementer report. Usage now five-hour 23%, weekly 41% remaining.
+
+W02 final baseline evidence inspected by controller: private integration `.superpowers/w02-baseline-pass.log` records all nine native build/run commands PASS, four exact fresh SPIR-V files validated via `spirv-val --target-env vulkan1.3` PASS, six Python modules with 52 total cases (51 PASS, 1 SKIP real-ELF prerequisite). Runner command summary is 23 PASS/0 FAIL/0 SKIP/0 MISSING (command counts, distinct from Python case counts). Final top-level exit/full-build/assertion flag report and reviewer acceptance pending before W02 checkbox closure. No game/launcher/profile opened.
+
+### W02 accepted checkpoint — 2026-10-21
+
+VERIFIED: integration source `d91f501629f9d2a51eb04fae797ff475c6e032e6` plus the reviewed W02 diff. Files: `.gitignore` private evidence rule, Windows-compatible aborting runtime test stubs, portable upscaler environment/temp fixtures, assertion-enabled CMake targets, allowlisted PowerShell no-game runner and three runner regression tests. All nine assertion targets compile with `-UNDEBUG`. Native ABI declarations reviewed against their actual owners; abort stubs were not reached in successful tests.
+
+Commands (CLANG64): `bash ./build.sh` from `C:/bbsc-w02` (junction to managed integration checkout) exited 0, 365 build steps; no produced game/program launched. `powershell -NoProfile -ExecutionPolicy Bypass -File C:/bbsc-w02/scripts/test_windows_no_game.ps1 -Group baseline -RepoRoot C:/bbsc-w02 -BuildDir C:/bbsc-w02/out/gpu -SummaryPath C:/bbsc-w02/.superpowers/w02-baseline-final.log` with explicit CLANG64 Ninja/Python/spirv-val paths exited 0: 23 command PASS, 1 Python prerequisite SKIP, 0 FAIL/MISSING. This includes nine BUILD/RUN pairs, four fresh exact SPIR-V files validated for Vulkan 1.3, and six Python modules with 52 cases (51 PASS/1 SKIP missing real ELF). Three renderer tests used a headless Vulkan device, no game window. Native full build alone was not used as test evidence.
+
+Runner unittest discovery exited 0, 3 PASS (implementer and independent controller run); explicit `-Group bbsc` exited 1 with MISSING as required before W04/W06. `-Group all` NOT RUN in W02; it currently includes the baseline plus unavailable-BBSC failure. Historical gameserver 8-case and catalog evidence retain their separate pins; not rerun or relabeled. Private evidence: integration `.superpowers/w02-report.md`, `w02-baseline-final.log`, `w02-bbsc-unavailable.log`, `out/gpu-build.log`; controller `.superpowers/sdd/2026-10-21-bbsc-windows-execution/w02-controller-runner-check.md`. Initial RED/setup failures and review fixes are recorded above. Expected upstream build-script FSR patch diff stays private/uncommitted, gitlink pin unchanged; historical archival patch untouched.
+
+Independent Luna source/evidence re-review found no remaining blocker after RAII restoration and fresh shader-output fixes. Whitespace/scope check PASS. W04 is next READY; W05 remains WAIT_DEP W04, with real native identity/receipt/grant qualification still pending G1–G3. No game launch, packaging or server deployment. Latest usage five-hour 21%, weekly 41% remaining; continue while above requested stop threshold.

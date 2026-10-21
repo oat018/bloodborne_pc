@@ -4,7 +4,7 @@ Updated: 2026-10-21 (Asia/Bangkok). This file replaces dependence on the old Cod
 
 ## Windows checkpoint after migration setup
 
-The Windows machine, pinned upstream build and copied-profile basic gameplay are now verified; the historical BBSC runtime is still not integrated on that upstream. Read the [progress tracker](../WINDOWS-PROGRESS.md), [detailed execution plan](../superpowers/plans/2026-10-21-bbsc-windows-execution.md), [test matrix](WINDOWS-TEST-MATRIX.md) and [setup evidence](WINDOWS-SETUP-2026-10-21.md) before starting new work. W00 is complete for preparation only; W01 workspace/history mapping and W03 source contracts are verified; W02 harness is in progress. Native adapter discovery remains open, and future G1–G3 gameplay gates are mandatory. The user authorized implementation on 2026-10-21. Continue offline tasks from the tracker; no further game launch is authorized.
+The Windows machine, pinned upstream build and copied-profile basic gameplay are now verified; the historical BBSC runtime is still not integrated on that upstream. Read the [progress tracker](../WINDOWS-PROGRESS.md), [detailed execution plan](../superpowers/plans/2026-10-21-bbsc-windows-execution.md), [test matrix](WINDOWS-TEST-MATRIX.md) and [setup evidence](WINDOWS-SETUP-2026-10-21.md) before starting new work. W00 is complete for preparation only; W01 workspace/history mapping, W02 no-game harness and W03 source contracts are verified; W04 portable policy is next. Native adapter discovery remains open, and future G1–G3 gameplay gates are mandatory. The user authorized implementation on 2026-10-21. Continue offline tasks from the tracker; no further game launch is authorized.
 
 The older new-machine instructions below are retained for repeat setup/history; their statements that build/profile availability are unverified describe the original handoff, not the current evidence. Source pins and preservation/activation/packaging constraints still apply.
 
@@ -69,7 +69,7 @@ The Linux checkout retains a 119-line uncommitted change in `gpu/third_party/fsr
 
 ## New-session prompt
 
-> Read AGENTS.md, docs/handoff/WINDOWS-RESUME.md and docs/WINDOWS-PROGRESS.md. Resume the detailed Windows execution plan at its first incomplete task (currently W02) when implementation is requested. Use the verified pinned upstream baseline; do not redo completed setup. W03 owns unresolved native caller/interface discovery. Preserve origin/pre and unrelated FSR work. Use gpt-6-luna for substantial independent tasks and stop before packaging. Do not open the game while the user's no-game instruction remains active; G1–G3 are future user gameplay gates. Keep source/evidence gaps explicit and checkpoint/push origin/windows below 10% remaining in the 5-hour window. Do not treat historical BBSC as already migrated.
+> Read AGENTS.md, docs/handoff/WINDOWS-RESUME.md and docs/WINDOWS-PROGRESS.md. Resume the detailed Windows execution plan at its first incomplete task (currently W04) when implementation is requested. Use the verified pinned upstream baseline; do not redo completed setup. W03 owns unresolved native caller/interface discovery. Preserve origin/pre and unrelated FSR work. Use gpt-6-luna for substantial independent tasks and stop before packaging. Do not open the game while the user's no-game instruction remains active; G1–G3 are future user gameplay gates. Keep source/evidence gaps explicit and checkpoint/push origin/windows below 10% remaining in the 5-hour window. Do not treat historical BBSC as already migrated.
 
 ## Handoff acceptance
 
