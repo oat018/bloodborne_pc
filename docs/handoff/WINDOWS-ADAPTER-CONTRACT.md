@@ -78,3 +78,26 @@ Inspected source objects using `git show`, `git grep -n`, and `git ls-tree` from
 
 
 Review: independent Luna source review initially rejected missing active THD paths, then required concrete guest-memory ownership and vendor dispatcher corrections. Final scoped review accepted the source map after those fixes and the documented event-ID plan correction. No native interface or gameplay gate is qualified by this review.
+
+## W05 reviewed runtime file observation service — 2026-10-21
+
+Source owners are the existing `src/runtime_file.c` `do_close` → `commit_file` and active mount/profile path translation; this adds no game hook or network callback. Independent source review compared `de2e38a` with historical `ea8ac53` and approved a standalone pure-C runtime observation boundary before implementation. Declaration owner: new `src/runtime_file_receipt.h`, exposed through `src/runtime.h`; implementation owner `src/runtime_file.c`.
+
+```c
+typedef struct RuntimeFileReceipt {
+    uint64_t generation;
+    char path[1024];
+    int32_t error;
+    uint64_t bytes;
+    char sha256[65];
+} RuntimeFileReceipt;
+int32_t runtime_file_save_receipt(const char *guest_or_host_path, RuntimeFileReceipt *out);
+```
+
+Contract: output is zero-initialized before validation. Return 0 means a locked observation was found for the exact canonical savedata host file; inspect `error` separately. Positive errno indicates invalid/unresolved path or absent observation. Guest paths require a current active mount; no previous-host fallback. Profile/configure and mount-rebind/unmount invalidate observations, while generation remains process-global monotonic. It is not a native selected-character identity or serializer callback. No dynamic `BbNetHost` ABI is imported and no BBSC native consumer is connected in W05.
+
+For dirty character-save candidates only, serialize competing close/publication work. Check preceding write outcomes including short writes; hash the complete exact temporary candidate while its writer remains open and verify file identity/size. Publish a success observation only after checked file flush, checked writer close, and checked same-volume replacement/write-through operation. Increment generation only on success. A failed attempt invalidates that path's previous successful observation: retain generation, set positive error, clear bytes/hash, preserve the old committed save and pending BBSC work. A clean/no-op/non-character close must not manufacture a success observation. Hash/path/file ownership errors fail closed. Data in a receipt proves candidate file bytes only, never game-event completion or inventory qualification.
+
+Windows qualification is limited to observed successful API operations and tested child-process interruption/reopen behavior. `_commit`/`FlushFileBuffers` and `MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)` do not establish a general power-loss transaction or an independently flushed parent-directory entry for same-volume replacement. Receipt alone cannot retire managed pending progress/return work; that still requires the selected-slot/serializer/grant/identity proof chain and current G2/G3 qualification. Unsupported or ambiguous required proof retains pending work.
+
+Primary references checked during the review: [CRT _commit](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/commit?view=msvc-150), [MoveFileExW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw), [FlushFileBuffers](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers), [reparse operations](https://learn.microsoft.com/en-us/windows/win32/fileio/reparse-points-and-file-operations). Fixture requirements include operation faults, stale/missing receipt, active mount/profile changes, competing processes, and path/reparse swaps. This is an approved implementation contract, not evidence of implementation or a passed native gate.

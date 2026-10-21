@@ -128,7 +128,7 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Dependencies:** W03/W04. **Game:** no for filesystem/process fixtures; native writer/identity confirmation later.
 
-**Files:** adapt historical `bbsc_party_journal.cpp` into `gpu/bbnet/bbsc/`, `bbsc_persistence.{h,cpp}`, upstream `src/runtime_file.c`, `src/runtime_savedata.c`, static bridge declarations selected by W03; adapt `tests/test_bbsc_party_journal.cpp`, `tests/test_bbnet_save_host.c`; create `tests/test_bbsc_storage_windows.cpp` and register it.
+**Files:** adapt historical `bbsc_party_journal.cpp` into `gpu/bbnet/bbsc/`, upstream `src/runtime_file.c`, `src/runtime_savedata.c` only if required, and a reviewed pure-C receipt declaration under `src/runtime_file_receipt.h` / `src/runtime.h`; adapt `tests/test_bbsc_party_journal.cpp`, `tests/test_bbnet_save_host.c`; create `tests/test_bbsc_storage_windows.cpp` and register it. Extend `scripts/test_windows_no_game.ps1` and its runner regression tests so required native fixture SKIPs remain visible and cannot be reported as full PASS.
 
 **Interfaces:** retain `CharacterLease`, `StoreJournal`, `LoadJournal`, `StoreSelectedSaveBackup`, `ReturnSaveTracker` and `ManagedCycleEpoch` contracts from the historical header where portable. The static selected-save receipt callback's exact declaration and publication point must match W03's reviewed document.
 
@@ -137,6 +137,8 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 - [ ] Port crash fixtures using child Windows processes with controlled checkpoints; never terminate a real game. Reopen files in a new process and prove incomplete work remains pending and complete work is idempotent.
 - [ ] Cover slot deletion/reuse and native 6→7 / saturated 7→7 ambiguity using synthetic identities. Server-issued ID tests do not substitute for client save identity.
 - [ ] Register/run `bbsc-storage-windows-test`, `bbsc-party-journal-test` (separate from the policy target) and `bbnet-save-host-test`, plus W04 tests and native build. Review and commit.
+
+**W05 source-ownership correction (2026-10-21):** Historical bbsc_persistence.{h,cpp} contain native persistent-session patches and default-on feature switches, not journal/filesystem primitives. Do not transplant them during W05; their necessary native responsibilities belong to W07 under verified hook contracts. W05 retains filesystem algorithms in bbsc_party_journal.cpp and separates runtime-file observations from future selected-character/serializer proof. The new receipt declaration must be reviewed and recorded in W03 before implementation; it is not the old dynamic BbNetHost ABI.
 
 **Exit:** Windows-native temporary-file/process evidence for storage semantics, independent of game saves. Actual game-selected slot and serializer receipts remain G2/G3 checks.
 
