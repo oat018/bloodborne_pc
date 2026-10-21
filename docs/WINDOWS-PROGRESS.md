@@ -1,6 +1,6 @@
 # BBSC Windows progress
 
-Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: Quota checkpoint: W02 READY to resume unresolved headless diagnosis; W05 reviewed focused code WAIT_DEP W02; W06 not started.** No game launch is authorized.
+Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: User pause: W02 READY to resume dispatcher diagnosis; W05 WAIT_DEP W02; W06 not started.** No game launch is authorized.
 
 ## Read this first
 
@@ -16,7 +16,7 @@ Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: Quota checkpoint: W02 
 |---|---|---|---|---|
 | W00 | Native baseline, copied-profile preparation, source/test inventory | VERIFIED | Already tested by user | Native build exit 0; characters and basic gameplay user-confirmed; no-game results below. Full test parity and BBSC are outside this checkbox. |
 | W01 | Separate integration branch/worktree and reviewed file/history map | VERIFIED | No | Managed `codex/bbsc-windows-integration` at upstream pin, reviewed [ownership/history map](handoff/WINDOWS-INTEGRATION-BASE.md). Explicit documentation paths copied; runtime unchanged. |
-| W02 | Windows no-game harness and reproducible runner | READY | No | Reopened baseline; quota checkpoint with no active owner. Rebuild three headless targets, then diagnose default dispatcher init after successful instance creation. Prior headless RUN PASS invalid; required baseline still FAIL. Five runner regressions PASS. |
+| W02 | Windows no-game harness and reproducible runner | READY | No | Paused at user request; source owner interrupted, read-only audit complete. Rebuild three headless targets, then diagnose default dispatcher init after successful instance creation. Prior headless RUN PASS invalid; required baseline still FAIL. Five runner regressions PASS. |
 | W03 | Exact static adapter/caller/thread/lifetime contracts | VERIFIED (source map only) | No for source map | [Reviewed contract map](handoff/WINDOWS-ADAPTER-CONTRACT.md); actual native world consumer/identity/grant/UI contracts remain blocked for G1–G3. No guessed adapter APIs approved. |
 | W04 | Portable party/protocol/catalog and focused targets | VERIFIED | No | Portable policy/protocol/catalog targets pass; reviewed unknown-event guards. No live transport/native qualification. |
 | W05 | Windows locking/journal/backups/receipts and identity fixtures | WAIT_DEP W02 | No for fixtures | Reviewed focused implementation; all five BBSC tests pass with actual process exits. Required combined baseline FAIL (three headless crashes), not accepted. Native identity/serializer gates remain open. |
@@ -222,3 +222,13 @@ Local integration documentation checkpoint11b580ecda5cd25bbb526527b61985f3f936b3
 STOP: final usage check reports primary92%used/8%remaining, weekly76%used/24%remaining. User's below10 stop is active; no development/diagnostic work remains running. Checkpoint only. Previous main docs c041b79 pushed/equalorigin/windows; origin/pre still a37b419ec03b1286c3d7accd954487de6d6d6429. Integration11b580e tracked clean; sourcea9a61df local only. ResumeW02READY with exact dispatcher-init diagnosis above, W05WAIT_DEP, W06notstarted.
 
 Final local documentation checkpoint: 0f768287d61448fd73b065f1dbc56b6fffa6e1bc (source a9a61df unchanged; no integration push).
+
+User resumed execution: primary100%remaining, weekly24%remaining. W02 IN_PROGRESS from integration0f76828/sourcea9a61df and main024d685. Reuse exact unresolved diagnostic evidence; rebuild clean-source headless targets before trusting binaries. Single owner for diagnostic/source edits, independent read-only dispatcher macro/storage/compile audit. Keep integration LOCAL, docs origin/windows, admissionOFF/no-game/no-packaging/no-deploy. Stop new work below10% in either remaining window and checkpoint.
+
+W02 resumed clean-source evidence at integration0f76828/sourcea9a61df: git diff empty; ninja -C out/gpu scene-resolution-test taa-shader-test camera-motion-test reports no work to do. Fresh Start-Process -Wait -PassThru runs reproduce all three actual exits -1073741819, no stdout/stderr. Private integration logs .superpowers/w02-resume-{test}.out/.err.log. Required baseline remains FAIL. Owner now isolates Hpp bootstrap with a private minimal dynamic repro; independent auditor compares real macro/storage/compile/link definitions. No product fix or skipped test.
+
+W02 freshness correction: restored source copies can retain older mtimes than diagnostic objects; Ninja no-work plus clean source diff is insufficient proof of post-cleanup executable freshness. Requested an explicit minimal rebuild of the three formerly instrumented translation units (mtime-only touch, then three target links) and waited reruns. The just-recorded resumed exits are actual processes but not accepted as clean-build evidence until this check. No evidence upgraded from NOT VERIFIED by assumption.
+
+USER PAUSE: work stopped on explicit request; W02 owner interrupted, independent audits finished, no W06 implementation. Static audit found a concrete Vulkan-Hpp definition inconsistency: default dispatcher storage vk_common.cpp lacks VK_USE_PLATFORM_WIN32_KHR, while vk_platform.cpp defines it locally; installed Hpp conditionally changes dispatcher members/layout. This is a strong candidate, not proven crash root cause. Next resumed action: finish clean-source freshness rebuild, then test a minimal consistent-definition hypothesis using evidence in integration .superpowers/w02-dispatch-audit.md. Do not implement from hypothesis without controlled evidence.
+
+W05 late waited regression check: preserved pre-longpath and fixed standalone storage fixtures both actually exit0 under original long physical TEMP, including317char backup. Isolated RED-to-GREEN NOT REPRODUCED; extended-path change cannot be claimed as a proven fix for original runner failure. No tracked edits or out/gpu changes from this check. Evidence .superpowers/w05-storage-waited-regression.md. No development continues during user pause; resume only when requested.
