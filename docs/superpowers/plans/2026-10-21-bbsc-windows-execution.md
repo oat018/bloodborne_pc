@@ -86,6 +86,8 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 - [ ] Add the runner with explicit allowlisted commands, isolated TEMP/TMP and durable per-test summaries. Test that a failing child, missing target and skipped prerequisite remain visible and cannot yield an all-pass summary.
 - [ ] Run the six audited upstream Python modules through the baseline group. Retain the eight gameserver-ID tests and direct historical catalog run as separately pinned reference evidence; the integration BBSC group remains unavailable until W04/W06 introduce its actual sources/targets. Recheck the native build, review and commit.
 
+**W02 environment ruling (2026-10-21):** The managed worktree's long absolute path can exceed Ninja's Windows path limit. A short junction alias to the same checkout is permitted; record its resolved target and do not create a second source copy. Run upstream build preparation/patches as required before treating dependency compile failures as test regressions. Acceptance and native/game boundaries are unchanged.
+
 **Acceptance:** `powershell -NoProfile -File scripts/test_windows_no_game.ps1 -Group baseline` exits 0 only when all selected baseline checks pass, with skips counted; no game/process/profile is opened. W04 adds the BBSC group after its real targets exist.
 
 ## W03 — Resolve static adapter and caller contracts
@@ -96,12 +98,14 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Interfaces:** consumes verified lifecycle `bbnet_configure` → image setup via `bbnet_set_image` → `bbnet_initialize`, plus resolver registration `bbnet_register`. Produces an exact contract document: real symbol, declaration/file, caller, thread, ownership/lifetime, failure/cancellation result, teardown and test seam for each boundary. It becomes the signature authority for W05–W10.
 
-- [ ] Trace image allocation, relocation, memory protection, callback lifetime, replacement and shutdown. Map supported guest-hook infrastructure and game tick; `thd::DispatchAfter` is a network worker, not a game-thread scheduler.
-- [ ] Trace Matching2 request, callback, polling, signaling, native result events `0x29/0x2A`, Lua join, multiplayer initialization, placement and reload. Mark every route that can mutate the world and the earliest cancellable consumer. No held callback or null Lua dispatch qualifies alone.
-- [ ] Trace selected save/profile/slot and the actual writer→close path. Map candidate serializer/item-grant hooks and completion receipts. Do not equate `_commit`/close or memory mutation with a durable receipt.
-- [ ] Map Kit/guest Blank/host Blank/menu/text/animation/overlay ownership and startup recovery before online initialization.
-- [ ] Record proposed adapter declarations only after concrete owners are identified. For unresolved native facts, define the exact diagnostic and expected G1/G2/G3 observation; keep those contracts blocked and do not invent offsets.
-- [ ] Review thread/ABI/cancellation and save contracts; commit the map. Work on portable units may proceed while native validation is pending, but no enabled hook may depend on an unresolved contract.
+- [x] Trace image allocation, relocation, memory protection, callback lifetime, replacement and shutdown. Map supported guest-hook infrastructure and game tick; `thd::DispatchAfter` is a network worker, not a game-thread scheduler.
+- [x] Trace both registered Matching2 backends (THD and vendor fallback), request, callback, polling/signaling, and any claimed native result events through their concrete producer/consumer, then Lua join, multiplayer initialization, placement and reload. Distinguish HTTP punctuation bytes `0x29/0x2A` from historical custom signaling capability type `0x29`; neither proves a native result-event route. If no such producer/consumer exists in pinned source, record that absence and the required G1 diagnostic. Mark every route that can mutate network/session or world state and the earliest cancellable consumer. No held callback or null Lua dispatch qualifies alone.
+- [x] Trace selected save/profile/slot and the actual writer→close path. Map candidate serializer/item-grant hooks and completion receipts. Do not equate `_commit`/close or memory mutation with a durable receipt.
+- [x] Map Kit/guest Blank/host Blank/menu/text/animation/overlay ownership and startup recovery before online initialization.
+- [x] Record proposed adapter declarations only after concrete owners are identified. For unresolved native facts, define the exact diagnostic and expected G1/G2/G3 observation; keep those contracts blocked and do not invent offsets.
+- [x] Review thread/ABI/cancellation and save contracts; commit the map. Work on portable units may proceed while native validation is pending, but no enabled hook may depend on an unresolved contract.
+
+**W03 source correction (2026-10-21):** Independent source review found the earlier asserted native result IDs unsupported: pinned HTTP uses those bytes as URL punctuation, and historical BBSC uses only 0x29 as a custom signaling capability type. The revised trace requirement above preserves discovery of actual native producers/consumers rather than inventing event IDs. This affects W03 and downstream W06/W08 diagnostics; G1 remains mandatory. Also map THD's existing SetImage/SetSignalingGate/HostExtra guest-memory access and distinguish it from the stricter BBSC game-thread requirement.
 
 **Exit:** every implementation dependency has either a source-backed contract or a named blocked native observation, with no guessed API. Complete source mapping is distinct from native validation.
 

@@ -1,6 +1,6 @@
 # BBSC Windows progress
 
-Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01 verified; W02 and W03 READY.** No game launch is authorized.
+Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01/W03 source preparation verified; W02 harness IN_PROGRESS.** No game launch is authorized.
 
 ## Read this first
 
@@ -16,8 +16,8 @@ Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01 verified; W02 and 
 |---|---|---|---|---|
 | W00 | Native baseline, copied-profile preparation, source/test inventory | VERIFIED | Already tested by user | Native build exit 0; characters and basic gameplay user-confirmed; no-game results below. Full test parity and BBSC are outside this checkbox. |
 | W01 | Separate integration branch/worktree and reviewed file/history map | VERIFIED | No | Managed `codex/bbsc-windows-integration` at upstream pin, reviewed [ownership/history map](handoff/WINDOWS-INTEGRATION-BASE.md). Explicit documentation paths copied; runtime unchanged. |
-| W02 | Windows no-game harness and reproducible runner | READY | No | Resolve five upstream target compile failures; all assertion tests keep `-UNDEBUG`; add explicit group/failure reporting. |
-| W03 | Exact static adapter/caller/thread/lifetime contracts | READY | No for source map | Source findings exist; native hook/cancellation/save contracts still require discovery and later live confirmation. |
+| W02 | Windows no-game harness and reproducible runner | IN_PROGRESS | No | Resolve five upstream target compile failures; all assertion tests keep `-UNDEBUG`; add explicit group/failure reporting. |
+| W03 | Exact static adapter/caller/thread/lifetime contracts | VERIFIED (source map only) | No for source map | [Reviewed contract map](handoff/WINDOWS-ADAPTER-CONTRACT.md); actual native world consumer/identity/grant/UI contracts remain blocked for G1–G3. No guessed adapter APIs approved. |
 | W04 | Portable party/protocol/catalog and focused targets | WAIT_DEP W02 | No | Catalog-only fixture already passes; full policy/transport integration is not ported. |
 | W05 | Windows locking/journal/backups/receipts and identity fixtures | WAIT_DEP W03/W04 | No for fixtures | Actual Windows child-process interruption and filesystem semantics must be proven. |
 | W06 | Static HTTP/Matching2/signaling/transport integration | WAIT_DEP W03/W04/W05 | No for mocks | Selective BBSC hunks; no copied Linux vendor tree; activation stays OFF. |
@@ -30,7 +30,7 @@ Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01 verified; W02 and 
 - [x] W00 preparation and evidence inventory
 - [x] W01 integration workspace/history map
 - [ ] W02 Windows test harness
-- [ ] W03 adapter contract map
+- [x] W03 adapter contract map
 - [ ] W04 portable policy
 - [ ] W05 durable storage/identity
 - [ ] W06 network/session integration
@@ -95,3 +95,25 @@ Commands: `git worktree list`, `git rev-parse HEAD`, `git status --short --branc
 Ruling: preserve selected plan/spec/handoff documentation by explicit paths on implementation branch; keep `windows` as historical runtime plus checkpoint documentation until the reviewed W11 merge. Push interim documentation to `origin/windows` without claiming runtime integration. Do not duplicate or transplant old runtime/vendor trees. Usage checks: 44%, then 42% remaining in five-hour window; weekly 44%. Stop below 10% as requested.
 
 Publication and documentation validation are recorded in the following checkpoint entry. Next: W02 harness and W03 source contract map, disjoint ownership; W04 waits for W02. Game gates remain WAIT_GAME.
+
+W01 publication: integration documentation commit `ae563c811ecc81c98ad4c861d5f16d3638e5209f`; controller checkpoint `45e9de324a579aaeb14a3e0f09dfd1d685a41e55` pushed, local `HEAD` equals `origin/windows`. Controller link check 23/23; selected integration documentation link check 57/57. Changed controller whitespace PASS. The copied archival FSR patch has original whitespace findings, intentionally preserved with identical Git blob; not a runtime failure. W02 dependency checkout initially failed on a long FSR filename; long-path retry and restoration of one omitted pinned header succeeded, six exact gitlinks initialized, FSR clean. W02 and W03 now have separate Luna owners (test harness versus adapter-contract document); no native code edits delegated concurrently.
+
+### W02 ongoing evidence
+
+Tested integration source `ae563c8` before owned test fixes: CLANG64 configure completed; `upscaler-support-test` reproduced undeclared `setenv`/`unsetenv` (RED/BUILD_FAIL, execution NOT RUN). Initial renderer builds hit Ninja path length >260 characters; a motion-shader dependency also encountered `std::lock_guard` in FSR before upstream build-script patches were applied. These setup blockers do not replace the required `sigjmp_buf` RED. Ruling: W02 may use a short junction alias to this same app-managed integration checkout and apply only upstream's normal build.sh preparation. Record alias and commands in W02 evidence; do not patch unrelated runtime to bypass setup. Scope/dependencies/acceptance unchanged; W02 remains IN_PROGRESS. Native game tests remain NOT RUN.
+
+### W03 review checkpoint
+
+First source-map draft is not accepted yet. Controller spot-check found the active `BbThd::Enabled()` branch in `bbnet_glue.cpp`: initialization and symbol registration can select `BbThd::Initialize`/`BbThd::Register` and return before vendor NP registration. Draft vendor-only Matching2 mapping omitted the `thd_matching2.cpp` create/join/leave and worker-side room/peer mutations preceding callbacks. Returned to W03 owner for exact dual-route registration/consumer/lifetime mapping; independent review is running. W03 remains IN_PROGRESS; no dependent native interface is approved. Source check: `git show de2e38a:gpu/bbnet/bbnet_glue.cpp` and `git show de2e38a:gpu/bbnet/thd/thd_matching2.cpp`. This is a source-map finding, not native gameplay validation.
+
+Independent W03 Luna review confirmed the active-route omission and requested exact poll/wait symbols. It also found `commit_file` ignores host `close()` result: existing returned status covers checked flush/replacement operations, not a complete durable close receipt. Fix requested before source-map acceptance; W05 must preserve this explicit gap until implemented/tested. No native or gameplay claim changed.
+
+W02 RED milestone: all four renderer stub compilations reproduced `unknown type name sigjmp_buf`; upscaler reproduced seven undeclared `setenv`/`unsetenv` calls. Short junction `C:/bbsc-w02` resolves to the same managed integration checkout, no source copy. GREEN work is ongoing: Windows stub type and upscaler compilation now pass, test-only C++ runtime link gap under investigation. Runner regression tests first failed on absent durable summary as intended (RED); not yet an accepted harness PASS. Native full build/run acceptance remains NOT RUN/pending. Latest usage check: five-hour 34%, weekly 43% remaining.
+
+W03 second review: active/fallback registration and close-result corrections accepted; remaining image boundary omission returned to owner. Actual THD `SetImage` validates size/prologue then retains raw pointer; `SetSignalingGate` writes image byte via context-start caller, and `HostExtra` reads live guest state on create-room worker. These existing source behaviors require explicit mapping and are not approval for BBSC worker-thread memory access. Independent review confirmed `0x29/0x2A` native-result premise unsupported (HTTP URL punctuation, historical custom capability 0x29 only). Updated W03 plan trace requirement before relying on it; affected W06/W08 diagnostics must identify real producers/consumers, with absent native route remaining a G1 gap. No gameplay gate waived.
+
+### W03 source-map acceptance — 2026-10-21
+
+VERIFIED for source discovery only, after independent Luna review and two correction passes. Inspected upstream `de2e38af055f09f819946951075c6bb119e62ae6` and historical `ea8ac53801e49b5dc79c072971c0e05efcd7651f` via `git show`, `git grep -n`, `git ls-tree`; controller source at `45e9de3` plus documentation diff. Map covers real THD/vendor registration, request/server/peer effects before callbacks, callback worker/teardown, loader image ownership, THD guest-memory accesses, title/user/save mount/commit, and blocked native/UI/recovery ownership. Concrete native diagnostics remain G1–G3; no API invented or admission enabled.
+
+Documentation link/content/whitespace checks PASS; runtime tests/build NOT RUN (source-discovery task); fixture/native/game evidence remains separate. W03 review explicitly accepted complete source mapping while unresolved native observations stay blocked. W02 remains IN_PROGRESS; W04 waits W02; W05 waits W04 and cannot assume native receipt qualification. Latest usage: five-hour 29%, weekly 42% remaining. No game launched, no packaging/server deployment.

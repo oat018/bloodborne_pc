@@ -84,4 +84,12 @@ The broad two-tree `git diff --check` produced many pre-existing whitespace find
 - Broker capability/claim binding, complete event/flag/item mapping, native offsets and signatures, and UI lifecycle remain unverified. No fixtures or historical hooks qualify these facts.
 - There is no demonstrated clean, conflict-free merge result yet. The route above is a normal-history proposal derived from the graph and path ownership; W11 must perform full conflict/diff review and checks before publishing.
 
-**W01 discovery status:** source ancestry and ownership map recorded; branch/HEAD verified by controller. Documentation copy, review and checkpoint remain pending. The final reviewed merge belongs to W11. This document does not claim W01 verified, any BBSC runtime migrated, or any native/game gate passed.
+**W01 discovery status:** source ancestry and ownership map recorded; branch/HEAD verified by controller. Documentation copy and independent Luna review passed. W01 is verified for workspace/history mapping only; the final reviewed merge belongs to W11. No BBSC runtime migration or native/game gate is claimed.
+
+## Controller acceptance checkpoint
+
+- Integration documentation commit: `ae563c811ecc81c98ad4c861d5f16d3638e5209f`; controller documentation checkpoint `45e9de324a579aaeb14a3e0f09dfd1d685a41e55` pushed to `origin/windows` and equality verified.
+- Explicit copied paths: `AGENTS.md`, `docs/BBSC.md`, `docs/WINDOWS-PROGRESS.md`, tracked `docs/handoff/*`, tracked `docs/superpowers/plans/*`, tracked `docs/superpowers/specs/*`, and `scripts/bbsc_gameserver/README.md` (documentation link target only; service code waits for W06). No historical runtime source copied.
+- Controller changed/new Markdown links: 23 checked, 0 missing. All selected integration Markdown: 57 checked, 0 missing. Changed controller document whitespace check passed. Integration staged whitespace check reports only original context whitespace in the preserved archival FSR patch; its Git blob `a6b23d558ac4a8989440a1521dbb4f113e21cf2b` equals historical, intentionally unchanged.
+- Exact six upstream gitlinks initialized for W02. Initial checkout exit 1 on a long FSR filename; `git -c core.longpaths=true submodule update --init --recursive` exited 0, then the one omitted header was restored at its pinned content. FSR `status --short` is clean. No historical FSR work or baseline checkout changed.
+- W01 runtime tests/build: NOT RUN (documentation/source mapping). Next W02 tests and W03 source contracts remain independent tasks.
