@@ -81,3 +81,7 @@ Current runtime facts: the main `windows` checkout still carries historical code
 ## Plan review checkpoint
 
 Independent Luna review checked requirement coverage, source pins, native/fixture boundaries, work ordering, history preservation and packaging limits. Corrected vendor-relative paths and the historical-P2P-to-upstream mapping against actual files, clarified W01 versus W03 resumption, and removed dependency/hook-qualification ambiguity. Reviewer found the plan publishable as a waiting checkpoint; final wording/link/whitespace checks passed. All local Markdown links in the seven changed planning/evidence documents resolve. This review approves the plan's clarity/evidence scope; it does not qualify the unimplemented native features or turn known BUILD_FAIL results into passes.
+
+## Maintenance log
+
+- 2026-10-21 — User requested mandatory plan/progress discipline in `AGENTS.md`. Added requirements to read the active plans/tracker before work, identify task/dependencies, record ongoing progress and actual verification/review evidence, synchronize checkboxes, document deviations and leave a precise resume point at every handoff/checkpoint. Applies to subagents and future sessions. Verified document links and whitespace; no runtime changes, tests rerun or game launch. W01 remains READY and implementation is still waiting for the next instruction. Publication is verified separately against the checkpoint commit/remote ref.
