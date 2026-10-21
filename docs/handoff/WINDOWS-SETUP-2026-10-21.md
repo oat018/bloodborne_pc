@@ -23,7 +23,7 @@ Git's archived FSR patch bytes hash to `025696793a698f2a6f5915314d269c8b77dd4d93
 - Restored 18 save/metadata files into `C:/Projects/bloodborne_pc/.superpowers/windows-profiles/baseline-offline`; every copied file's size and SHA-256 matched its archived member. Original archive untouched. Per-file manifest is private beside the profile. Private server connectivity has not been established.
 - Managed admission stays disabled. No runtime code migration, server redeployment or EXE/ZIP packaging has been performed.
 
-Next: review the migration manifest and validate the copied character in-world with the user. Step 2 still requires gameplay and portable-test inventory evidence. Follow the ordered migration plan for implementation.
+Next: review the migration manifest and inventory portable Windows tests. Basic copied-profile gameplay is user-confirmed; post-write reload and recovery evidence remain open. Follow the ordered migration plan for implementation.
 
 ## Baseline invocation
 
@@ -43,9 +43,11 @@ The native `bb-probe.exe --vulkan-only` smoke test returned exit 0. First game l
 
 Private reproducible launcher: `C:/Projects/bloodborne_pc/.superpowers/launch-windows-baseline.ps1`. It sets explicit game/data/profile/probe paths, `BB_ONLINE=0`, `BB_SOUND_HACK=0`, mods disabled and FPS 30. Generated data lives in `.superpowers/windows-baseline-data`, separately from both the original game and the save archive. Private launch log: `.superpowers/windows-baseline-launch.log`.
 
-User checkpoint: select Play Offline, then Load Game. Verify the intended character (historically EiEi, Cathedral Ward) and slot before entering the world. Character identity, loaded location, gameplay, normal save/reload and durable Windows recovery are still unverified. Do not claim BBSC has been ported from this upstream launch.
+User validation (2026-10-21): the user confirmed that all characters appeared. After reopening the same offline copied profile, the user reported normal operation and exited the game. A subsequent process check found no running `bb-probe`. The second launch log contains in-world `m24` asset activity, memory statistics and repeated mounts of the existing `SPRJ0005` save. This establishes user-confirmed basic Windows gameplay with the restored profile. Exact character/location and a post-write reload were not independently captured; interrupted-save recovery and BBSC remain unverified. Do not claim BBSC has been ported from this upstream launch.
 
 Current archive SHA-256 (2026-10-21):
+
+After the user exited, copied-profile files `backup0001`, `userdata0001`, `backup0010` and `userdata0010` differed from their restoration hashes, confirming writes occurred in the test copy. The original savedata archive was rehashed and still matches the value below. A changed file alone does not prove a durable/reloadable save receipt.
 
 ```text
 ed2e8aefa728bb837cdc8d09f02d4ee5439b5ca02b1a25a2c290be3811089ead  bbsc-original-savedata-private-2026-10-21.tar.gz
