@@ -161,11 +161,13 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **W06 route correction (2026-10-21, W03/preflight):** Include the actual selected THD route gpu/bbnet/thd/{thd_matching2.cpp,thd_session.cpp,thd_np.cpp} as needed, alongside vendor fallback. BbThd::Enabled() selects mutually exclusive registration in bbnet_glue.cpp; vendor-only fixtures cannot qualify the selected THD route. Add focused backend-selection and THD request/session fixtures with policy rejection before network submission, permitted retry, correlated late cleanup, peer/departure and teardown checks. Preserve shared HTTP registration. A bounded generation-tagged queue may expose a fixture consumer, but no game-thread consumer or native admission qualification is invented; those remain W07/W08/G1. This corrects file/route coverage without changing approved behavior or enabling managed admission.
 
+**W06 execution split / source-contract limit (2026-10-21):** W06-A maps/adapts the HTTP attempt observer, proof/session policy and bounded immutable generation-tagged queue (necessary pure helpers under gpu/bbnet/bbsc/ permitted); W06-B integrates actual THD/vendor network/session and peer/transport consumers with focused fixtures; W06-C retains the pinned service reference/credits and loopback ID tests independently. One owner controls all shared native adapter/CMake/runner changes; reference files have a separate owner. The reviewed W03 map proves no upstream BBSC game-thread tick or Kit/Blank game-input consumer exists. Therefore W06 prepares network policy/producers and a fixture-only queue consumer; binding a real native game-thread/input consumer belongs to W07/W08 and G1, with managed activation OFF. This transfers the unresolved native binding check to its actual owner, preserves the approved Kit/Blank requirement and G1 tests, and does not invent a callback-thread consumer or waive native qualification.
+
 Retain the historical `scripts/bbsc_gameserver/` sources/credits and `tests/test_bbsc_character_ids.py` as explicit protocol/SQLite reference fixtures in the integration branch, with loopback-only tests. This does not deploy a service or change private server state.
 
 - [ ] Write RED tests for private-attempt HMAC proof, selected peer/connection, expiration/retry, stale host/password changes, correlated cleanup and shutdown races, relay framing and both departures.
-- [ ] Bind callbacks to a bounded queue consumed only by the W03 game-thread contract. No network-thread live memory writes.
-- [ ] Integrate matchmaking/password/connect-first payload and Kit/Blank policy using actual consumers while native managed admission stays disabled.
+- [ ] Bind network callbacks to a bounded immutable generation-tagged queue; test its fixture consumer, cancellation and teardown. No network-thread live memory access. Native game-thread consumer binding remains W07/W08/G1 under the source-contract limit above.
+- [ ] Integrate matchmaking/password/connect-first payload and network-facing Kit/Blank policy using actual network/session consumers while native managed admission stays disabled. Native Kit/Blank input/action binding remains W07/W08/G1.
 - [ ] Run all three focused targets, W04/W05 tests and `bash build.sh`; compare unrelated upstream network behavior before/after. Review and commit.
 
 **Exit:** focused Windows static-module fixtures pass. Live join, placement and private-service compatibility are not claimed until G1.
@@ -175,6 +177,8 @@ Retain the historical `scripts/bbsc_gameserver/` sources/credits and `tests/test
 **Dependencies:** W03/W05/W06. **Game:** no for scanner/ABI fixtures and disabled-hook implementation/diagnostics; native hook qualification and managed feature activation require the relevant G1/G2/G3 evidence.
 
 **Files:** adapt historical `bloodborne_re.cpp`, `include/core/bloodborne_re.h`, `bbsc_memscan.{h,cpp}`, `bbsc_patch_tables.h`, `bbsc_cinematic.*`, required guest-code-hook shims; replace Linux-only scanner/memory fixtures with `tests/test_bbsc_memory_windows.cpp` and `tests/test_bbsc_memscan_windows.cpp`; split portable join assertions from `test_bbsc_join.cpp` into focused Windows fixtures.
+
+**Native binding ownership:** W06 supplies only network/session producers and a fixture consumer. Resolve and implement disabled native game-thread queue and Kit/Blank input/action bindings here and in W08 using exact mapped callers; retain G1 as their qualification/activation prerequisite. Do not treat W06 fixture dispatch as a native consumer.
 
 **Interfaces:** exact image/ABI/tick/queue and selected-character contracts approved in W03. Retain actual historical coordinator/tick names only where the mapped Windows callers support them.
 
