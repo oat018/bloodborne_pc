@@ -63,11 +63,11 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Interfaces:** consumes the two pinned trees and manifest. Produces a documented integration branch/tree pin plus a reviewed path-ownership map; W02–W11 use that checkout, not the untouched baseline.
 
-- [ ] Keep the app-managed baseline worktree unchanged as the reference. Create a separate app-managed implementation worktree at the pinned upstream; use branch `codex/bbsc-windows-integration`.
-- [ ] Inventory the upstream-versus-`windows` ancestry/path differences. Record every retained upstream path, BBSC-only addition and minimal runtime bridge; copy documentation/BBSC source only by explicit path selection in later tasks.
-- [ ] Record a normal, non-rewriting integration route back to `windows`: preserve both histories with a reviewed merge, keep upstream ownership for its runtime/renderer/launcher paths, and retain BBSC/documentation additions. Do not perform a blanket merge/checkout or mark ancestry-only merges as a code migration.
-- [ ] Before any final merge, require a complete path/diff review and integrated checks. Preserve the current `windows` history and `origin/pre`; never force-update either.
-- [ ] Verify `git rev-parse HEAD`, `git status --short --branch`, exact submodule pins and the path map; review and commit the workspace record.
+- [x] Keep the app-managed baseline worktree unchanged as the reference. Create a separate app-managed implementation worktree at the pinned upstream; use branch `codex/bbsc-windows-integration`.
+- [x] Inventory the upstream-versus-`windows` ancestry/path differences. Record every retained upstream path, BBSC-only addition and minimal runtime bridge; copy documentation/BBSC source only by explicit path selection in later tasks.
+- [x] Record a normal, non-rewriting integration route back to `windows`: preserve both histories with a reviewed merge, keep upstream ownership for its runtime/renderer/launcher paths, and retain BBSC/documentation additions. Do not perform a blanket merge/checkout or mark ancestry-only merges as a code migration.
+- [x] Before any final merge, require a complete path/diff review and integrated checks. Preserve the current `windows` history and `origin/pre`; never force-update either.
+- [x] Verify `git rev-parse HEAD`, `git status --short --branch`, exact submodule pins and the path map; review and commit the workspace record.
 
 **Exit:** one known implementation checkout, explicit ownership and a history-preserving integration route. Until this is recorded, do not port runtime files in the historical checkout.
 
@@ -251,7 +251,7 @@ The detailed dependency on each task is authoritative: portable policy W04 does 
 
 Update [WINDOWS-PROGRESS.md](../../WINDOWS-PROGRESS.md) with statuses READY, IN_PROGRESS, WAIT_DEP, WAIT_GAME, VERIFIED or BLOCKED and evidence. A checkbox changes to `[x]` only when its stated acceptance result is verified. Missing tests are NOT RUN, skips are SKIP, compile errors are BUILD_FAIL. Do not use an estimated feature percentage.
 
-The user has requested this plan and a waiting checkpoint. Finish documentation/review/verification now; implementation W01 onward and game gates remain pending for the next instruction. Existing upstream gameplay success is W00 evidence only.
+The user authorized execution on 2026-10-21. W01 is verified; continue from the tracker. The no-game instruction remains active, so G1–G3 wait for later explicit authorization. Existing upstream gameplay success is W00 evidence only.
 
 ## Product requirement coverage
 

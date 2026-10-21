@@ -1,6 +1,6 @@
 # BBSC Windows progress
 
-Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: preflight checked; development plan prepared; waiting for the user's next instruction.** No game was opened during this planning pass.
+Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: W01 verified; W02 and W03 READY.** No game launch is authorized.
 
 ## Read this first
 
@@ -15,9 +15,9 @@ Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: preflight checked; dev
 | ID | Work / expected deliverable | Status | Needs game? | Evidence / next action |
 |---|---|---|---|---|
 | W00 | Native baseline, copied-profile preparation, source/test inventory | VERIFIED | Already tested by user | Native build exit 0; characters and basic gameplay user-confirmed; no-game results below. Full test parity and BBSC are outside this checkbox. |
-| W01 | Separate integration branch/worktree and reviewed file/history map | READY | No | Keep pinned baseline as reference; implement on `codex/bbsc-windows-integration` after the next instruction. |
-| W02 | Windows no-game harness and reproducible runner | WAIT_DEP W01 | No | Resolve five upstream target compile failures; all assertion tests keep `-UNDEBUG`; add explicit group/failure reporting. |
-| W03 | Exact static adapter/caller/thread/lifetime contracts | WAIT_DEP W01 | No for source map | Source findings exist; native hook/cancellation/save contracts still require discovery and later live confirmation. |
+| W01 | Separate integration branch/worktree and reviewed file/history map | VERIFIED | No | Managed `codex/bbsc-windows-integration` at upstream pin, reviewed [ownership/history map](handoff/WINDOWS-INTEGRATION-BASE.md). Explicit documentation paths copied; runtime unchanged. |
+| W02 | Windows no-game harness and reproducible runner | READY | No | Resolve five upstream target compile failures; all assertion tests keep `-UNDEBUG`; add explicit group/failure reporting. |
+| W03 | Exact static adapter/caller/thread/lifetime contracts | READY | No for source map | Source findings exist; native hook/cancellation/save contracts still require discovery and later live confirmation. |
 | W04 | Portable party/protocol/catalog and focused targets | WAIT_DEP W02 | No | Catalog-only fixture already passes; full policy/transport integration is not ported. |
 | W05 | Windows locking/journal/backups/receipts and identity fixtures | WAIT_DEP W03/W04 | No for fixtures | Actual Windows child-process interruption and filesystem semantics must be proven. |
 | W06 | Static HTTP/Matching2/signaling/transport integration | WAIT_DEP W03/W04/W05 | No for mocks | Selective BBSC hunks; no copied Linux vendor tree; activation stays OFF. |
@@ -28,7 +28,7 @@ Updated: 2026-10-21 (Asia/Bangkok). **Current checkpoint: preflight checked; dev
 | W11 | Final integrated verification/review and checkpoint | WAIT_DEP W01–W10/G1–G3 | No new launch if evidence remains current | Normal history-preserving integration/push to `origin/windows`; stop before packaging. |
 
 - [x] W00 preparation and evidence inventory
-- [ ] W01 integration workspace/history map
+- [x] W01 integration workspace/history map
 - [ ] W02 Windows test harness
 - [ ] W03 adapter contract map
 - [ ] W04 portable policy
@@ -85,3 +85,13 @@ Independent Luna review checked requirement coverage, source pins, native/fixtur
 ## Maintenance log
 
 - 2026-10-21 — User requested mandatory plan/progress discipline in `AGENTS.md`. Added requirements to read the active plans/tracker before work, identify task/dependencies, record ongoing progress and actual verification/review evidence, synchronize checkboxes, document deviations and leave a precise resume point at every handoff/checkpoint. Applies to subagents and future sessions. Verified document links and whitespace; no runtime changes, tests rerun or game launch. W01 remains READY and implementation is still waiting for the next instruction. Publication is verified separately against the checkpoint commit/remote ref.
+
+## W01 execution checkpoint — 2026-10-21
+
+User authorized plan execution and gpt-6-luna delegation; no-game, managed admission OFF and no packaging/deployment remain in force. Source inspected: controller `26d74ee802098928165387a40af87a04d03693c9` plus documentation diff; integration `de2e38af055f09f819946951075c6bb119e62ae6` plus selected documentation only. App-managed implementation worktree: `C:/Users/numbe/.codex/worktrees/bbsc-windows-integration/bloodborne_pc`, branch `codex/bbsc-windows-integration`. Baseline remains detached and unchanged.
+
+Commands: `git worktree list`, `git rev-parse HEAD`, `git status --short --branch --ignore-submodules`, `git merge-base`, `git ls-tree -r` and rename-aware path comparison. Exact pin/ancestry/path/gitlink results are in the integration-base record. All six integration submodules initially uninitialized at exact upstream pins; dependency initialization is setup for W02, not a gate or build PASS. No runtime tests/build/game run for W01 (NOT RUN, documentation-only). Independent Luna review found no factual blockers; controller corrected reversed upstream-only gitlink wording before review. No native contract or gameplay evidence inferred.
+
+Ruling: preserve selected plan/spec/handoff documentation by explicit paths on implementation branch; keep `windows` as historical runtime plus checkpoint documentation until the reviewed W11 merge. Push interim documentation to `origin/windows` without claiming runtime integration. Do not duplicate or transplant old runtime/vendor trees. Usage checks: 44%, then 42% remaining in five-hour window; weekly 44%. Stop below 10% as requested.
+
+Publication and documentation validation are recorded in the following checkpoint entry. Next: W02 harness and W03 source contract map, disjoint ownership; W04 waits for W02. Game gates remain WAIT_GAME.
