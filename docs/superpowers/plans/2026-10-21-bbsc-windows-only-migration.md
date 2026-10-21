@@ -10,6 +10,8 @@
 
 **Spec:** Product requirements in the [approved design](../specs/2026-10-18-bbsc-anywhere-coop-design.md) remain in force. This plan supersedes earlier upstream, platform, build-environment, release-target and checkpoint-branch instructions on `windows`.
 
+**Resume on a new Windows machine:** Read the [handoff and setup checklist](../../handoff/WINDOWS-RESUME.md) before starting step 1.
+
 ## Global constraints
 
 - Direction approved on 2026-10-21: Windows only. AppImage and Linux release parity leave the active release scope; existing Linux code and historical evidence are retained.

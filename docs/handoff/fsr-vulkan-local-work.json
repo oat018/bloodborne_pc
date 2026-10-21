@@ -1,0 +1,6 @@
+{
+  "purpose": "Preserve unrelated local FSR work during OS migration; do not apply to the Windows baseline automatically.",
+  "submodule": "gpu/third_party/fsr-vulkan",
+  "base": "c64f093404125e960813f95f1996c14780f0dd69",
+  "patch_sha256": "025696793a698f2a6f5915314d269c8b77dd4d9301121933c840596bbf41e6f4"
+}
