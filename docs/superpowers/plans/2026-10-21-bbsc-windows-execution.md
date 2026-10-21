@@ -167,6 +167,8 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **W06-A HTTP partial evidence (2026-10-22):** Shared HTTP observer/proof/opaque authorization slice passed scoped R2 review after a retained stale-reservation retry RED/GREEN. Seven BBSC fixtures and native target links pass; deterministic fixture-only clock covers own-sign/search/claim expiry. Actual async server/backend consumer, transport/relay and shutdown checks remain unqualified and mandatory for parent W06; no checkbox closes from this partial checkpoint.
 
+**W06-B registration partial evidence (2026-10-22):** Production shares a reviewed internal backend predicate/ordered registration dispatcher with its focused fixture. Exact THD/fallback selection and complete registrations pass; eight BBSC fixtures and native links pass. THD selected-candidate correlation is unestablished and no JoinRoom guard/cleanup was implemented. Matching2 admission, vendor/THD transport/relay and final full-build checks remain open; the admission-named target currently covers registration only.
+
 Retain the historical `scripts/bbsc_gameserver/` sources/credits and `tests/test_bbsc_character_ids.py` as explicit protocol/SQLite reference fixtures in the integration branch, with loopback-only tests. This does not deploy a service or change private server state.
 
 - [ ] Write RED tests for private-attempt HMAC proof, selected peer/connection, expiration/retry, stale host/password changes, correlated cleanup and shutdown races, relay framing and both departures.
