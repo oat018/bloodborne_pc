@@ -177,6 +177,8 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **W06-B request-fence partial evidence (2026-10-23):** Original request owner/epoch and stop-pending admission fences passed scoped R2 review; nine BBSC fixtures and native target builds pass. The fixture executes shared production helpers with modeled send/callback counters, not the full pending-request dispatcher. Retain the required actual PendingRequest submission/reply interleaving test, stale Sync, queue lifecycle/producer and remote cleanup checks as open W06 acceptance; helper evidence cannot close them.
 
+**W06-B Sync partial evidence (2026-10-23):** Controller-owned inline execution (user disabled subagents) replaces stale two-phase peer synchronization with continuous parent/cache locking. Actual Sync baseline plus scheduler instrumentation fails three race assertions; final actual-function fixture passes serialized death/member/context-reuse and positive cases. BBSC10PASS and full native build pass. Current all-group is32PASS/0FAIL/2SKIP, exit1 because a required scene-format case skipped; retain that limitation. Actual Close/notification entrypoints, queue lifecycle/producer/replay, full pending-request route and cleanup remain required; no parent checkbox closes.
+
 Retain the historical `scripts/bbsc_gameserver/` sources/credits and `tests/test_bbsc_character_ids.py` as explicit protocol/SQLite reference fixtures in the integration branch, with loopback-only tests. This does not deploy a service or change private server state.
 
 - [ ] Write RED tests for private-attempt HMAC proof, selected peer/connection, expiration/retry, stale host/password changes, correlated cleanup and shutdown races, relay framing and both departures.
