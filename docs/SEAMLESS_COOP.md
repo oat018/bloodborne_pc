@@ -19,11 +19,13 @@ host and a Linux guest over a VPN) was played with v2.3 and showed the problems 
 With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) and
 `SHADPS4_BLOODBORNE_STAY_IN_SESSION=1` (the rules of this branch):
 
-- The session survives a death. The other player keeps playing without a loading screen. The
-  host respawns at its own last lantern. A guest respawns at a lantern of the host's map (the
-  one the host travelled to, else the first one of that map) with a single loading screen, as in
-  BBSC, and is then placed next to the host; its own last lantern is put back once it is up, so
-  its own world keeps its own respawn point.
+- The session survives a death. The other player keeps playing without a loading screen. A
+  guest respawns at a lantern of the host's map (the one the host travelled to, else the first
+  one of that map) with a single loading screen, as in BBSC, and is then placed next to the
+  host; its own last lantern is put back once it is up, so its own world keeps its own respawn
+  point. A host does the same with a living guest (new in v3.4): it respawns at a lantern of the
+  guest's map and is placed next to the guest, keeping its own lantern; with no living guest it
+  respawns at its own last lantern.
 - In a boss fight a death waits (new after v2.5, as in Elden Ring Seamless Co-op and BBSC):
   a player who dies while another is still alive stays down and watches. When the boss dies
   the player gets up beside a living partner without a loading screen; when every player is
