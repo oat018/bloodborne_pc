@@ -2,6 +2,22 @@
 
 Updated2026-10-23. This is a ready work package for the user's external collaborator, not permission for Codex to spawn agents. Start with [AGENTS.md](../../AGENTS.md), [Windows resume](WINDOWS-RESUME.md), the [alignment plan](../superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md), then [approved product requirements](../superpowers/specs/2026-10-18-bbsc-anywhere-coop-design.md).
 
+## Clone and start
+
+Run in a new directory on the collaborator's machine:
+
+```powershell
+git clone --single-branch --branch windows https://github.com/kaoitp/bloodborne_pc.git bloodborne-cl01
+cd bloodborne-cl01
+git switch -c claude/bbsc002-reference-audit
+```
+
+Open this folder in Claude Code. Its root `CLAUDE.md` points here; paste the prompt below. Read the current tracker before editing, then mark CL01 IN_PROGRESS only in the owned child PROGRESS.md.
+
+Everything required for CL01 instructions, product spec, ownership and progress is tracked on origin/windows. Public reference repositories/commits are listed below. No local-only integration commit, game installation, private account, save, raw diagnostic log, submodule initialization or native build is needed for this audit. The clone's runtime is historical: do not build it as the selected1.7.2 baseline or treat its source as the BBSC0.0.2 reference. Codex's local source baseline is8fdd41b (documentation bced828); those code commits remain LOCAL under the user's existing instruction and are not prerequisites for CL01.
+
+Return the audit commit/patch and allowlisted paths to the human/Codex owner. Do not push this task into windows or the integration branches. Implementation work outside the allowlist requires a separate ownership assignment.
+
 ## Ready-to-paste prompt
 
 > Work on task CL01 as the external Claude Code collaborator. Use BBport windows-v1.7.2 at e5d04e2ba4864ccf40de6c3cf6aa532855320b0d and CLSAMG22/BBSC v0.0.2 at4f11faf88b6ba658ebde6fe5fbefdadedba4fa41. Read this handoff and linked constraints. Audit BBSC features, native hooks and authenticated identity/protocol continuity against our approved requirements; produce the three source-cited documents below. Work in your own clone/branch, modify only docs/collaboration/claude/ allowlisted files, keep progress in its PROGRESS.md. Do not modify runtime/CMake/tests/shared plans, deploy servers, launch games, activate managed admission or push windows/integration branches. Return local commit SHA, changed paths, checks, findings and missing evidence. The primary Codex owner integrates results and keeps central progress synchronized.
