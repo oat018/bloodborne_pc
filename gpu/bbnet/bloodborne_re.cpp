@@ -5790,7 +5790,7 @@ void PS4_SYSV_ABI SessionEntry(u64 tag, const GuestRegisterSnapshot* registers) 
     if (tag == SessionHookFlagSet) {
         static const bool flag_log = EnvFlagEnabled("SHADPS4_BLOODBORNE_FLAG_LOG");
         const s32 flag = static_cast<s32>(registers->rsi);
-        const bool on = static_cast<s32>(registers->rdx) != 0;
+        const bool on = static_cast<s32>(registers->r8) != 0; // the state (see the hook's site)
         const bool world = hosting_session.load() && ShareWorldEnabled() &&
                            IsWorldProgressFlag(flag);
         if ((!flag_log && !world) || GetEventFlag(flag) == on) {
@@ -5817,7 +5817,7 @@ void PS4_SYSV_ABI SessionEntry(u64 tag, const GuestRegisterSnapshot* registers) 
         }
         if (flag_log) {
             LOG_INFO(Debug, "Bloodborne flag: {} -> {} caller={:#x}", flag,
-                     static_cast<s32>(registers->rdx), ReadValue<u64>(registers->rsp, 0) - image_base);
+                     static_cast<s32>(registers->r8), ReadValue<u64>(registers->rsp, 0) - image_base);
         }
         if (world) {
             AddProgress(progress_world, ProgressFlag, flag, "host notes world flag", 400);
@@ -6827,9 +6827,12 @@ static bool InstallSessionHooks(u64 base) {
         LOG_ERROR(Debug, "Bloodborne session hook failed at the talk function result");
     }
     // SHADPS4_BLOODBORNE_FLAG_LOG=1: every event flag that changes, with the caller (test aid).
-    static constexpr std::array<u8, 6> FlagSetPrologue{0x41, 0x89, 0xD0, 0x8B, 0x4F, 0x1C};
+    // Hooked after the setter's first instructions (mov r8d,edx / mov ecx,[rdi+0x1C] / xor
+    // edx,edx), where the state is in r8: bbport's Rebirth at the Doll (scripts/rebirth.py)
+    // jumps away from the setter's entry and comes back here for every other flag.
+    static constexpr std::array<u8, 7> FlagSetBody{0x89, 0xF0, 0xF7, 0xF1, 0x41, 0x89, 0xC1};
     if ((EnvFlagEnabled("SHADPS4_BLOODBORNE_FLAG_LOG") || ShareWorldEnabled()) &&
-        !InstallGuestCodeHook(reinterpret_cast<void*>(base + EventFlagSetOffset), FlagSetPrologue,
+        !InstallGuestCodeHook(reinterpret_cast<void*>(base + EventFlagSetOffset + 8), FlagSetBody,
                               SessionHookFlagSet, SessionEntry)) {
         complete = false;
         LOG_ERROR(Debug, "Bloodborne session hook failed at the event flag setter");
