@@ -21,7 +21,7 @@
 - This documentation branch starts at `a37b419ec03b1286c3d7accd954487de6d6d6429`. Its runtime is still the previous codebase: selecting a new upstream does not mean the code has been migrated or built on Windows.
 - Keep `pre` and `origin/pre` as the historical checkpoint. Work and usage checkpoints now go to `windows` / `origin/windows`. Below 10% remaining in the 300-minute window, stop expanding scope, document, commit and push that branch.
 - `origin` remains the user's repository. Use Supermedo as a separately named source remote when migration begins; changing GitHub fork parent metadata is unnecessary for this workflow. Do not delete/refork, rewrite history or force-push as part of migration. See [GitHub's remote guidance](https://docs.github.com/en/pull-requests/how-tos/work-with-forks/configuring-a-remote-repository-for-a-fork).
-- Use Luna subagents for substantial independent work with disjoint ownership. Small documentation and integration edits may be handled by the controller.
+- User update 2026-10-23: execute inline without subagents. Preserve the same ordered plan, evidence, review and progress gates; earlier Luna delegation is historical.
 - Preserve the unrelated dirty `gpu/third_party/fsr-vulkan` work. Use a clean checkout for upstream baseline builds: its build script initializes submodules and applies patches.
 - No game data, accounts, tokens or original saves in Git. Runtime tests use copied profiles. Do not deploy servers or run packaging as part of this documentation change.
 - Keep native managed admission OFF until the new Windows integration proves rejection before world entry. Removing platform guards is not a port.
