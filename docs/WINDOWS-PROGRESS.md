@@ -1,6 +1,6 @@
 # BBSC Windows progress
 
-Updated: 2026-10-23 (Asia/Bangkok). **Current checkpoint: R02 source/patch checks PASS; R03 native build + scoped tests PASS. R02/R03 WAIT_DEP on actual BBSC gameplay module/guard qualification; CL01 external audit READY. Full target integration/gameplay remains unqualified.** Copied profiles only; managed admission OFF.
+Updated: 2026-10-23 (Asia/Bangkok). **Current checkpoint: SCOPE01 VERIFIED (plan/scope review only) — three goals only, baseline reuse first. R02 transport/build checks PASS; complete mod composition and R03 self-hosted baseline gameplay WAIT_DEP. R04 only demonstrated goal gaps; CL01 focused audit READY.** Copied profiles only; managed admission OFF.
 
 ## Read this first
 
@@ -17,56 +17,24 @@ Updated: 2026-10-23 (Asia/Bangkok). **Current checkpoint: R02 source/patch check
 | ID | Owner | Status | Evidence / next action |
 |---|---|---|---|
 | R01 | Codex | VERIFIED (pins/ownership docs) | Both tag commits and BBSC source recipe/digest checked; documents validated. Publication confirmed separately by Git results. |
-| R02 | Codex | WAIT_DEP (gameplay module/guard) | Source e5d04e2 + pinned BBSC patch applied/reverse-check0 in separate LOCAL codex/bbsc-bbport172. External gameplay DLL/default hooks still need mapping. |
-| R03 | Codex | WAIT_DEP R02 gameplay guard | Build0;3 native tests0; Python39cases/38PASS/1SKIP. Full shader/ABI/BBSC/gameplay qualification NOT RUN. |
-| R04 | Codex | WAIT_DEP R02/R03/CL01 | Remap source owners, review audit and selectively port custom deltas; reopen W gates. |
+| R02 | Codex | WAIT_DEP (complete mod composition) | Pinned transport patch/build checks PASS. Identify existing BBSC DLL/load/config; do not recreate gameplay in the emulator. |
+| R03 | Codex | WAIT_DEP R02 | Build0/3nativePASS/Python38PASS+1SKIP retained. Complete baseline join/progress/return on self-hosted services NOT RUN; no blanket graphics/ABI test project. |
+| R04 | Codex | WAIT_DEP R02/R03 and relevant CL01 findings | Three-goal gap table, then minimum fixes only where baseline/config fails; no full legacy port. |
 | CL01 | External Claude Code | READY | Separate clone, exclusive audit docs; [child progress](collaboration/claude/PROGRESS.md). No work claimed started by Codex. |
 
-W rows/checkboxes below now describe qualification on the new target. Earlier pass counts/commits remain historical evidence; reopening does not delete their source or results.
+## Legacy work references
 
-## Work tracker
+The former W00–W11 table/checklists are [historical evidence](https://github.com/kaoitp/bloodborne_pc/blob/8cae08bc1884136e493fc107a64b1244794ec597/docs/WINDOWS-PROGRESS.md), not eleven current implementation projects. Current scheduled work is R02 complete release composition, R03 self-hosted baseline reproduction, R04 demonstrated three-goal deltas and the scoped CL01 audit. Existing old fixes/tests may be reused only when a concrete baseline gap needs them. Historical checkpoint entries below retain their original status/time/source; they do not override this scope decision.
 
-| ID | Work / expected deliverable | Status | Needs game? | Evidence / next action |
-|---|---|---|---|---|
-| W00 | Native baseline, copied-profile preparation, source/test inventory | WAIT_DEP R02–R04 | Already tested by user | Historical old-base evidence only: Native build exit 0; characters and basic gameplay user-confirmed; no-game results below. Full test parity and BBSC are outside this checkbox. |
-| W01 | Separate integration branch/worktree and reviewed file/history map | WAIT_DEP R02–R04 | No | Historical old-base evidence only: Managed `codex/bbsc-windows-integration` at upstream pin, reviewed [ownership/history map](handoff/WINDOWS-INTEGRATION-BASE.md). Explicit documentation paths copied; runtime unchanged. |
-| W02 | Windows no-game harness and reproducible runner | WAIT_DEP R02–R04 | No | Historical old-base evidence only: Actual all-group28 command PASS/0FAIL/1PythonSKIP; all three headless render checks pass. Assertion-preserving Hpp ABI shim, scene setup and camera inline flags independently reviewed; native build PASS. |
-| W03 | Exact static adapter/caller/thread/lifetime contracts | WAIT_DEP R02–R04 | No for source map | Historical old-base evidence only: [Reviewed contract map](handoff/WINDOWS-ADAPTER-CONTRACT.md); actual native world consumer/identity/grant/UI contracts remain blocked for G1–G3. No guessed adapter APIs approved. |
-| W04 | Portable party/protocol/catalog and focused targets | WAIT_DEP R02–R04 | No | Historical old-base evidence only: Portable policy/protocol/catalog targets pass; reviewed unknown-event guards. No live transport/native qualification. |
-| W05 | Windows locking/journal/backups/receipts and identity fixtures | WAIT_DEP R02–R04 | No for fixtures | Historical old-base evidence only: All five BBSC targets pass with actual exits, native build PASS, independent review accepted. RED is implementation-absence/link only; behavioral artifact limits below. Native selected-character/serializer/grant/recovery gates remain open. |
-| W06 | Static HTTP/Matching2/signaling/transport integration | WAIT_DEP R02–R04 | Runtime diagnostics authorized | Old-base queue/build/login evidence retained; target source/patch/build and CL01 review required before current native qualification. Admission OFF. |
-| W07 | Native ABI/tick/scanner/selected-character adapter | WAIT_DEP W03/W05/W06 | Fixtures no; live later | No assumed native offsets or worker-as-game-thread substitution. |
-| W08 | Admission/first-playable coordination and rejection fixtures | WAIT_DEP W05/W06/W07 | Fixtures no; G1 yes | Prove all entry routes; callback enqueue is not cancellation. |
-| W09 | Eligible additive progress and exactly-once rewards | WAIT_DEP W05/W07/W08 | Fixtures no; G2 yes | Resolve persisted inventory, native grant/receipt and each catalog row; keep unqualified application disabled. |
-| W10 | Safe return, offline recovery, unsupported-area handling | WAIT_DEP W05/W07/W08/W09 | Fixtures no; G3 yes | Preserve pending recovery and captured fallback; never consume a foreign identity's record. |
-| W11 | Final integrated verification/review and checkpoint | WAIT_DEP W01–W10/G1–G3 | No new launch if evidence remains current | Normal history-preserving integration/push to `origin/windows`; stop before packaging. |
+## Mandatory native outcome gates for delivered changes
 
-- [ ] W00 preparation and evidence inventory
-- [ ] W01 integration workspace/history map
-- [ ] W02 Windows test harness
-- [ ] W03 adapter contract map
-- [ ] W04 portable policy
-- [ ] W05 durable storage/synthetic identity/API fixtures (native identity remains G2/G3)
-- [ ] W06 network/session integration
-- [ ] W07 native adapters
-- [ ] W08 admission/first-playable
-- [ ] W09 shared progress/rewards
-- [ ] W10 return/recovery
-- [ ] W11 reviewed before-packaging checkpoint
-
-## Mandatory future game gates
-
-| Gate | Status | Required observations | What cannot substitute |
+| Gate | Status | Required observation | Boundary |
 |---|---|---|---|
-| G1 — native admission/session | WAIT_GAME after W08 | Forced rejection before world mutation plus permitted retry; verified hooks/thread; story/Dream placement, first-playable continuity, Kit/Blank/menu/animations | Policy fixtures, held callbacks, null Lua dispatch or baseline single-player gameplay |
-| G2 — persistent progress/items | WAIT_GAME after G1/W09 | Actual selected slot/serializer/inventory; eligible event/grant, save/restart, interruption/replay without duplicates | Live inventory counts, catalog constants or synthetic receipt success |
-| G3 — return/recovery | WAIT_GAME after G1/G2/W10 | Exact point/fallback, both Blank paths, disconnect/process restart, unsupported maps, identity/NG isolation | Temporary-file journals alone or a generic home warp |
+| G1 join | WAIT_DEP complete R02/R03 baseline | Correct selected peer/password, supported cross-map/Dream join and host placement; affected stale/failed joins cause no guest-world mutation. | Baseline reproduction is separate from native acceptance of custom admission. |
+| G2 progress | WAIT_DEP baseline/gap implementation | Jointly earned boss/story progress persists after save/reload; preserve own older progress/choices, avoid duplicate relevant rewards. | No whole-save/world-flag copying; no generalized quest/NG framework. |
+| G3 exit/return | WAIT_DEP baseline/gap implementation | Normal departure/disconnect and interrupted-session reload restore own world/return; deeper wrong-character/write-failure/retry tests if persistence/recovery changes. | Reuse baseline recovery first; no old fixture PASS transferred. |
 
-- [ ] G1 reviewed at tested integrated SHA
-- [ ] G2 reviewed at tested integrated SHA
-- [ ] G3 reviewed at tested integrated SHA
-
-These gates are planned, not requests to open the game now. Offline development can continue where dependencies allow. Native managed admission remains OFF; release readiness cannot pass with an unmet mandatory gate. Higher-NG profiles and private-service reachability remain explicit prerequisites, not assumed available.
+Custom managed admission/application remains OFF until relevant native outcomes pass. Existing baseline testing uses copied profiles and original validation; no safety requirement is waived by choosing fewer new mechanisms.
 
 ## Current no-game test evidence
 
@@ -494,3 +462,14 @@ Accepted LOCAL source checkpoint8fdd41b8478c377bf2d3e8032eaae949fc7cad83 (parent
 R01-PUB IN_PROGRESS (2026-10-23): user requested complete clone-ready publication for external collaborator on origin/windows. Initial remote check confirms303878b is already published. CL01 needs tracked instructions/spec/progress plus public pinned reference source, not local integration branches or private assets. Add concrete clone/start commands and verify required entry points are tracked before publication; no native/task ownership expansion. Usage11% primary/61% weekly.
 
 R01-PUB VERIFIED (clone package content): all10 required entry-point/spec/plan/progress files verified in tracked Git tree; changed-document UTF8/local Markdown links PASS; concrete clone/branch/prompt instructions added. No local runtime/private dependency for CL01, no collaborator-file edits or native changes. Git publication is confirmed separately by push and matching remote HEAD; code branches remain LOCAL.
+
+
+SCOPE01 IN_PROGRESS (2026-10-23, Codex; parent R01/R04): user narrowed/reconfirmed delivery to BBSC seamless join-anywhere across supported maps, earned progress sync and self-hosted service; all other game/systems stay as BBport1.7.2/BBSC0.0.2. Review source-backed baseline/release notes and current plans before edits. Initial drift: old W plan prescribes wholesale legacy port, THD/multi-backend acceptance, custom HMAC/capability and broad storage/NG/quest infrastructure before proving a release gap. Revise active work to complete reference composition, self-hosted baseline reproduction, then only demonstrated goal deltas and save/return/peer correctness checks. Do not waive required correctness or mark old evidence as target PASS. Documentation-only scope review; no native/game/server action. Usage99% primary/61% weekly.
+
+
+SCOPE01 scope decisions (2026-10-23): review found real plan drift, not a blanket confirmation. Unscheduled old wholesale migration, THD/multi-backend/public/cross-emulator delivery, mandatory custom HMAC/capability, generic journal/NG/save-codec and whole-game NPC/item infrastructure, and unrelated input/renderer/launcher improvements. Preserve baseline auth/validation/save/return and all original game features; add minimum safety fixes only for demonstrated changed-boundary failures. Configuring existing copied-profile input or self-host endpoints is allowed. No game/native/server changes this turn. Scope is story maps/Dream, not unsupported Chalice. Old source/history remains intact.
+
+SCOPE01 document changes: current alignment plan now complete baseline composition → self-hosted reproduction → demonstrated three-goal deltas. Older direction/execution documents reduced to current scope and immutable historical links. Product spec amendment supersedes old prescribed mechanisms and public-server target while retaining behavioral protections. Claude handoff now prioritizes full mod assembly/reuse/self-host gaps, not an open-ended protocol/whole-game audit; its four owned files remain untouched. Remaining work is not falsely complete: actual complete-client self-hosted join/progress/return not run; source baseline remains transport-only until mod composition verified.
+
+
+SCOPE01 VERIFIED (documentation scope review):9 Markdown paths changed; no native source, game/server configuration or collaborator-owned files changed. One-off Python UTF8/local target checks43PASS, three archived Git paths verified with git cat-file -e, scope/pins/allowlist and baseline interruption-recovery acceptance checks PASS. Git diff --check with core.whitespace=cr-at-eol required before commit. No build/game rerun for documentation-only review; no product/native gate marked passed. Relevant next action: assemble the complete existing BBSC client/mod, reproduce the three goals on self-hosted service, then justify any delta against an actual baseline gap. Shared publication/remote SHA confirmed separately; source branches LOCAL.

@@ -2,6 +2,16 @@
 
 > **Windows direction amendment — 2026-10-21:** On branch `windows`, follow the [Windows-only migration plan](../plans/2026-10-21-bbsc-windows-only-migration.md) using Supermedo/bloodborne_pc. Earlier platform, upstream, distrobox, packaging and `origin/pre` instructions below describe the historical Linux baseline and are superseded on this branch. Product requirements remain in force. Existing test results do not establish Windows readiness; this amendment does not migrate runtime code.
 
+## Latest scope amendment — 2026-10-23
+
+The user reconfirmed exactly three delivery goals: (1) reuse BBSC for seamless cross-map join anywhere it supports, (2) sync jointly earned progress, (3) use self-hosted services. Keep game and every other system at BBport windows-v1.7.2/e5d04e2 and BBSCv0.0.2/4f11faf. The [active alignment plan](../plans/2026-10-23-bbport172-bbsc002-alignment.md) now requires complete reference reproduction first and only demonstrated goal deltas afterwards.
+
+The join/password, earned boss/story progress, non-duplication, own-save protection and safe departure/return outcomes below remain correctness requirements. Use the release's own mechanisms first. Old architecture/HMAC/journal/receipt/catalogue/NG proposals are reference solutions, not mandatory new subsystems. Implement no whole-game quest/item engine, account backend, new transport, public-server/cross-play feature, renderer/input/launcher or other game-system change. Existing features stay intact; work beyond the three goals needs a concrete missing baseline capability and minimum scoped fix.
+
+“Anywhere” retains the approved story-map/Hunter's Dream scope; Chalice/unknown destinations remain unsupported until separately requested. Progress concerns eligible earned boss/story events and their verified necessary rewards, not copying the host's old flags, all inventory, NPC choices or the whole save. Baseline functionality is verified/reused, not automatically reimplemented. Crash/wrong-character/save-failure tests remain necessary when our delta changes persistence or recovery.
+
+Self-hosted BBSC-compatible services are the acceptance target. A public server is not a required milestone, and no custom server/account/protocol rebuild is implied. Keep the no-packaging/no-redeployment boundary and custom managed-admission gate. Historical implementation observations below remain source-specific evidence rather than current readiness claims.
+
 Date: 2026-10-18
 
 Status: written design approved by the user on 2026-10-18. Implementation planning
@@ -97,8 +107,9 @@ The eleven interview decisions establish these requirements:
    It continues through death and loading within that party, and ends on departure.
 10. If the host enters an unsupported area, end co-op, notify the guest, and return
     them safely rather than following into that area.
-11. Target the existing BBSC server first. A compatible private shadNet server is
-    acceptable if the existing broker cannot meet the requirements.
+11. Target the user's self-hosted BBSC-compatible game/matchmaking/summon services.
+    Reuse the existing server components and client configuration; a public BBSC
+    server or THD/bbhost integration is not a required delivery target.
 
 ## Existing implementation and the gaps
 

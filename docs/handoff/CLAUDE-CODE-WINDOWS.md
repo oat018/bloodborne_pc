@@ -20,14 +20,14 @@ Return the audit commit/patch and allowlisted paths to the human/Codex owner. Do
 
 ## Ready-to-paste prompt
 
-> Work on task CL01 as the external Claude Code collaborator. Use BBport windows-v1.7.2 at e5d04e2ba4864ccf40de6c3cf6aa532855320b0d and CLSAMG22/BBSC v0.0.2 at4f11faf88b6ba658ebde6fe5fbefdadedba4fa41. Read this handoff and linked constraints. Audit BBSC features, native hooks and authenticated identity/protocol continuity against our approved requirements; produce the three source-cited documents below. Work in your own clone/branch, modify only docs/collaboration/claude/ allowlisted files, keep progress in its PROGRESS.md. Do not modify runtime/CMake/tests/shared plans, deploy servers, launch games, activate managed admission or push windows/integration branches. Return local commit SHA, changed paths, checks, findings and missing evidence. The primary Codex owner integrates results and keeps central progress synchronized.
+> Work on task CL01 as the external Claude Code collaborator. Use BBport windows-v1.7.2 at e5d04e2ba4864ccf40de6c3cf6aa532855320b0d and CLSAMG22/BBSC v0.0.2 at4f11faf88b6ba658ebde6fe5fbefdadedba4fa41. Read this handoff and linked constraints. Audit complete baseline composition and existing support for only three goals: cross-map join anywhere supported, earned progress sync and self-hosted services. Identify reuse first and only demonstrated gaps; produce the three source-cited documents below. Do not propose a whole legacy port, new HMAC/backend/save framework or unrelated game-system work. Work in your own clone/branch, modify only docs/collaboration/claude/ allowlisted files, keep progress in its PROGRESS.md. Do not modify runtime/CMake/tests/shared plans, deploy servers, launch games, activate managed admission or push windows/integration branches. Return local commit SHA, changed paths, checks, findings and missing evidence. The primary Codex owner integrates results and keeps central progress synchronized.
 
 ## Split and ownership
 
 | Owner | Work | Exclusive write scope |
 |---|---|---|
 | Codex | R01–R04; source baseline/build, W native integration, live diagnostics | All runtime/test/CMake/runner/build/config/entry-point files; shared handoff/plan/progress docs |
-| Claude | CL01 reference/protocol/acceptance audit, independently rejectable deliverable | Exactly the four files below |
+| Claude | CL01 complete-baseline/reuse/three-goal gap audit | Exactly the four files below |
 
 Claude may create/edit only:
 
@@ -48,29 +48,27 @@ Everything else is read-only, including AGENTS.md, CLAUDE.md, WINDOWS-PROGRESS.m
 
 ## Work in order
 
-### CL01-A: feature and source map
+### CL01-A: complete baseline and three-goal reuse map
 
-Write `BBSC-002-MAP.md` with one row per relevant behavior: source commit/path/symbol/line, shipped implementation, correspondence to our requirement, missing delta, actual native owner/thread/side effects, confidence and candidate test.
+Write `BBSC-002-MAP.md`. First identify the complete0.0.2 BBport client/mod DLL, actual load/configuration path and required source/data/artifacts. The1.7.2 network patch explicitly has no-op gameplay callbacks; explain what supplies gameplay in the unchanged release before proposing new code. Source/load instructions must come from pinned source/package references; do not invent a new loader.
 
-Required coverage: cross-map same-nonempty-password admission; selected host/current attempt; Kit/Blank normal UI/actions/departures; first playable entry; death/load continuity; boss/story eligibility; additive permanent items/exactly-once receipts; origin/fallback return; disconnect/crash recovery; unsupported/Chalice areas. Include reference spectating/world-time/scaling behavior as reference facts and flag spec differences rather than silently expanding scope.
+Then give one row for each goal: cross-map join/host placement on supported maps/Dream, eligible earned boss/story progress and save/reload, and self-hosted service configuration. Columns: source commit/path/symbol/line, existing behavior, EXISTING/PASS vs PRESENT-NOT-TESTED vs REPRODUCED-GAP vs UNSUPPORTED, required delta if any, responsible existing caller, smallest relevant test. Source presence alone is PRESENT-NOT-TESTED, not runtime PASS.
 
-Read pinned `bbport/README.txt`, the complete `bbport/bbport-1.7.2-bbsc.patch`, relevant `emulator/src/`, `emulator/scripts/` and `docs/` source; enumerate patch destinations and generated/missing dependencies. Inspect registration/runtime enable defaults. Do not assume the BBport patch contains every emulator feature.
+Include only correctness needed for those goals: password/current selected peer; first playable/exit eligibility; own-progress and relevant rewards non-duplication; safe return/disconnect. Preserve baseline Kit/Blank/scaling/spectate/world-time/UI/input/NPC systems; no independent upgrade/audit of their internals unless a concrete three-goal gap points there. Chalice remains unsupported. No whole-game quest/item catalogue or generic persistence/NG project.
 
-Done: every required row has source evidence or explicit NOT_FOUND/NOT_QUALIFIED plus searched paths. Do not use release notes as sole implementation proof.
+Read pinned `bbport/README.txt`, the full BBport patch, relevant mod source/load configuration and only the relevant release docs. Use existing implementation first. Done: actual composition requirements plus three-goal source/reuse matrix and explicit missing/unrun evidence. Release notes alone are not implementation proof.
 
-### CL01-B: identity/protocol audit (highest integration value)
+### CL01-B: self-host route and changed-boundary protocol findings
 
-Write `IDENTITY-PROTOCOL.md`. Trace HTTP login/sign-create/search/claim/delete identities (`UserId`, `CharaId`, `SessionId`, selected tuple), Matching2 account/OnlineId/room/member, signaling connection and endpoint. Identify exact producers/consumers and authentication/trust boundary for each conversion.
+Write `IDENTITY-PROTOCOL.md`. Map existing self-hosted game API, account/Matching2, summon broker and optional relay/client configuration; identify what components the release already supplies and whether a required goal route depends on a public service. Recommend reuse/configuration first. No public-server, THD/bbhost or cross-emulator compatibility development; no new account/OAuth/backend design or deployment.
 
-Search the pinned repository for actual broker/Matching2 server implementation. Initial tree inspection found `server/gameserver/` Python sources but no server C++/proto paths there; verify what is present, externally referenced, binary-only or absent. A documented `cmd_matching.cpp` name or old research note does not mean the deployed source is available. BBSC0.0.2 source, reference Python stub and user's deployed private services are distinct evidence classes.
+Trace selected user/character/session/room/peer identity and stale-attempt handling only as needed to explain a candidate changed join/progress boundary. Preserve baseline validation and authentication. If an actual gap makes a new association necessary, show producer/consumer/trust evidence or state its absence; never infer authentication from equal numbers/endpoints. Optional HMAC/capability support is a fact to record, not a prerequisite for unchanged baseline reproduction or an automatic new protocol task.
 
-Cover guest invite vs claim direction, private proof/HMAC support, expiration/retry, host/password change, stale replies, cleanup/shutdown, relay/direct endpoint identity and cross-play version requirements. State exactly whether a selected-character-to-native-owner binding exists; equal values/name/endpoint are observations, not authenticated equivalence. If absent, provide minimum required evidence/fields and trust properties; do not fabricate a bridge or propose deployment as already authorized.
-
-Done: source-cited positive chain or precise gap report, negative cases and implementation boundaries; no server URL/version question to user (already unavailable). Do not contact the user's private services/accounts.
+Check whether pinned server source/configuration exists or is referenced/binary-only. Reference release and user-deployed service are distinct evidence classes. Unknown deployed source/version is already recorded; do not repeat the user question or let it block unrelated composition findings. Do not contact private services/accounts. Done: existing self-host path and only relevant, source-cited boundary gaps with minimum evidence needed to resolve them.
 
 ### CL01-C: acceptance cases and handback
 
-Write `ACCEPTANCE-CASES.md`: ID, parent W/G gate, setup/input, real production boundary to exercise, expected allowed/rejected behavior, no-side-effect assertions, cleanup/retry condition, evidence type and blocker. Cover both success and stale/ambiguous/failure cases. Separate source/fixtures/native/gameplay; do not invent stable offsets/APIs or report unrun tests as PASS. These are executable-test specifications, not permission to modify tests.
+Write `ACCEPTANCE-CASES.md`: ID, parent W/G gate, setup/input, real production boundary to exercise, expected allowed/rejected behavior, no-side-effect assertions, cleanup/retry condition, evidence type and blocker. Limit cases to the three goals and changed save/return/peer boundaries: valid cross-map/Dream join, wrong/stale candidate/password if affected, earned-event/save-reload/no-duplicate/own-progress, self-host routing, normal exit/disconnect and interrupted-session reload. Add deeper wrong-character/write-failure/retry cases when a proposed delta changes persistence/recovery. Do not prescribe new HMAC, general journal/codec, NG/quest or renderer/input suites. Cover both success and relevant failure cases. Separate source/fixtures/native/gameplay; do not invent stable offsets/APIs or report unrun tests as PASS. These are executable-test specifications, not permission to modify tests.
 
 Review your own documents once for unsupported claims and scope. Check local Markdown links, UTF-8 and `git diff --check`; commit only the four allowlisted paths. Mark child VERIFIED only when documents/checks are complete, not when the game feature is qualified; use WAIT_DEP for unavailable inputs and record useful completed findings. Main owner decides source integration and gate status.
 

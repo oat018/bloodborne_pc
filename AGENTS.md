@@ -4,6 +4,8 @@ For development, setup, migration or resuming this repository, read [the Windows
 
 Active direction: Windows only, Supermedo BBport `windows-v1.7.2` + CLSAMG22 BBSC `v0.0.2`, pinned by [the release-alignment plan](docs/superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md). The `windows` branch currently contains the historical implementation plus migration documentation; it is not yet a port to that upstream. Preserve `pre` as history. Commit/push checkpoints to `origin/windows`.
 
+Scope: only supported-map seamless join, jointly earned progress sync and self-hosted service support. Reproduce/reuse the complete pinned releases first; implement only demonstrated goal gaps. Preserve other game systems. The alignment plan contains the current scope contract; historical W checklists are evidence references, not an instruction to recreate all old modules.
+
 ## Required plan and progress workflow
 
 These rules apply to every development, migration, setup, bug-fix, test and review task in this repository, including work delegated to subagents and work resumed in a new session.
