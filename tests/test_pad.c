@@ -23,8 +23,16 @@ void bbgpu_mouse_take(BbMouseInput *out) {
 void bbgpu_input_configure(int mouse_mode_available, int32_t toggle_scancode, int32_t reload_scancode) {
     (void)mouse_mode_available; (void)toggle_scancode; (void)reload_scancode;
 }
-void bbgpu_mouse_camera_configure(int direct, float sensitivity) {
-    (void)direct; (void)sensitivity;
+static char stub_pad_prompts[20][16];
+void bbgpu_prompts_configure_pad(const char *const *buttons, int count) {
+    for (int i=0;i<count && i<20;++i) snprintf(stub_pad_prompts[i],sizeof(stub_pad_prompts[i]),"%s",buttons[i]);
+}
+static char stub_prompts[20][128];
+void bbgpu_prompts_configure(const char *const *inputs, int count) {
+    for (int i=0;i<count && i<20;++i) snprintf(stub_prompts[i],sizeof(stub_prompts[i]),"%s",inputs[i]);
+}
+void bbgpu_mouse_camera_configure(int direct, float sensitivity, float scale_x, float scale_y, int sync) {
+    (void)direct; (void)sensitivity; (void)scale_x; (void)scale_y; (void)sync;
 }
 /* T6: controlled by the tests via stub_reload_requested, draining to 0 on read like the real
  * one (bbgpu_input_reload_requested's own doc comment: "1 once ... then clears back to 0"). */
@@ -59,7 +67,7 @@ static void test_binding_evaluation(void) {
     assert(cfg.warnings==0);
 
     bool keys[SDL_SCANCODE_COUNT]={0};
-    HostState host={keys,NULL,0,0,0,0};
+    HostState host={keys,NULL,0,0,0,0,{0},0};
 
     /* MIX-002: cross has two bindings (j, a); holding either fires it, holding neither doesn't. */
     assert(!button_output_held(&host,&cfg,OUT_CROSS));
@@ -95,6 +103,67 @@ static void test_binding_evaluation(void) {
     assert(!button_output_held(&host,&cfg,OUT_LEFTJOYSTICK_HALFMODE));
 
     puts("PASS: binding evaluation (remap OR, deadzone ramp and saturation, halfmode binding)");
+}
+
+/* Combos: all inputs held, and a held combo takes its inputs from the bindings on fewer of
+ * them (shadPS4): Shift + left click is r2 only, not also r1 (left click) or circle (Shift). */
+static void test_combos(void) {
+    InputConfig cfg;
+    input_config_parse(&cfg,
+        "r1 = leftbutton\n"
+        "r2 = lshift, leftbutton\n"
+        "circle = lshift\n"
+        "triangle = lctrl, lshift, leftbutton\n"
+        "axis_left_y_minus = w\n"
+        "pad_up = lalt, w\n");
+    assert(cfg.warnings==0);
+    bool keys[SDL_SCANCODE_COUNT]={0};
+    HostState host={keys,NULL,0,0,0,0,{0},0};
+#define HELD(out) (find_held_combos(&host,&cfg), button_output_held(&host,&cfg,(out)))
+#define STICK_Y() (find_held_combos(&host,&cfg), axis_output_value(&host,&cfg,OUT_AXIS_LEFT_Y_MINUS,-1))
+
+    host.mouse_buttons=SDL_BUTTON_MASK(SDL_BUTTON_LEFT);
+    assert(HELD(OUT_R1) && !HELD(OUT_R2) && !HELD(OUT_CIRCLE));
+    keys[SDL_SCANCODE_LSHIFT]=true;
+    assert(HELD(OUT_R2) && !HELD(OUT_R1) && !HELD(OUT_CIRCLE));
+    host.mouse_buttons=0;
+    assert(HELD(OUT_CIRCLE) && !HELD(OUT_R2) && !HELD(OUT_R1));
+    /* Three inputs beat two: Ctrl + Shift + left click is triangle only. */
+    keys[SDL_SCANCODE_LCTRL]=true; host.mouse_buttons=SDL_BUTTON_MASK(SDL_BUTTON_LEFT);
+    assert(HELD(OUT_TRIANGLE) && !HELD(OUT_R2) && !HELD(OUT_R1) && !HELD(OUT_CIRCLE));
+    keys[SDL_SCANCODE_LCTRL]=keys[SDL_SCANCODE_LSHIFT]=false; host.mouse_buttons=0;
+
+    /* A key bound to a stick is taken by a combo too: Alt + W is d-pad up, not forward. */
+    keys[SDL_SCANCODE_W]=true;
+    assert(STICK_Y()==-127 && !HELD(OUT_PAD_UP));
+    keys[SDL_SCANCODE_LALT]=true;
+    assert(STICK_Y()==0 && HELD(OUT_PAD_UP));
+    keys[SDL_SCANCODE_W]=false;
+    assert(!HELD(OUT_PAD_UP)); /* Alt alone is nothing */
+#undef HELD
+#undef STICK_Y
+    puts("PASS: combos (all inputs held, larger combo takes priority, stick keys too)");
+}
+
+/* Button prompts: each key-guide icon gets its button's first keyboard or mouse binding. */
+static void test_prompt_texts(void) {
+    InputConfig cfg;
+    input_config_parse(&cfg,
+        "cross = cross\ncross = e\ncircle = space\nr2 = lshift, leftbutton\nl1 = rightbutton\n"
+        "pad_down = mousewheeldown\npad_up = up\n"
+        "axis_left_y_minus = w\naxis_left_x_minus = a\naxis_left_y_plus = s\naxis_left_x_plus = d\n"
+        "mouse_to_joystick = right\n");
+    assert(cfg.warnings==0);
+    configure_prompts(&cfg);
+    assert(!strcmp(stub_prompts[0],"e"));                  /* KG_Cancel: Cross, skipping the controller line */
+    assert(!strcmp(stub_prompts[10],"space"));             /* KG_OK: Circle */
+    assert(!strcmp(stub_prompts[12],"lshift+leftbutton")); /* KG_R2 */
+    assert(!strcmp(stub_prompts[1],"rightbutton"));        /* KG_L1 */
+    assert(!strcmp(stub_prompts[4],"w a s d"));            /* KG_LS */
+    assert(!strcmp(stub_prompts[14],"mouse"));             /* KG_RS: the mouse drives the camera */
+    assert(!strcmp(stub_prompts[8],"up mousewheeldown"));  /* KG_L_UD */
+    assert(!strcmp(stub_prompts[15],""));                  /* KG_R_L: Square has no keyboard key */
+    puts("PASS: button prompt texts (first keyboard or mouse binding per icon, sticks, combinations)");
 }
 
 /* stick_socd and stick_release_delay_ms, with explicit timestamps (microseconds). The A -> D
@@ -298,7 +367,7 @@ static void test_mouse_buttons_and_wheel(void) {
         "pad_up = mousewheelup\n");
     assert(cfg.warnings==0);
 
-    HostState host={NULL,NULL,0,0,0,0};
+    HostState host={NULL,NULL,0,0,0,0,{0},0};
     assert(!button_output_held(&host,&cfg,OUT_R1));
 
     /* IN_MOUSE_BUTTON stores the SDL_BUTTON_* index (1=left); host.mouse_buttons must be
@@ -351,6 +420,53 @@ static void test_mouse_end_to_end(void) {
     unlink(config_path);
     free(loaded_config); config_initialized=0; loaded_config=NULL;
     puts("PASS: mouse end to end through pad_read_state (captured gate, right-stick deflection)");
+}
+
+/* Locked on with the direct camera: mouse motion switches targets with full flicks of the right
+ * stick, one per mouse_lock_switch counts, apart; small motion does not move the stick. */
+static void test_lock_on_switch(void) {
+    char config_path[]="/tmp/bbport-pad-test-lock-XXXXXX";
+    int fd=mkstemp(config_path);
+    assert(fd>=0);
+    FILE *f=fdopen(fd,"w");
+    assert(f);
+    fputs("mouse_to_joystick = right\nmouse_camera = direct\n",f);
+    fclose(f);
+    setenv("BB_INPUT_CONFIG",config_path,1);
+    free(loaded_config); config_initialized=0; loaded_config=NULL;
+    lock_flick_until_us=lock_flick_ready_us=0;
+
+    PadData data;
+    stub_mouse=(BbMouseInput){.dx=20.0f,.captured=1,.locked_on=1};
+    assert(pad_read_state(1,&data)==0);
+    assert(data.right_x==128 && data.right_y==128); /* under the threshold: no stick at all */
+    stub_mouse=(BbMouseInput){.dx=50.0f,.captured=1,.locked_on=1};
+    assert(pad_read_state(1,&data)==0);
+    assert(data.right_x==255 && data.right_y==128); /* 70 counts right: a full flick right */
+    stub_mouse=(BbMouseInput){.captured=1,.locked_on=1};
+    assert(pad_read_state(1,&data)==0);
+    assert(data.right_x==255); /* held for the flick's 100 ms */
+    usleep(120000);
+    assert(pad_read_state(1,&data)==0);
+    assert(data.right_x==128); /* then neutral */
+    stub_mouse=(BbMouseInput){.dx=-200.0f,.captured=1,.locked_on=1};
+    assert(pad_read_state(1,&data)==0);
+    assert(data.right_x==128); /* within the cooldown: no second flick, nothing saved up */
+    usleep(250000);
+    stub_mouse=(BbMouseInput){.dy=-80.0f,.captured=1,.locked_on=1};
+    assert(pad_read_state(1,&data)==0);
+    assert(data.right_x==128 && data.right_y==1); /* after it: up */
+
+    lock_flick_until_us=lock_flick_ready_us=0;
+    stub_mouse=(BbMouseInput){.dx=20.0f,.captured=1,.locked_on=0};
+    assert(pad_read_state(1,&data)==0);
+    assert(data.right_x>128 && data.right_x<255); /* not locked on: the usual mouse stick */
+
+    stub_mouse=(BbMouseInput){0};
+    unsetenv("BB_INPUT_CONFIG");
+    unlink(config_path);
+    free(loaded_config); config_initialized=0; loaded_config=NULL;
+    puts("PASS: lock-on target switching with the mouse");
 }
 
 /* T2: a custom input.ini end to end through pad_read_state -- proves the file is actually
@@ -430,6 +546,8 @@ static void test_reload_on_f8(void) {
 
 int main(void) {
     test_binding_evaluation();
+    test_combos();
+    test_prompt_texts();
     test_socd_and_release_delay();
     test_digital_stick_shape();
     test_mouse_to_axis();
@@ -448,13 +566,15 @@ int main(void) {
     test_custom_binding_config();
     test_reload_on_f8();
     test_mouse_end_to_end();
+    test_lock_on_switch();
     PadData data;
     inject(path,"cross l3 touchpad_left");
     assert(pad_read_state(1,&data)==0);
     assert((data.buttons & (BTN_CROSS|BTN_L3|BTN_TOUCHPAD))==(BTN_CROSS|BTN_L3|BTN_TOUCHPAD));
-    assert(data.touch_count==1 && data.touches[0].x==480 && data.touches[0].y==471);
+    /* A new touch gets a new id (1..127), as from a DualShock 4: the game ignores id 0. */
+    assert(data.touch_count==1 && data.touches[0].x==480 && data.touches[0].y==471 && data.touches[0].id==1);
     inject(path,"touchpad_right");
-    assert(pad_read_state(1,&data)==0 && data.touch_count==1 && data.touches[0].x==1440);
+    assert(pad_read_state(1,&data)==0 && data.touch_count==1 && data.touches[0].x==1440 && data.touches[0].id==1);
     inject(path,"");
     assert(pad_read_state(1,&data)==0 && data.buttons==0 && data.touch_count==0);
 
@@ -482,8 +602,8 @@ int main(void) {
     SDL_UpdateGamepads();
     assert(pad_read_state(1,&data)==0);
     assert(gamepad && data.touch_count==2 && (data.buttons & BTN_TOUCHPAD));
-    assert(data.touches[0].x==1439 && data.touches[0].y==471 && data.touches[0].id==0);
-    assert(data.touches[1].x==480 && data.touches[1].y==942 && data.touches[1].id==1);
+    assert(data.touches[0].x==1439 && data.touches[0].y==471 && data.touches[0].id==2);
+    assert(data.touches[1].x==480 && data.touches[1].y==942 && data.touches[1].id==3);
     capture=1;
     assert(pad_read_state(1,&data)==0 && data.touch_count==0 && data.buttons==0);
     capture=0;

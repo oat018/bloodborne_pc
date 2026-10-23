@@ -179,6 +179,20 @@ static LONG fatal_exception(EXCEPTION_POINTERS *info) {
     fprintf(stderr,"  rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx\n  rsi=%016llx rdi=%016llx rbp=%016llx rsp=%016llx\n",
             c->Rax,c->Rbx,c->Rcx,c->Rdx,c->Rsi,c->Rdi,c->Rbp,c->Rsp);
     if (gpu_enabled) bbgpu_dump_guest_writes(info);
+    /* Return addresses near the top of the stack: system libraries (the C runtime's memcpy)
+     * keep no frame pointers, so the rbp chain below can skip their caller. */
+    for (int slot=0, shown=0; slot<64 && shown<6; ++slot) {
+        uintptr_t value=0;
+        SIZE_T got=0;
+        if (!ReadProcessMemory(GetCurrentProcess(),(void *)(uintptr_t)(c->Rsp+slot*8),&value,sizeof(value),&got) || got!=sizeof(value)) break;
+        HMODULE owner=NULL;
+        int code_ref=(image && value-(uintptr_t)image<0x20000000) ||
+                     (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)value,&owner) && owner==GetModuleHandleA(NULL));
+        if (!code_ref) continue;
+        describe_address(where,sizeof(where),value);
+        fprintf(stderr,"  [rsp+0x%x] %s\n",slot*8,where);
+        ++shown;
+    }
     /* rbp chain (guest and host code keep frame pointers). */
     uintptr_t rbp=(uintptr_t)c->Rbp;
     for (int depth=0; depth<24 && rbp; ++depth) {
@@ -221,6 +235,12 @@ static LONG CALLBACK vectored_fault(EXCEPTION_POINTERS *info) {
         int ours=(image && rip-(uintptr_t)image<0x20000000) ||
                  (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,(LPCSTR)rip,&module) && module==self) ||
                  !module;
+        /* bbport: the C runtime handles none of its own faults (a bad pointer to memcpy or
+         * free from the port or the game): reported with the call chain into them, instead of
+         * Windows ending the process without a word (crashes after 1-2 hours in ucrtbase.dll). */
+        if (!ours && module && (module==GetModuleHandleA("ucrtbase.dll") || module==GetModuleHandleA("msvcrt.dll") ||
+                                module==GetModuleHandleA("vcruntime140.dll")))
+            ours=1;
         if (ours) return fatal_exception(info);
     }
     /* BB_STRICT_HANDLES=1: a closed or invalid handle used anywhere is reported (diagnostics). */
@@ -379,6 +399,18 @@ static int mapped(Segment *segments, uint64_t count, uint64_t address, uint64_t 
             address - segments[i].address <= segments[i].size - bytes) return 1;
     return 0;
 }
+/* Patches may also write past an executable segment's end up to its 4 KiB page boundary: those
+ * bytes are mapped with the segment on every host (and PS4) and unused by the game, so they hold
+ * patch code that does not fit in place (quit_menu.py). */
+static int patchable(Segment *segments, uint64_t count, uint64_t address, uint64_t bytes) {
+    if (mapped(segments, count, address, bytes)) return 1;
+    for (uint64_t i = 0; i < count; ++i) {
+        const uint64_t end = segments[i].address + segments[i].size, tail = (end + 4095) & ~(uint64_t)4095;
+        if ((segments[i].flags & 1) && address >= end && bytes <= tail - end && address - end <= tail - end - bytes)
+            return 1;
+    }
+    return 0;
+}
 /* BBPATCH2 (patches.py): the patches' image base, then byte writes at image offsets, applied
  * after relocation. A write may replace a whole base-relative pointer slot (60/90 FPS++ swap
  * function pointers): the patch holds the address at the patches' base, rebased here. */
@@ -390,7 +422,7 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
     unsigned char data[4096];
     for (uint64_t i=0;i<count;++i) {
         uint64_t offset=read64(f), length=read64(f);
-        if (!length || length>sizeof(data) || !mapped(segments,ns,offset,length) || fread(data,1,length,f)!=length)
+        if (!length || length>sizeof(data) || !patchable(segments,ns,offset,length) || fread(data,1,length,f)!=length)
             fail("bad patch entry");
         uint64_t slots[sizeof(data)/8]; size_t nslots=0;
         for (uint64_t r=0;r<nr;++r) {
@@ -398,7 +430,7 @@ static void apply_patches(const char *path, Segment *segments, uint64_t ns, cons
             uint64_t target=relocs[r].target, value;
             if (relocs[r].kind || target<offset || target+8>offset+length) fail("patch overlaps a relocation");
             memcpy(&value,data+(target-offset),8);
-            if (value<base || !mapped(segments,ns,value-base,1)) fail("patch writes a pointer outside the image");
+            if (value<base || !patchable(segments,ns,value-base,1)) fail("patch writes a pointer outside the image");
             slots[nslots++]=target;
         }
         memcpy(image+offset,data,length);
@@ -629,6 +661,7 @@ int main(int argc, char **argv) {
         }
     }
     image = allocate(round_page(size));
+    runtime_rebirth_set_image(image);
     if (fread(image, 1, size, f) != size || fgetc(f) != EOF) fail("incorrect memory image size");
     fclose(f);
     if (!cpu_only) {

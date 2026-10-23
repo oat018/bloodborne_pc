@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "bbport_toggles.h"
-#include <algorithm>
+#include <atomic>
 #include <ranges>
-#include <memory>
 #include "common/assert.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -14,51 +13,14 @@
 #include "video_core/texture_cache/image.h"
 
 #include <vk_mem_alloc.h>
+#include <cstdio>
+#include <cstdlib>
 
 namespace VideoCore {
 
 using namespace Vulkan;
 
 Common::IncrementalIdProvider<u64> Image::global_image_uid{};
-
-namespace {
-
-/// bbport: discrete GPUs: the memory types outside VRAM, when VRAM is within `reserve` of the
-/// driver's budget; 0 otherwise. The buffer cache backs guest memory in VRAM as areas load, and
-/// on NVIDIA that backing cannot go anywhere else: textures made near the limit go to system
-/// memory instead (slower, but the next area still finds room; ErrorOutOfDeviceMemory on 4 GB
-/// cards otherwise). Integrated GPUs (Steam Deck) keep their own rules.
-u32 SystemMemoryTypesNearVramLimit(VmaAllocator allocator) {
-    const VkPhysicalDeviceProperties* device{};
-    vmaGetPhysicalDeviceProperties(allocator, &device);
-    if (device->deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-        return 0;
-    }
-    const VkPhysicalDeviceMemoryProperties* memory{};
-    vmaGetMemoryProperties(allocator, &memory);
-    VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
-    vmaGetHeapBudgets(allocator, budgets);
-    bool near_limit = false;
-    for (u32 heap = 0; heap < memory->memoryHeapCount; ++heap) {
-        if (memory->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
-            const u64 reserve = std::min<u64>(512ull << 20, memory->memoryHeaps[heap].size / 8);
-            near_limit |= budgets[heap].usage + reserve > budgets[heap].budget;
-        }
-    }
-    if (!near_limit) {
-        return 0;
-    }
-    u32 types = 0;
-    for (u32 type = 0; type < memory->memoryTypeCount; ++type) {
-        const u32 heap = memory->memoryTypes[type].heapIndex;
-        if (!(memory->memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)) {
-            types |= 1u << type;
-        }
-    }
-    return types;
-}
-
-} // namespace
 
 static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance& instance,
                                            const ImageInfo& info) {
@@ -75,10 +37,8 @@ static vk::ImageUsageFlags ImageUsageFlags(const Vulkan::Instance& instance,
             }
             // Always create images with storage flag to avoid needing re-creation in case of e.g
             // compute clears This sacrifices a bit of performance but is less work. ExtendedUsage
-            // flag is also used. The exception here is for multisample images when storage is not
-            // supported, where even with ExtendedUsage we may get only one supported sample back.
-            if (info.num_samples == 1 || instance.IsMultisampleStorageImageSupported())
-                usage |= vk::ImageUsageFlagBits::eStorage;
+            // flag is also used.
+            usage |= vk::ImageUsageFlagBits::eStorage;
         }
     } else {
         // Similarly to above, we specify storage usage. This is typically not supported by
@@ -94,10 +54,10 @@ static vk::ImageType ConvertImageType(AmdGpu::ImageType type) noexcept {
     switch (type) {
     case AmdGpu::ImageType::Color1D:
     case AmdGpu::ImageType::Color1DArray:
+        return vk::ImageType::e1D;
     case AmdGpu::ImageType::Color2D:
     case AmdGpu::ImageType::Color2DMsaa:
     case AmdGpu::ImageType::Color2DArray:
-    case AmdGpu::ImageType::Cube:
         return vk::ImageType::e2D;
     case AmdGpu::ImageType::Color3D:
         return vk::ImageType::e3D;
@@ -142,12 +102,79 @@ void UniqueImage::Destroy() {
     }
 }
 
+// bbport: integrated GPUs whose only device-local heap is small. AMD APUs on Windows report the
+// BIOS's frame buffer (UMA, 256-512 MiB) as that heap and give the GPU the rest from shared
+// system memory, the same RAM. Every image preferred the small heap, textures filled it, and a
+// render target that needed it failed later in play (ErrorOutOfDeviceMemory after some minutes,
+// 256 MiB, Ryzen 5600H). There, textures (images that are never rendered to) prefer system
+// memory and keep the small heap for render targets. BB_IMAGES_PREFER_HOST=1 or 0 forces it.
+static bool TexturesPreferHost(VmaAllocator allocator) {
+    static const bool prefer = [allocator] {
+        if (const char* env = std::getenv("BB_IMAGES_PREFER_HOST"); env && env[0]) {
+            return env[0] == '1';
+        }
+        const VkPhysicalDeviceMemoryProperties* props = nullptr;
+        vmaGetMemoryProperties(allocator, &props);
+        u64 device_local = 0;
+        bool shared_heap = false;
+        for (u32 i = 0; i < props->memoryHeapCount; ++i) {
+            if (props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+                device_local += props->memoryHeaps[i].size;
+            } else {
+                shared_heap = true;
+            }
+        }
+        const bool small = shared_heap && device_local < (1ull << 30);
+        if (small) {
+            std::printf("GPU: device-local memory %llu MiB: textures in shared system memory, the "
+                        "device-local heap for render targets\n",
+                        (unsigned long long)(device_local >> 20));
+            std::fflush(stdout);
+        }
+        return small;
+    }();
+    return prefer;
+}
+
+// bbport: what each memory heap holds and allows, for the log when an image cannot be allocated.
+static void LogHeaps(VmaAllocator allocator, vk::Device device, const vk::ImageCreateInfo& image_ci) {
+    const VkPhysicalDeviceMemoryProperties* props = nullptr;
+    vmaGetMemoryProperties(allocator, &props);
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS]{};
+    vmaGetHeapBudgets(allocator, budgets);
+    u32 type_bits = 0;
+    if (auto [result, probe] = device.createImage(image_ci); result == vk::Result::eSuccess) {
+        type_bits = device.getImageMemoryRequirements(probe).memoryTypeBits;
+        device.destroyImage(probe);
+    }
+    std::printf("GPU: image %ux%u format %s usage %s could not be allocated (memory types %#x)\n",
+                image_ci.extent.width, image_ci.extent.height, vk::to_string(image_ci.format).c_str(),
+                vk::to_string(image_ci.usage).c_str(), type_bits);
+    for (u32 i = 0; i < props->memoryHeapCount; ++i) {
+        std::printf("GPU: heap %u%s: %llu MiB, used %llu of budget %llu MiB\n", i,
+                    props->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT ? " (device-local)" : "",
+                    (unsigned long long)(props->memoryHeaps[i].size >> 20),
+                    (unsigned long long)(budgets[i].usage >> 20),
+                    (unsigned long long)(budgets[i].budget >> 20));
+    }
+    std::fflush(stdout);
+}
+
 void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
+    const bool created = TryCreate(image_ci);
+    ASSERT_MSG(created, "Failed allocating image with error {}",
+               vk::to_string(vk::Result::eErrorOutOfDeviceMemory));
+}
+
+bool UniqueImage::TryCreate(const vk::ImageCreateInfo& image_ci) {
     this->image_ci = image_ci;
     ASSERT(!image);
+    const bool texture = !(image_ci.usage & (vk::ImageUsageFlagBits::eColorAttachment |
+                                             vk::ImageUsageFlagBits::eDepthStencilAttachment));
     VmaAllocationCreateInfo alloc_ci = {
         .flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT,
-        .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+        .usage = texture && TexturesPreferHost(allocator) ? VMA_MEMORY_USAGE_AUTO_PREFER_HOST
+                                                          : VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
         .requiredFlags = 0,
         .preferredFlags = 0,
         .pool = VK_NULL_HANDLE,
@@ -157,20 +184,8 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
     const VkImageCreateInfo image_ci_unsafe = static_cast<VkImageCreateInfo>(image_ci);
     VkImage unsafe_image{};
     VmaAllocationInfo alloc_info{};
-    VkResult result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
-    if (const u32 system_types = SystemMemoryTypesNearVramLimit(allocator)) {
-        VmaAllocationCreateInfo system = alloc_ci;
-        system.memoryTypeBits = system_types;
-        result = vmaCreateImage(allocator, &image_ci_unsafe, &system, &unsafe_image, &allocation,
-                                &alloc_info);
-        if (result == VK_SUCCESS) {
-            Vulkan::NoteOverBudget("image");
-        }
-    }
-    if (result != VK_SUCCESS) {
-        result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
-                                &allocation, &alloc_info);
-    }
+    VkResult result = vmaCreateImage(allocator, &image_ci_unsafe, &alloc_ci, &unsafe_image,
+                                     &allocation, &alloc_info);
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
         // bbport: VRAM full (6 GB cards, high resolutions). Past the budget the driver keeps the
         // image in system memory, which is slower but no crash.
@@ -179,11 +194,29 @@ void UniqueImage::Create(const vk::ImageCreateInfo& image_ci) {
         over_budget.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
         result = vmaCreateImage(allocator, &image_ci_unsafe, &over_budget, &unsafe_image,
                                 &allocation, &alloc_info);
+        if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            // bbport: the preferred heap is full: wherever the image may go instead.
+            over_budget.usage = alloc_ci.usage == VMA_MEMORY_USAGE_AUTO_PREFER_HOST
+                                    ? VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE
+                                    : VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+            result = vmaCreateImage(allocator, &image_ci_unsafe, &over_budget, &unsafe_image,
+                                    &allocation, &alloc_info);
+        }
+        if (result != VK_SUCCESS) {
+            LogHeaps(allocator, device, image_ci);
+        }
+    }
+    // bbport: out of memory past the budget too (AMD keeps render targets in VRAM only, so a
+    // 4 GB card has no system memory to fall back on): the caller frees memory and tries again.
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+        allocation = {};
+        return false;
     }
     ASSERT_MSG(result == VK_SUCCESS, "Failed allocating image with error {}",
                vk::to_string(vk::Result{result}));
     image = vk::Image{unsafe_image};
     size_bytes = alloc_info.size;
+    return true;
 }
 
 Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
@@ -196,6 +229,7 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
     }
 
     image_uid = global_image_uid.Next();
+    mip_hashes.resize(info.resources.levels);
     vk::ImageCreateFlags flags{vk::ImageCreateFlagBits::eMutableFormat |
                                vk::ImageCreateFlagBits::eExtendedUsage};
     if (info.props.is_volume) {
@@ -271,7 +305,22 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
     backing = &backing_images.emplace_back();
     backing->num_samples = info.num_samples;
     backing->image = UniqueImage{instance.GetDevice(), instance.GetAllocator()};
-    backing->image.Create(image_ci);
+    // bbport: BB_IMAGE_FAIL_EVERY=N (tests): every Nth image finds no memory once, as on a full
+    // 4 GB card, so TextureCache::InsertImage's freeing runs often on any GPU.
+    static const u32 fail_every = [] {
+        const char* env = std::getenv("BB_IMAGE_FAIL_EVERY");
+        return env ? u32(std::strtoul(env, nullptr, 10)) : 0u;
+    }();
+    static std::atomic<u32> num_created{0};
+    if (fail_every && (num_created.fetch_add(1, std::memory_order_relaxed) + 1) % fail_every == 0) {
+        backing->image.image_ci = image_ci;
+        allocation_failed = true;
+        return;
+    }
+    if (!backing->image.TryCreate(image_ci)) {
+        allocation_failed = true; // TextureCache::InsertImage frees memory and retries
+        return;
+    }
 
     Vulkan::SetObjectName(instance.GetDevice(), GetImage(),
                           "Image {}x{}x{} {} {} {:#x}:{:#x} L:{} M:{} S:{}", info.size.width,
@@ -281,6 +330,14 @@ Image::Image(const Vulkan::Instance& instance, Vulkan::Runtime& runtime_,
 }
 
 Image::~Image() = default;
+
+bool Image::RetryAllocation() {
+    if (!backing->image.TryCreate(backing->image.image_ci)) {
+        return false;
+    }
+    allocation_failed = false;
+    return true;
+}
 
 ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_samples) {
     if (ensure_guest_samples && backing->num_samples > 1 != info.num_samples > 1) {
@@ -296,7 +353,7 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
         const auto view_id = backing->image_view_ids[backing->last_view];
         return (*slot_image_views)[view_id];
     }
-    const auto view_id = slot_image_views->Insert(runtime->GetInstance(), view_info, *this);
+    const auto view_id = slot_image_views->insert(runtime->GetInstance(), view_info, *this);
     backing->image_view_infos.emplace_back(view_info);
     backing->image_view_ids.emplace_back(view_id);
     return (*slot_image_views)[view_id];
@@ -322,16 +379,19 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
         // In case of partial transition, we need to change the specified subresources only.
         // Otherwise all subresources need to be set to the same state so we can use a full
         // resource transition for the next time.
-        const u32 start_mip = needs_partial_transition ? subres_range->base.level : u16{0};
-        const u32 end_mip = needs_partial_transition
-                                ? subres_range->base.level + subres_range->extent.levels
-                                : info.resources.levels;
-        const u32 start_layer = needs_partial_transition ? subres_range->base.layer : u16{0};
-        const u32 end_layer = needs_partial_transition
-                                  ? subres_range->base.layer + subres_range->extent.layers
-                                  : info.resources.layers;
-        for (u32 mip = start_mip; mip < end_mip; ++mip) {
-            for (u32 layer = start_layer; layer < end_layer; ++layer) {
+        const auto mips =
+            needs_partial_transition
+                ? std::ranges::views::iota(subres_range->base.level,
+                                           subres_range->base.level + subres_range->extent.levels)
+                : std::views::iota(0u, info.resources.levels);
+        const auto layers =
+            needs_partial_transition
+                ? std::ranges::views::iota(subres_range->base.layer,
+                                           subres_range->base.layer + subres_range->extent.layers)
+                : std::views::iota(0u, info.resources.layers);
+
+        for (u32 mip : mips) {
+            for (u32 layer : layers) {
                 // NOTE: these loops may produce a lot of small barriers.
                 // If this becomes a problem, we can optimize it by merging adjacent barriers.
                 const auto subres_idx = mip * info.resources.layers + layer;
@@ -379,6 +439,7 @@ void Image::GetBarriers(Barriers& barriers, vk::ImageLayout dst_layout, vk::Acce
         if (last_state.layout == dst_layout && last_state.access_mask == dst_mask && !is_write) {
             return;
         }
+
         barriers.emplace_back(vk::ImageMemoryBarrier2{
             .srcStageMask = last_state.pl_stage,
             .srcAccessMask = last_state.access_mask,
