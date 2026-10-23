@@ -342,3 +342,6 @@ Required evidence: actual-reader behavioral RED for custom-frame misrouting, the
 
 
 **W06 runtime startup outcome:** Local e6670fd rendered title screen with fresh copied saves, offline/admission OFF, then closed from title. Savedata unchanged18/18 in both baseline and diagnostic copies. Startup PASS does not close any further W06/G1 criterion. WAIT_DEP on user online account/service setup; isolated launcher opened to Online co-op, no credential or unknown service guessed. No source change; actual wrapper exit not captured.
+
+
+**W06 native online prerequisite update (2026-10-23):** User completed private vendor/shadNet setup; actual runtime e6670fd login accepted, native NP signed-in/NPID and Matching2 CreateContext/ContextStart observed with existing BB_GPU_LOG=info. HTTP friend/block-list200 are account-service prerequisites, not selected summon/character identity evidence. No summon/JoinRoom observed, no further acceptance box closes. Copied saves18/18 unchanged at observation, admission OFF. WAIT_GAME at title: user menu/character input needed after automated configured inputs failed to advance (cause not diagnosed). Native source unchanged; private logs/endpoints/account values excluded from Git. Runtime game authorization remains valid; no repeated permission question.
