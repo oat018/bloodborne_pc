@@ -4,7 +4,7 @@ Updated: 2026-10-23 (Asia/Bangkok). This file replaces dependence on the old Cod
 
 ## Current target and next action — 2026-10-23
 
-The latest explicit user decision selects **BBport windows-v1.7.2** (`e5d04e2ba4864ccf40de6c3cf6aa532855320b0d`) plus **BBSC v0.0.2** (`4f11faf88b6ba658ebde6fe5fbefdadedba4fa41`). The briefly proposed1.9.4 direction is superseded. Read the [release-alignment plan](../superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md) before the older [detailed W plan](../superpowers/plans/2026-10-21-bbsc-windows-execution.md), [direction](../superpowers/plans/2026-10-21-bbsc-windows-only-migration.md) and [progress tracker](../WINDOWS-PROGRESS.md). R02 separate source/patch qualification is next; R03 builds and R04 native/source requalification follow. No1.7.2 build or patch-application result exists yet.
+The latest explicit user decision selects **BBport windows-v1.7.2** (`e5d04e2ba4864ccf40de6c3cf6aa532855320b0d`) plus **BBSC v0.0.2** (`4f11faf88b6ba658ebde6fe5fbefdadedba4fa41`). The briefly proposed1.9.4 direction is superseded. Read the [release-alignment plan](../superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md) before the older [detailed W plan](../superpowers/plans/2026-10-21-bbsc-windows-execution.md), [direction](../superpowers/plans/2026-10-21-bbsc-windows-only-migration.md) and [progress tracker](../WINDOWS-PROGRESS.md). New LOCAL codex/bbsc-bbport172 at exact e5d04e2 plus pinned15-file BBSC patch now passes apply/reverse checks, full native build0 and scoped tests (3 native exits0; Python38PASS/1SKIP). R02/R03 remain WAIT_DEP on actual gameplay DLL/guard and full qualification; patch-only header has no-op gameplay callbacks. Next map actual BBSC gameplay module/activation boundary, then R04 requalification; no new target game launched.
 
 Preserve the existing local codex/bbsc-windows-integration tree and its old upstream de2e38a evidence. Runtime e6670fd,33PASS/build0 and private vendor login describe that old tree only. W01–W06 checkboxes have been reopened for the new target; no old fixture/native/gameplay evidence automatically transfers. The new source layout uses gpu/shadps4/core/libraries, not the old vendor/THD routes. Use the version-specific plan rather than silently editing old offsets/paths.
 
@@ -65,11 +65,11 @@ Use the pinned `packaging/windows/README.md` in that worktree for dependency com
 - The user can test two game windows on one machine with separate copied profiles/accounts. User performs necessary gameplay tests; provide exact steps and expected outputs at a checkpoint.
 - Private servers: shadNet `100.119.93.51`, gameserver `100.86.192.108` (private network connectivity must be established on Windows).
 - Unraid templates reported `localhost/bbsc-gameserver:0.6-pre1`, `localhost/bbsc-shadnet:0.6-pre1`, extra parameters `--init --pull=never`; gameserver `/data` maps to `/mnt/app-data/appdata/bbsc/gameserver`. These are historical deployment inputs, not verification of the currently running images. Do not redeploy/reset persistent data during setup.
-- Server sources and instructions: [gameserver README](../../scripts/bbsc_gameserver/README.md). Authentication/account tokens must be configured privately on Windows, never pasted into tracked files.
+- Server sources and instructions: [gameserver README](https://github.com/kaoitp/bloodborne_pc/blob/7fea2f82e150d850770f7fad5b4c299280e4a13b/scripts/bbsc_gameserver/README.md). Authentication/account tokens must be configured privately on Windows, never pasted into tracked files.
 
 ## Unrelated local FSR work preserved separately
 
-The Linux checkout retains a 119-line uncommitted change in `gpu/third_party/fsr-vulkan/src/ffx_vk_fsr4_v07.c`. Its exact diff is preserved as [an archival patch](fsr-vulkan-local-work.patch), with base commit and SHA-256 in [metadata](fsr-vulkan-local-work.json). This patch is not part of BBSC or the Windows baseline. To recover it, use a separate checkout at the recorded submodule base, verify its checksum and `git apply --check` before applying. Do not replace the Windows upstream submodule with it automatically.
+The Linux checkout retains a 119-line uncommitted change in `gpu/third_party/fsr-vulkan/src/ffx_vk_fsr4_v07.c`. Its exact diff is preserved as [an archival patch](https://github.com/kaoitp/bloodborne_pc/blob/7fea2f82e150d850770f7fad5b4c299280e4a13b/docs/handoff/fsr-vulkan-local-work.patch), with base commit and SHA-256 in [metadata](https://github.com/kaoitp/bloodborne_pc/blob/7fea2f82e150d850770f7fad5b4c299280e4a13b/docs/handoff/fsr-vulkan-local-work.json). This patch is not part of BBSC or the Windows baseline. To recover it, use a separate checkout at the recorded submodule base, verify its checksum and `git apply --check` before applying. Do not replace the Windows upstream submodule with it automatically.
 
 ## New-session prompt
 
@@ -78,3 +78,6 @@ The Linux checkout retains a 119-line uncommitted change in `gpu/third_party/fsr
 ## Handoff acceptance
 
 Publication is complete only when the handoff, root entry point, migration plan and FSR archival patch are committed and the local HEAD equals `origin/windows` after push. Verify private archive integrity separately and copy those archives outside the machine before OS replacement. Windows tool installation, build, save compatibility and game testing remain unverified until performed on Windows.
+
+
+Latest unattended checkpoint: old copied-profile game remains running after user-loaded world; mouse config enabled with backup, physical keyboard/mouse not yet qualified. Two-client summon not run: only one distinct account configured, plus complete compatible guarded clients required. New1.7.2 source/build at C:/Users/numbe/.codex/worktrees/bbsc-bbport172/bloodborne_pc (C:/bbsc172 alias), code LOCAL. See tracker for initial EOL-related build failure and successful retry. Do not confuse development network patch with full BBSC mod DLL integration.

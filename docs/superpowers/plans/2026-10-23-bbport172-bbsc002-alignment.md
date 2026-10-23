@@ -43,17 +43,17 @@ Publication: commit/push documentation checkpoints to origin/windows and report 
 
 Files: new isolated integration checkout; upstream `gpu/bbnet/bbnet_glue.cpp`, `gpu/shadps4/core/libraries/network/`, `gpu/shadps4/core/libraries/np/`, `gpu/shim/core/bloodborne_re.h` only as changed by the pinned patch.
 
-- [ ] Read using-git-worktrees and list existing attachments; create a separate LOCAL integration checkout at exact e5d04e2. Proposed branch `codex/bbsc-bbport172`; do not reuse/reset the old integration tree. Record actual branch/path/SHA.
-- [ ] Obtain the patch from pinned4f11faf, verify SHA256, inspect all15 destinations, run `git apply --check` on the clean1.7.2 tree and retain actual exit/output. Stop for a mismatch; never declare patch compatibility from its filename.
+- [x] Read using-git-worktrees and list existing attachments; create a separate LOCAL integration checkout at exact e5d04e2. Proposed branch `codex/bbsc-bbport172`; do not reuse/reset the old integration tree. Record actual branch/path/SHA.
+- [x] Obtain the patch from pinned4f11faf, verify SHA256, inspect all15 destinations, run `git apply --check` on the clean1.7.2 tree and retain actual exit/output. Stop for a mismatch; never declare patch compatibility from its filename.
 - [ ] Review potentially default-on hooks; qualify a diagnostic-safe path with admission OFF before any game launch. Preserve the original patch as an immutable input; record every additional guard/delta separately.
-- [ ] Apply the reviewed patch in the new checkout and record diff/source/submodule pins. Native/client compatibility is still NOT RUN. Do not copy packaged executables over source outputs.
+- [x] Apply the reviewed patch in the new checkout and record diff/source/submodule pins. Native/client compatibility is still NOT RUN. Do not copy packaged executables over source outputs.
 
-### R03 — Fresh Windows build and baseline qualification (Codex; WAIT_DEP R02)
+### R03 — Fresh Windows build and baseline qualification (Codex; scoped build/tests PASS, WAIT_DEP for full qualification)
 
 Files: pinned `build.sh`, `gpu/CMakeLists.txt`, actual baseline tests; isolated build/log/profile outputs. New runner changes only if required by real failures.
 
 - [ ] Inventory target test registrations and native ABI before adapting old runner/stubs; retain assertions. Use native CLANG64, record tools, commands, source SHA and diff.
-- [ ] Build with `bash build.sh`; classify BUILD_FAIL/PASS from actual waited exit. Initialize only pinned needed dependencies; preserve their licenses and Gitlinks.
+- [x] Build with `bash build.sh`; classify BUILD_FAIL/PASS from actual waited exit. Initialize only pinned needed dependencies; preserve their licenses and Gitlinks.
 - [ ] Run applicable baseline/patch tests; unavailable targets are MISSING/NOT RUN, never carry forward33PASS. Use RED/GREEN for any corrective behavior change.
 - [ ] After safe guard review, launch a fresh copied profile; record title/world/account/peer observations separately. A new source/profile requires fresh evidence; no checkpoint closes from old login logs.
 
@@ -79,3 +79,9 @@ Parent: R01/R04 and W03/W06. Exact instructions, file allowlist, source refs, de
 - Old source paths/thread contracts applied to1.7.2: re-derive owners and cancellation before porting.
 - Identical-looking account/character numbers confused with authenticated binding: require actual provenance and current attempt/room correlation.
 - Two writers editing native/progress files or testing shared saves: separate checkouts/profile/build dirs and exclusive allowlists; reject out-of-scope patches at handback.
+
+
+**R02/R03 source checkpoint amendment:** Pinned patch check/apply/reverse-check all0 in new LOCAL codex/bbsc-bbport172 at e5d04e2,15 destinations. Review finds BBSC gameplay callback no-ops explicitly delegated to an external mod DLL; patch is insufficient for full BBSC integration. R03 build-only phase may proceed after source/patch checks; diagnostic game launch remains dependent on actual module/admission guard review. No new game launched until that remaining R02 checkbox has evidence. Old loaded e6670fd session stays separate.
+
+
+**R03 measured checkpoint:** Initial build1 due CRLF parent patch vs LF MSYS submodule, reproduced by exact native Git apply check; two FSR patch working files normalized to LF with tracked content unchanged, check0. Repeated full bash build.sh exit0 (336 stages);3 native command-buffer/motion-history/ui-composition tests actual waited exits0. Python five baseline modules39tests/38PASS/1missing-real-ELF SKIP. Full graphics/ABI/BBSC fixture inventory and target gameplay not qualified, remaining boxes open. Evidence in controller .superpowers/bbport172. No upstream input changes: copied old-profile mouse config enabled with backup, physical input still unverified; two-player test awaits distinct second account and complete compatible guarded clients. User permits unattended handling but no duplicate identity or account creation invented. R02 remaining guard/module item open; R03 full qualification WAIT_DEP.
