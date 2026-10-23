@@ -1,5 +1,7 @@
 # BBSC Windows integration base and history map
 
+> Target changed2026-10-23: BBport1.7.2 + BBSC0.0.2. This document records the previous base; its paths/claims/results require R02–R04 requalification under [the alignment plan](../superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md). Do not treat old VERIFIED or PASS labels as new-target evidence.
+
 Updated: 2026-10-21 (Asia/Bangkok). W01 source-discovery record. This document records source ancestry and path ownership; it does not claim that BBSC has been ported or integrated.
 
 ## Pins and checkout facts

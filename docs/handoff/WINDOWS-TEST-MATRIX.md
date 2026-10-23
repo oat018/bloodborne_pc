@@ -1,5 +1,7 @@
 # BBSC Windows test matrix
 
+> Target changed2026-10-23: BBport1.7.2 + BBSC0.0.2. This document records the previous base; its paths/claims/results require R02–R04 requalification under [the alignment plan](../superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md). Do not treat old VERIFIED or PASS labels as new-target evidence.
+
 Audit date: 2026-10-21. Historical source: `ea8ac53801e49b5dc79c072971c0e05efcd7651f`; inspected documentation tree: `781a02788e0408f07c2870f3cb1d18369a8c7b77`. Upstream comparison/build pin: `de2e38af055f09f819946951075c6bb119e62ae6` in `C:\Users\numbe\.codex\worktrees\bbsc-windows-baseline\bloodborne_pc`. The tables below began as static analysis. Subsequent actual Windows results are recorded in the execution section and [progress tracker](../WINDOWS-PROGRESS.md). No fixture or source-level claim establishes native hook validity.
 
 The migration plan requires a Windows baseline first, then ported BBSC tests; Linux results remain historical evidence only (plan steps 1, 2, and 8). Upstream does not yet contain the historical BBSC source/test files or their CMake targets. The Windows build guide also explicitly says the existing `tests/` programs are not ported, with several using Linux-only APIs ([upstream Windows README](https://github.com/Supermedo/bloodborne_pc/blob/de2e38af055f09f819946951075c6bb119e62ae6/packaging/windows/README.md#L71-L77)).

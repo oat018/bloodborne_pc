@@ -10,9 +10,13 @@
 
 **Spec:** [Approved product design](../specs/2026-10-18-bbsc-anywhere-coop-design.md). The [Windows direction plan](2026-10-21-bbsc-windows-only-migration.md) controls scope/platform; this document refines its execution order and evidence gates, without replacing product requirements. [Manifest](../../handoff/WINDOWS-MIGRATION-MANIFEST.md), [test matrix](../../handoff/WINDOWS-TEST-MATRIX.md) and [setup evidence](../../handoff/WINDOWS-SETUP-2026-10-21.md) supply the current facts.
 
+## Release alignment amendment — 2026-10-23
+
+The [BBport1.7.2/BBSC0.0.2 plan](2026-10-23-bbport172-bbsc002-alignment.md) supersedes this document's old active source paths/pins. R02/R03/R04 qualify the new tree before native W implementation resumes. Existing checkbox evidence below belongs to old de2e38a-derived code; checkboxes are reopened for the new target, without erasing historical reports. In particular the old THD/vendor dual-route contract is NOT assumed present in1.7.2. Re-map gpu/shadps4/core/libraries owners; keep approved product gates and tests, revise exact paths/interfaces before code. CL01 external audit runs separately and cannot edit shared native files.
+
 ## Global constraints
 
-- Upstream source/build pin: `de2e38af055f09f819946951075c6bb119e62ae6`. Historical BBSC runtime pin: `ea8ac53801e49b5dc79c072971c0e05efcd7651f`. Record a reviewed new pin before changing either comparison base.
+- Active source/build pin: BBport1.7.2 `e5d04e2ba4864ccf40de6c3cf6aa532855320b0d` + BBSC0.0.2 `4f11faf88b6ba658ebde6fe5fbefdadedba4fa41` patch, per alignment plan. de2e38a/ea8ac53 and their paths/tests remain historical comparisons only.
 - `origin` is `kaoitp/bloodborne_pc`; `upstream` is `Supermedo/bloodborne_pc`. Preserve `pre` history. Checkpoints target `windows` / `origin/windows`; no history rewriting or force pushes.
 - Use native CLANG64. Linux fixture results do not count as Windows results. Test only copied profiles; keep saves, credentials, game assets and private logs outside Git.
 - Native managed admission stays OFF until G1 passes. Ordinary network support or a passing synthetic callback test cannot qualify it.
@@ -21,9 +25,9 @@
 - Persist only verified additive boss/story progress and enumerated rewards. Preserve already-earned progress, stats/equipment/loot, conflicting NPC choices and ending choices. Never copy entire flag groups or roll back the whole save.
 - Commit origin and a previously unlocked fallback lamp before world mutation. Restore an exact point only with safety evidence; otherwise use that captured fallback. Preserve pending recovery when evidence is insufficient.
 - Preserve Kit/Blank menu, normal animations/text, host and guest departure behavior. Unsupported destinations end co-op with an explanation and safe return.
-- No game launch during the present planning/preflight checkpoint. Future G1–G3 are user gameplay checkpoints, not waived requirements. Do not launch a game without a later user instruction.
+- Later user instruction permits copied-profile game diagnostics. G1–G3 remain required, source-specific user gameplay gates. Qualify new baseline/guards before launch and do not replace any in-use binary/save.
 - Stop before `packaging/windows/package.sh`, EXE/ZIP release generation or server deployment. Building development test/game executables is not packaging.
-- Use Luna for substantial independent work with disjoint file ownership. Native adapter changes have one owner. Check usage when available; below 10% remaining in the 300-minute window, checkpoint and push `origin/windows`. If usage reporting is unavailable, record that rather than inventing a percentage.
+- Codex works inline without subagents; external human collaborator/Claude follows CL01 exclusive document ownership. Native adapter changes have one Codex owner. Check usage when available; below 10% remaining in the 300-minute window, checkpoint and push `origin/windows`. If usage reporting is unavailable, record that rather than inventing a percentage.
 
 ## Review focus
 
@@ -47,11 +51,11 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Files/evidence:** setup report, migration manifest, Windows test matrix.
 
-- [x] Verify pinned upstream build with `bash build.sh` and executable outputs.
-- [x] Verify CUSA03173 01.09 metadata, executable fingerprint and `INSTALL_DIR_SAVEDATA=CUSA00207`.
-- [x] Restore and hash-check the copied save; user confirms characters and normal basic gameplay; original archive unchanged.
-- [x] Audit all 11 historical BBSC test sources and nine upstream test targets; run the safe preflight subset and record compile failures separately.
-- [x] Identify missing game-thread/admission/save/UI contracts without treating them as implemented.
+- [ ] Verify pinned upstream build with `bash build.sh` and executable outputs.
+- [ ] Verify CUSA03173 01.09 metadata, executable fingerprint and `INSTALL_DIR_SAVEDATA=CUSA00207`.
+- [ ] Restore and hash-check the copied save; user confirms characters and normal basic gameplay; original archive unchanged.
+- [ ] Audit all 11 historical BBSC test sources and nine upstream test targets; run the safe preflight subset and record compile failures separately.
+- [ ] Identify missing game-thread/admission/save/UI contracts without treating them as implemented.
 
 **Exit:** reproducible preparation and honest test inventory. The five failed upstream test-target builds are W02 work; this checkpoint does not claim full Windows test parity or BBSC functionality.
 
@@ -63,11 +67,11 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Interfaces:** consumes the two pinned trees and manifest. Produces a documented integration branch/tree pin plus a reviewed path-ownership map; W02–W11 use that checkout, not the untouched baseline.
 
-- [x] Keep the app-managed baseline worktree unchanged as the reference. Create a separate app-managed implementation worktree at the pinned upstream; use branch `codex/bbsc-windows-integration`.
-- [x] Inventory the upstream-versus-`windows` ancestry/path differences. Record every retained upstream path, BBSC-only addition and minimal runtime bridge; copy documentation/BBSC source only by explicit path selection in later tasks.
-- [x] Record a normal, non-rewriting integration route back to `windows`: preserve both histories with a reviewed merge, keep upstream ownership for its runtime/renderer/launcher paths, and retain BBSC/documentation additions. Do not perform a blanket merge/checkout or mark ancestry-only merges as a code migration.
-- [x] Before any final merge, require a complete path/diff review and integrated checks. Preserve the current `windows` history and `origin/pre`; never force-update either.
-- [x] Verify `git rev-parse HEAD`, `git status --short --branch`, exact submodule pins and the path map; review and commit the workspace record.
+- [ ] Keep the app-managed baseline worktree unchanged as the reference. Create a separate app-managed implementation worktree at the pinned upstream; use branch `codex/bbsc-windows-integration`.
+- [ ] Inventory the upstream-versus-`windows` ancestry/path differences. Record every retained upstream path, BBSC-only addition and minimal runtime bridge; copy documentation/BBSC source only by explicit path selection in later tasks.
+- [ ] Record a normal, non-rewriting integration route back to `windows`: preserve both histories with a reviewed merge, keep upstream ownership for its runtime/renderer/launcher paths, and retain BBSC/documentation additions. Do not perform a blanket merge/checkout or mark ancestry-only merges as a code migration.
+- [ ] Before any final merge, require a complete path/diff review and integrated checks. Preserve the current `windows` history and `origin/pre`; never force-update either.
+- [ ] Verify `git rev-parse HEAD`, `git status --short --branch`, exact submodule pins and the path map; review and commit the workspace record.
 
 **Exit:** one known implementation checkout, explicit ownership and a history-preserving integration route. Until this is recorded, do not port runtime files in the historical checkout.
 
@@ -79,12 +83,12 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Interfaces:** consumes existing nine upstream target names and Win32 compatibility definitions. Produces a runner that accepts explicit test groups (`baseline`, `bbsc`, `all`), records each command's exit and returns nonzero on failure. The runner must not invoke `run.py`, a launcher, or `bb-probe`; unavailable future BBSC targets are a reported missing group, not a pass.
 
-- [x] Reproduce the recorded RED builds: four renderer test targets fail on `sigjmp_buf`; `upscaler-support-test` fails on `setenv`/`unsetenv`. Add assertions for writable temporary paths and environment restoration.
-- [x] Adapt the stub declaration to the actual Windows fault-recovery type from `src/compat_win.h`; retain the POSIX branch. Replace test-only environment/temp assumptions using Windows-supported calls and actual temp paths. Resolve further link gaps against the real symbols, without weakening runtime ABI checks or assertions.
-- [x] Ensure every assertion-based target has `-UNDEBUG`, including `motion-shader-test`. Classify CPU-only, SPIR-V generation and headless Vulkan-device tests separately; the source comment saying no device is required is inaccurate for three targets.
-- [x] Build all nine targets. Run CPU targets directly; run `motion-shader-test` with an isolated output directory and validate generated `.spv` files with installed `spirv-val`; run the three headless Vulkan tests without game windows.
-- [x] Add the runner with explicit allowlisted commands, isolated TEMP/TMP and durable per-test summaries. Test that a failing child, missing target and skipped prerequisite remain visible and cannot yield an all-pass summary.
-- [x] Run the six audited upstream Python modules through the baseline group. Retain the eight gameserver-ID tests and direct historical catalog run as separately pinned reference evidence; the integration BBSC group remains unavailable until W04/W06 introduce its actual sources/targets. Recheck the native build, review and commit.
+- [ ] Reproduce the recorded RED builds: four renderer test targets fail on `sigjmp_buf`; `upscaler-support-test` fails on `setenv`/`unsetenv`. Add assertions for writable temporary paths and environment restoration.
+- [ ] Adapt the stub declaration to the actual Windows fault-recovery type from `src/compat_win.h`; retain the POSIX branch. Replace test-only environment/temp assumptions using Windows-supported calls and actual temp paths. Resolve further link gaps against the real symbols, without weakening runtime ABI checks or assertions.
+- [ ] Ensure every assertion-based target has `-UNDEBUG`, including `motion-shader-test`. Classify CPU-only, SPIR-V generation and headless Vulkan-device tests separately; the source comment saying no device is required is inaccurate for three targets.
+- [ ] Build all nine targets. Run CPU targets directly; run `motion-shader-test` with an isolated output directory and validate generated `.spv` files with installed `spirv-val`; run the three headless Vulkan tests without game windows.
+- [ ] Add the runner with explicit allowlisted commands, isolated TEMP/TMP and durable per-test summaries. Test that a failing child, missing target and skipped prerequisite remain visible and cannot yield an all-pass summary.
+- [ ] Run the six audited upstream Python modules through the baseline group. Retain the eight gameserver-ID tests and direct historical catalog run as separately pinned reference evidence; the integration BBSC group remains unavailable until W04/W06 introduce its actual sources/targets. Recheck the native build, review and commit.
 
 **W02 reopened (2026-10-21):** The original PowerShell5 native invocation did not wait for GUI-subsystem executables and could reuse a stale exit code. A delayed GUI exit7 regression reproduced false PASS; the corrected invocation passes five runner regressions and waits for real exit. Fresh combined execution exposes access violations in scene-resolution-test, taa-shader-test and camera-motion-test. Their prior PASS claims are invalidated; diagnose and rerun baseline before W05/W06 acceptance. Do not skip these required checks.
 
@@ -104,12 +108,12 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Interfaces:** consumes verified lifecycle `bbnet_configure` → image setup via `bbnet_set_image` → `bbnet_initialize`, plus resolver registration `bbnet_register`. Produces an exact contract document: real symbol, declaration/file, caller, thread, ownership/lifetime, failure/cancellation result, teardown and test seam for each boundary. It becomes the signature authority for W05–W10.
 
-- [x] Trace image allocation, relocation, memory protection, callback lifetime, replacement and shutdown. Map supported guest-hook infrastructure and game tick; `thd::DispatchAfter` is a network worker, not a game-thread scheduler.
-- [x] Trace both registered Matching2 backends (THD and vendor fallback), request, callback, polling/signaling, and any claimed native result events through their concrete producer/consumer, then Lua join, multiplayer initialization, placement and reload. Distinguish HTTP punctuation bytes `0x29/0x2A` from historical custom signaling capability type `0x29`; neither proves a native result-event route. If no such producer/consumer exists in pinned source, record that absence and the required G1 diagnostic. Mark every route that can mutate network/session or world state and the earliest cancellable consumer. No held callback or null Lua dispatch qualifies alone.
-- [x] Trace selected save/profile/slot and the actual writer→close path. Map candidate serializer/item-grant hooks and completion receipts. Do not equate `_commit`/close or memory mutation with a durable receipt.
-- [x] Map Kit/guest Blank/host Blank/menu/text/animation/overlay ownership and startup recovery before online initialization.
-- [x] Record proposed adapter declarations only after concrete owners are identified. For unresolved native facts, define the exact diagnostic and expected G1/G2/G3 observation; keep those contracts blocked and do not invent offsets.
-- [x] Review thread/ABI/cancellation and save contracts; commit the map. Work on portable units may proceed while native validation is pending, but no enabled hook may depend on an unresolved contract.
+- [ ] Trace image allocation, relocation, memory protection, callback lifetime, replacement and shutdown. Map supported guest-hook infrastructure and game tick; `thd::DispatchAfter` is a network worker, not a game-thread scheduler.
+- [ ] Trace both registered Matching2 backends (THD and vendor fallback), request, callback, polling/signaling, and any claimed native result events through their concrete producer/consumer, then Lua join, multiplayer initialization, placement and reload. Distinguish HTTP punctuation bytes `0x29/0x2A` from historical custom signaling capability type `0x29`; neither proves a native result-event route. If no such producer/consumer exists in pinned source, record that absence and the required G1 diagnostic. Mark every route that can mutate network/session or world state and the earliest cancellable consumer. No held callback or null Lua dispatch qualifies alone.
+- [ ] Trace selected save/profile/slot and the actual writer→close path. Map candidate serializer/item-grant hooks and completion receipts. Do not equate `_commit`/close or memory mutation with a durable receipt.
+- [ ] Map Kit/guest Blank/host Blank/menu/text/animation/overlay ownership and startup recovery before online initialization.
+- [ ] Record proposed adapter declarations only after concrete owners are identified. For unresolved native facts, define the exact diagnostic and expected G1/G2/G3 observation; keep those contracts blocked and do not invent offsets.
+- [ ] Review thread/ABI/cancellation and save contracts; commit the map. Work on portable units may proceed while native validation is pending, but no enabled hook may depend on an unresolved contract.
 
 **W03 source correction (2026-10-21):** Independent source review found the earlier asserted native result IDs unsupported: pinned HTTP uses those bytes as URL punctuation, and historical BBSC uses only 0x29 as a custom signaling capability type. The revised trace requirement above preserves discovery of actual native producers/consumers rather than inventing event IDs. This affects W03 and downstream W06/W08 diagnostics; G1 remains mandatory. Also map THD's existing SetImage/SetSignalingGate/HostExtra guest-memory access and distinguish it from the stricter BBSC game-thread requirement.
 
@@ -123,10 +127,10 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Interfaces:** preserve `Core::Bbsc::Party::{Message, CapabilityMessage, Peer, CharacterKey, Admission, Delivery}`, `EncodeMessage`/`DecodeMessage`, `EncodeCapability`/`DecodeCapability`, `CanCrossMapMatch`, `IsSupportedStoryMap`, and the 22-event/3-item candidate catalogs from historical headers. Separate declarations from unrelated vendor-state dependencies as needed, updating both protocol consumers together.
 
-- [x] Add failing tests for malformed/oversized/duplicate packet data, wrong peer/party/admission, ordering/replay, expiry, closed admission resurrection, password mismatch/empty password and unsupported maps.
-- [x] Port policy and wire encoding with those existing types; do not wire native hooks or import Linux vendor directories. Preserve sender/receiver declaration compatibility.
-- [x] Retain catalog assertions: 22 boss rows, three unique-item candidates, deferred endgame mutations, and no automatic Cord consumption. Candidate fixture success does not approve an in-game grant mapping.
-- [x] Register `bbsc-party-policy-test` and `bbsc-party-events-test` with assertions enabled. Add them to the runner's BBSC group; run both, review and commit.
+- [ ] Add failing tests for malformed/oversized/duplicate packet data, wrong peer/party/admission, ordering/replay, expiry, closed admission resurrection, password mismatch/empty password and unsupported maps.
+- [ ] Port policy and wire encoding with those existing types; do not wire native hooks or import Linux vendor directories. Preserve sender/receiver declaration compatibility.
+- [ ] Retain catalog assertions: 22 boss rows, three unique-item candidates, deferred endgame mutations, and no automatic Cord consumption. Candidate fixture success does not approve an in-game grant mapping.
+- [ ] Register `bbsc-party-policy-test` and `bbsc-party-events-test` with assertions enabled. Add them to the runner's BBSC group; run both, review and commit.
 
 **Acceptance:** both targets build and exit 0 under CLANG64; fixture evidence is labeled portable Windows policy, not live networking or native progress.
 
@@ -138,11 +142,11 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 
 **Interfaces:** retain `CharacterLease`, `StoreJournal`, `LoadJournal`, `StoreSelectedSaveBackup`, `ReturnSaveTracker` and `ManagedCycleEpoch` contracts from the historical header where portable. The static selected-save receipt callback's exact declaration and publication point must match W03's reviewed document.
 
-- [x] Add RED filesystem tests in fresh temporary profiles: two-process lease exclusion, path/reparse rejection, immutable generation+content backups, cross-profile/slot/character/epoch mismatch, partial write, flush failure, replacement failure and restart with pending intent.
-- [x] Implement Win32 lock/flush/replacement/error paths with explicit achieved durability. Publish a receipt only after the required commit sequence succeeds; preserve pending work if metadata durability or selected identity cannot be established.
-- [x] Port crash fixtures using child Windows processes with controlled checkpoints; never terminate a real game. Reopen files in a new process and prove incomplete work remains pending and complete work is idempotent.
-- [x] Cover slot deletion/reuse and native 6→7 / saturated 7→7 ambiguity using synthetic identities. Server-issued ID tests do not substitute for client save identity.
-- [x] Register/run `bbsc-storage-windows-test`, `bbsc-party-journal-test` (separate from the policy target) and `bbnet-save-host-test`, plus W04 tests and native build. Review and commit.
+- [ ] Add RED filesystem tests in fresh temporary profiles: two-process lease exclusion, path/reparse rejection, immutable generation+content backups, cross-profile/slot/character/epoch mismatch, partial write, flush failure, replacement failure and restart with pending intent.
+- [ ] Implement Win32 lock/flush/replacement/error paths with explicit achieved durability. Publish a receipt only after the required commit sequence succeeds; preserve pending work if metadata durability or selected identity cannot be established.
+- [ ] Port crash fixtures using child Windows processes with controlled checkpoints; never terminate a real game. Reopen files in a new process and prove incomplete work remains pending and complete work is idempotent.
+- [ ] Cover slot deletion/reuse and native 6→7 / saturated 7→7 ambiguity using synthetic identities. Server-issued ID tests do not substitute for client save identity.
+- [ ] Register/run `bbsc-storage-windows-test`, `bbsc-party-journal-test` (separate from the policy target) and `bbnet-save-host-test`, plus W04 tests and native build. Review and commit.
 
 **W05 RED evidence classification (2026-10-21):** The first step's recorded preimplementation RED is the fresh fixture link failure on absent Win32 primitive definitions, followed by Windows fixture GREEN. This is implementation-absence/link RED, not a retained pre-fix behavioral regression. Runtime review regressions lack a retained behavioral RED artifact (NOT RUN); the later preserved pre-longpath comparison passes both versions (NOT REPRODUCED). Do not relabel either as behavioral RED or claim the extended-path change caused the original runner failure. Completion here requires all listed functional/process/error/path/identity checks to pass with actual exits; native identity/serializer/grant gates remain separate and unpassed.
 
@@ -188,9 +192,9 @@ For each command, record checkout SHA, patch/diff state, CLANG64/tool versions, 
 Retain the historical `scripts/bbsc_gameserver/` sources/credits and `tests/test_bbsc_character_ids.py` as explicit protocol/SQLite reference fixtures in the integration branch, with loopback-only tests. This does not deploy a service or change private server state.
 
 - [ ] Write RED tests for private-attempt HMAC proof, selected peer/connection, expiration/retry, stale host/password changes, correlated cleanup and shutdown races, relay framing and both departures.
-- [x] Bind network callbacks to a bounded immutable generation-tagged queue; test its fixture consumer, cancellation and teardown. No network-thread live memory access. Native game-thread consumer binding remains W07/W08/G1 under the source-contract limit above.
+- [ ] Bind network callbacks to a bounded immutable generation-tagged queue; test its fixture consumer, cancellation and teardown. No network-thread live memory access. Native game-thread consumer binding remains W07/W08/G1 under the source-contract limit above.
 - [ ] Integrate matchmaking/password/connect-first payload and network-facing Kit/Blank policy using actual network/session consumers while native managed admission stays disabled. Native Kit/Blank input/action binding remains W07/W08/G1.
-- [x] Run all three focused targets, W04/W05 tests and `bash build.sh`; compare unrelated upstream network behavior before/after. Review and commit.
+- [ ] Run all three focused targets, W04/W05 tests and `bash build.sh`; compare unrelated upstream network behavior before/after. Review and commit.
 
 **Exit:** focused Windows static-module fixtures pass. Live join, placement and private-service compatibility are not claimed until G1.
 

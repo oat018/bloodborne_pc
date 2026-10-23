@@ -1,5 +1,7 @@
 # BBSC Windows migration manifest
 
+> Target changed2026-10-23: BBport1.7.2 + BBSC0.0.2. This document records the previous base; its paths/claims/results require R02–R04 requalification under [the alignment plan](../superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md). Do not treat old VERIFIED or PASS labels as new-target evidence.
+
 Source inventory and caller comparison for migration-plan step 1. Native adapter declarations and validation remain open in W03 of the [detailed execution plan](../superpowers/plans/2026-10-21-bbsc-windows-execution.md); inventory is not a completed runtime port.
 
 ## Pins and scope

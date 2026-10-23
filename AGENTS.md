@@ -2,7 +2,7 @@
 
 For development, setup, migration or resuming this repository, read [the Windows handoff](docs/handoff/WINDOWS-RESUME.md) first, then the authoritative plan linked there.
 
-Active direction: Windows only, Supermedo/bloodborne_pc upstream, BBSC-focused changes. The `windows` branch currently contains the historical implementation plus migration documentation; it is not yet a port to that upstream. Preserve `pre` as history. Commit/push checkpoints to `origin/windows`.
+Active direction: Windows only, Supermedo BBport `windows-v1.7.2` + CLSAMG22 BBSC `v0.0.2`, pinned by [the release-alignment plan](docs/superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md). The `windows` branch currently contains the historical implementation plus migration documentation; it is not yet a port to that upstream. Preserve `pre` as history. Commit/push checkpoints to `origin/windows`.
 
 ## Required plan and progress workflow
 
@@ -31,3 +31,7 @@ Before ending a development turn, handing off, committing or pushing:
 4. Tell the user what changed, what was verified, what remains and where to track it. Do not claim the Windows port or a feature is complete while required tasks or gates remain open.
 
 Current constraints remain in force: managed admission OFF until the required native gate passes; no game launch while the user's no-game instruction is active; no EXE/ZIP packaging or server redeployment in the current development scope. Follow later explicit user instructions when they change that scope or the waiting checkpoint.
+
+## External Claude Code collaboration
+
+For external Claude Code work, read [the work package](docs/handoff/CLAUDE-CODE-WINDOWS.md) before edits. CL01 may edit only its four allowlisted docs/collaboration/claude/ files in a separate clone. For this child task, record active status/checkpoints in its PROGRESS.md; the primary Codex owner alone synchronizes shared WINDOWS-PROGRESS.md and plan checkboxes. This scoped exception to shared tracker edits prevents concurrent ownership conflicts. Native/runtime/CMake/runner/shared plans remain single-owner Codex. No automatic subagent dispatch is authorized.

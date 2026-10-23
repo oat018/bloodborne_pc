@@ -14,10 +14,14 @@
 
 **Verified preparation and next work (2026-10-21):** Native pinned upstream build and basic copied-profile gameplay now have evidence. Use the [detailed Windows execution plan](2026-10-21-bbsc-windows-execution.md) and [progress tracker](../../WINDOWS-PROGRESS.md) for task IDs, real no-game test results and future gameplay gates. This direction document remains authoritative for scope; completed setup is not a completed BBSC port.
 
+## Release alignment amendment — 2026-10-23
+
+Latest user instruction selects BBport1.7.2 + BBSC0.0.2, replacing the old source pin and the intervening1.9.4 proposal. Execute [the version-specific alignment plan](2026-10-23-bbport172-bbsc002-alignment.md) R01–R04 before resuming native W work. Checklist acceptance is reopened for this target; prior results remain scoped history in the tracker. External Claude Code handles only CL01 audit documents under the [ownership handoff](../../handoff/CLAUDE-CODE-WINDOWS.md). Runtime/source/build changes have one Codex owner.
+
 ## Global constraints
 
 - Direction approved on 2026-10-21: Windows only. AppImage and Linux release parity leave the active release scope; existing Linux code and historical evidence are retained.
-- Primary upstream: [Supermedo/bloodborne_pc](https://github.com/Supermedo/bloodborne_pc), default branch `windows`. Inspected HEAD: `de2e38af055f09f819946951075c6bb119e62ae6`. Record a new pin explicitly if changed later.
+- Active upstream: Supermedo `windows-v1.7.2` at `e5d04e2ba4864ccf40de6c3cf6aa532855320b0d`; BBSC `v0.0.2` at `4f11faf88b6ba658ebde6fe5fbefdadedba4fa41`. Previous de2e38a is a historical comparison, not the active target.
 - This documentation branch starts at `a37b419ec03b1286c3d7accd954487de6d6d6429`. Its runtime is still the previous codebase: selecting a new upstream does not mean the code has been migrated or built on Windows.
 - Keep `pre` and `origin/pre` as the historical checkpoint. Work and usage checkpoints now go to `windows` / `origin/windows`. Below 10% remaining in the 300-minute window, stop expanding scope, document, commit and push that branch.
 - `origin` remains the user's repository. Use Supermedo as a separately named source remote when migration begins; changing GitHub fork parent metadata is unnecessary for this workflow. Do not delete/refork, rewrite history or force-push as part of migration. See [GitHub's remote guidance](https://docs.github.com/en/pull-requests/how-tos/work-with-forks/configuring-a-remote-repository-for-a-fork).
@@ -52,18 +56,18 @@ A failed join must not mutate the guest world. Pending recovery must remain usab
 
 ### 0. Record the direction
 
-- [x] Create `windows` from the existing checkpoint, preserving `pre`.
-- [x] Record the new upstream pin, Windows-only scope and documentation precedence.
+- [ ] Create `windows` from the existing checkpoint, preserving `pre`.
+- [ ] Record the new upstream pin, Windows-only scope and documentation precedence.
 - Publication: commit these documents and verify the resulting commit on `origin/windows`; record publication evidence in the handoff.
 
 ### 1. Inventory and define the migration patch set
 
 **Inspect:** old `gpu/bbnet/`, `tests/test_bbsc*`, runtime bridges and new `gpu/bbnet/vendor/shadps4/`, `gpu/CMakeLists.txt`, launcher/build scripts.
 
-- [x] Compare a clean pinned upstream checkout with the old BBSC checkpoint; record actual existing BBSC components separately from general network support.
-- [x] Write a file-by-file migration manifest: reuse, adapt, superseded or deferred, including callers, tests, build registration and fixtures.
+- [ ] Compare a clean pinned upstream checkout with the old BBSC checkpoint; record actual existing BBSC components separately from general network support.
+- [ ] Write a file-by-file migration manifest: reuse, adapt, superseded or deferred, including callers, tests, build registration and fixtures.
 - [ ] Define the static runtime/BBSC interface and a selective patch sequence. Preserve history when integrating; do not blindly cherry-pick the entire Linux integration or replace unrelated upstream code.
-- [x] Record Windows paths, profile layout and available native machine/runner. See the setup report and test matrix; native adapter contracts remain W03 discovery work.
+- [ ] Record Windows paths, profile layout and available native machine/runner. See the setup report and test matrix; native adapter contracts remain W03 discovery work.
 
 **Exit:** reviewed migration manifest and exact source/build pins, with no assumed native offsets or unverified APIs.
 
@@ -71,9 +75,9 @@ A failed join must not mutate the guest world. Pending recovery must remain usab
 
 **Files:** upstream `build.sh`, `msys2-env.sh`, `gpu/CMakeLists.txt`; baseline evidence document.
 
-- [x] In a clean Windows checkout, follow the pinned MSYS2 CLANG64 guide and run `bash build.sh` before introducing BBSC changes.
-- [x] Record tool versions, command, output paths and baseline launch result using a copied test profile. Separate upstream failures from migration failures.
-- [x] Identify which existing portable tests build on Windows; Linux-only test programs need adaptation or an explicit gap. The test matrix records four upstream target passes, five compile failures, the selected Python results and all historical BBSC source classifications; this is an inventory, not a full-suite PASS.
+- [ ] In a clean Windows checkout, follow the pinned MSYS2 CLANG64 guide and run `bash build.sh` before introducing BBSC changes.
+- [ ] Record tool versions, command, output paths and baseline launch result using a copied test profile. Separate upstream failures from migration failures.
+- [ ] Identify which existing portable tests build on Windows; Linux-only test programs need adaptation or an explicit gap. The test matrix records four upstream target passes, five compile failures, the selected Python results and all historical BBSC source classifications; this is an inventory, not a full-suite PASS.
 
 **Exit:** reproducible native Windows baseline build and launch evidence. No packaging yet.
 

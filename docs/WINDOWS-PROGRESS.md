@@ -1,38 +1,52 @@
 # BBSC Windows progress
 
-Updated: 2026-10-23 (Asia/Bangkok). **Current checkpoint: W06 WAIT_GAME for user title-menu/character entry after native private-service login PASS. W06 acceptance remains 2/4; G1–G3 remain open.** Copied profiles only; managed admission OFF.
+Updated: 2026-10-23 (Asia/Bangkok). **Current checkpoint: R01 release pins/ownership documentation VERIFIED; R02 baseline preparation READY; CL01 external audit READY. Active target BBport1.7.2 + BBSCv0.0.2; target build/patch/native qualification NOT RUN.** Copied profiles only; managed admission OFF.
 
 ## Read this first
 
+- [Current release alignment and task order](superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md)
+- [External Claude Code work package](handoff/CLAUDE-CODE-WINDOWS.md)
 - [Detailed execution plan](superpowers/plans/2026-10-21-bbsc-windows-execution.md)
 - [Platform/scope direction](superpowers/plans/2026-10-21-bbsc-windows-only-migration.md)
 - [Migration manifest](handoff/WINDOWS-MIGRATION-MANIFEST.md), [test matrix](handoff/WINDOWS-TEST-MATRIX.md), [machine/game/save evidence](handoff/WINDOWS-SETUP-2026-10-21.md)
 
 `VERIFIED` means the stated scope has evidence. `READY` means work may start. `WAIT_DEP` means an earlier task's deliverable is missing. `WAIT_GAME` means user gameplay evidence is required. `IN_PROGRESS` and `BLOCKED` require an explicit reason. Checkboxes mirror the detailed plan; do not report a feature percentage from completed setup tasks.
 
+## Release-alignment tracker
+
+| ID | Owner | Status | Evidence / next action |
+|---|---|---|---|
+| R01 | Codex | VERIFIED (pins/ownership docs) | Both tag commits and BBSC source recipe/digest checked; documents validated. Publication confirmed separately by Git results. |
+| R02 | Codex | READY | New isolated LOCAL1.7.2 source + pinned BBSC patch/guard review; do not reset the old integration. |
+| R03 | Codex | WAIT_DEP R02 | Fresh native build/tests and safe copied-profile qualification; target NOT RUN. |
+| R04 | Codex | WAIT_DEP R02/R03/CL01 | Remap source owners, review audit and selectively port custom deltas; reopen W gates. |
+| CL01 | External Claude Code | READY | Separate clone, exclusive audit docs; [child progress](collaboration/claude/PROGRESS.md). No work claimed started by Codex. |
+
+W rows/checkboxes below now describe qualification on the new target. Earlier pass counts/commits remain historical evidence; reopening does not delete their source or results.
+
 ## Work tracker
 
 | ID | Work / expected deliverable | Status | Needs game? | Evidence / next action |
 |---|---|---|---|---|
-| W00 | Native baseline, copied-profile preparation, source/test inventory | VERIFIED | Already tested by user | Native build exit 0; characters and basic gameplay user-confirmed; no-game results below. Full test parity and BBSC are outside this checkbox. |
-| W01 | Separate integration branch/worktree and reviewed file/history map | VERIFIED | No | Managed `codex/bbsc-windows-integration` at upstream pin, reviewed [ownership/history map](handoff/WINDOWS-INTEGRATION-BASE.md). Explicit documentation paths copied; runtime unchanged. |
-| W02 | Windows no-game harness and reproducible runner | VERIFIED | No | Actual all-group28 command PASS/0FAIL/1PythonSKIP; all three headless render checks pass. Assertion-preserving Hpp ABI shim, scene setup and camera inline flags independently reviewed; native build PASS. |
-| W03 | Exact static adapter/caller/thread/lifetime contracts | VERIFIED (source map only) | No for source map | [Reviewed contract map](handoff/WINDOWS-ADAPTER-CONTRACT.md); actual native world consumer/identity/grant/UI contracts remain blocked for G1–G3. No guessed adapter APIs approved. |
-| W04 | Portable party/protocol/catalog and focused targets | VERIFIED | No | Portable policy/protocol/catalog targets pass; reviewed unknown-event guards. No live transport/native qualification. |
-| W05 | Windows locking/journal/backups/receipts and identity fixtures | VERIFIED (filesystem/API only) | No for fixtures | All five BBSC targets pass with actual exits, native build PASS, independent review accepted. RED is implementation-absence/link only; behavioral artifact limits below. Native selected-character/serializer/grant/recovery gates remain open. |
-| W06 | Static HTTP/Matching2/signaling/transport integration | WAIT_GAME | Runtime diagnostics authorized | Private vendor service accepts login; native NP signed in/Matching2 context start observed. Game at title, user menu/character entry needed. No summon/JoinRoom/selected-character mapping yet; 2/4 criteria, admission OFF. |
+| W00 | Native baseline, copied-profile preparation, source/test inventory | WAIT_DEP R02–R04 | Already tested by user | Historical old-base evidence only: Native build exit 0; characters and basic gameplay user-confirmed; no-game results below. Full test parity and BBSC are outside this checkbox. |
+| W01 | Separate integration branch/worktree and reviewed file/history map | WAIT_DEP R02–R04 | No | Historical old-base evidence only: Managed `codex/bbsc-windows-integration` at upstream pin, reviewed [ownership/history map](handoff/WINDOWS-INTEGRATION-BASE.md). Explicit documentation paths copied; runtime unchanged. |
+| W02 | Windows no-game harness and reproducible runner | WAIT_DEP R02–R04 | No | Historical old-base evidence only: Actual all-group28 command PASS/0FAIL/1PythonSKIP; all three headless render checks pass. Assertion-preserving Hpp ABI shim, scene setup and camera inline flags independently reviewed; native build PASS. |
+| W03 | Exact static adapter/caller/thread/lifetime contracts | WAIT_DEP R02–R04 | No for source map | Historical old-base evidence only: [Reviewed contract map](handoff/WINDOWS-ADAPTER-CONTRACT.md); actual native world consumer/identity/grant/UI contracts remain blocked for G1–G3. No guessed adapter APIs approved. |
+| W04 | Portable party/protocol/catalog and focused targets | WAIT_DEP R02–R04 | No | Historical old-base evidence only: Portable policy/protocol/catalog targets pass; reviewed unknown-event guards. No live transport/native qualification. |
+| W05 | Windows locking/journal/backups/receipts and identity fixtures | WAIT_DEP R02–R04 | No for fixtures | Historical old-base evidence only: All five BBSC targets pass with actual exits, native build PASS, independent review accepted. RED is implementation-absence/link only; behavioral artifact limits below. Native selected-character/serializer/grant/recovery gates remain open. |
+| W06 | Static HTTP/Matching2/signaling/transport integration | WAIT_DEP R02–R04 | Runtime diagnostics authorized | Old-base queue/build/login evidence retained; target source/patch/build and CL01 review required before current native qualification. Admission OFF. |
 | W07 | Native ABI/tick/scanner/selected-character adapter | WAIT_DEP W03/W05/W06 | Fixtures no; live later | No assumed native offsets or worker-as-game-thread substitution. |
 | W08 | Admission/first-playable coordination and rejection fixtures | WAIT_DEP W05/W06/W07 | Fixtures no; G1 yes | Prove all entry routes; callback enqueue is not cancellation. |
 | W09 | Eligible additive progress and exactly-once rewards | WAIT_DEP W05/W07/W08 | Fixtures no; G2 yes | Resolve persisted inventory, native grant/receipt and each catalog row; keep unqualified application disabled. |
 | W10 | Safe return, offline recovery, unsupported-area handling | WAIT_DEP W05/W07/W08/W09 | Fixtures no; G3 yes | Preserve pending recovery and captured fallback; never consume a foreign identity's record. |
 | W11 | Final integrated verification/review and checkpoint | WAIT_DEP W01–W10/G1–G3 | No new launch if evidence remains current | Normal history-preserving integration/push to `origin/windows`; stop before packaging. |
 
-- [x] W00 preparation and evidence inventory
-- [x] W01 integration workspace/history map
-- [x] W02 Windows test harness
-- [x] W03 adapter contract map
-- [x] W04 portable policy
-- [x] W05 durable storage/synthetic identity/API fixtures (native identity remains G2/G3)
+- [ ] W00 preparation and evidence inventory
+- [ ] W01 integration workspace/history map
+- [ ] W02 Windows test harness
+- [ ] W03 adapter contract map
+- [ ] W04 portable policy
+- [ ] W05 durable storage/synthetic identity/API fixtures (native identity remains G2/G3)
 - [ ] W06 network/session integration
 - [ ] W07 native adapters
 - [ ] W08 admission/first-playable
@@ -441,3 +455,14 @@ W06 online diagnostics IN_PROGRESS (2026-10-23): user confirmed account/service 
 W06 native online prerequisite checkpoint (2026-10-23): user-configured private vendor/shadNet service, copied profile; upstream launcher persisted account settings on Play. Disabled UPnP for the configured private VPN route using existing launcher guidance. Original warning-level run reached title but insufficient network logs; closed at title, restarted via private launch-w06-online.py reusing upstream APP_DEFAULTS/game_environment and saved settings, BB_GPU_LOG=info/BB_BBSC=0. Wrapper validates copied profile, online vendor route and UPnP OFF; compile syntax PASS. This is private setup only, no native source change (runtime e6670fd, HEAD082fc35 docs only). Private w06-online-info.log records server HandleLoginReply success, NP ConnectUser signed-in account, sceNpGetNpId and Matching2 CreateContext/ContextStart; two friend/block-list HTTP requests return200. Login-native account relationship observed for this local user only; no selected summon UserId/CharaId crosswalk, no counterpart/JoinRoom, no HMAC/private network-policy/G1 acceptance. Credentials/endpoints/account IDs remain out of tracked evidence. Both baseline and diagnostic savedata hashes18/18 unchanged at observation.
 
 W06 WAIT_GAME: direct UI observation confirms title screen; mouse/Return/configured Cross and navigation tool attempts did not advance menu, cause unproven (do not label server failure or alter input implementation). User must select Play Online and load a copied character. Leave diagnostic process running at title and isolated launcher open; wait for user input rather than duplicate accounts/sessions. No BBSC admission activation, packaging/deploy or integration push. Private log/observation summary retained; wrapper exit not yet available while running. Docs UTF8/local-link/whitespace checks only (no source change). Usage36% primary/65% weekly. Next: observe game HTTP sign-in/character/summon and actual native owner/peer, retain proof boundary; do not infer authenticated selected-character authority from native login alone.
+
+
+R01 IN_PROGRESS (2026-10-23): latest user explicitly supersedes proposed1.9.4 with BBport1.7.2 to match BBSCv0.0.2. Verified release tags via git ls-remote: BBport e5d04e2ba4864ccf40de6c3cf6aa532855320b0d, BBSC4f11faf88b6ba658ebde6fe5fbefdadedba4fa41. BBSC bbport/README.txt independently names BBport e5d04e2 + bbport-1.7.2-bbsc.patch. Create version-change plan and separate Claude Code handoff before any new runtime edits; preserve current branch/evidence, do not reset/rebase it. Native1.7.2 paths differ from mapped old base, so old pass counts/offsets are not target acceptance. No source migration/build performed in this planning checkpoint.
+
+
+R01 release-alignment outcome (2026-10-23): current target BBport1.7.2/e5d04e2ba4864ccf40de6c3cf6aa532855320b0d + BBSCv0.0.2/4f11faf88b6ba658ebde6fe5fbefdadedba4fa41. windows-v1.9.4/3fabfa7 was inspected then superseded by the user; never installed or adopted as runtime. git ls-remote and BBSC pinned source README agree on1.7.2; patch SHA256e34c79b388605998b430ec4eed556fc2cb8c8928f1d3e9f26bf5d2df29732aa3,15 destination sections inspected. Source topology differs:1.7.2 network under gpu/shadps4, glue gpu/bbnet/bbnet_glue.cpp. Previous W/plan checkboxes reopened for new target, old runtime e6670fd/last documentation4775d30 preserved. Target patch application/build/tests/native/gameplay NOT RUN. Documentation-only changes and reference reads; no dependencies installed, no new game action, no release binaries, packaging or deploy. Fetched1.9.4 source ref only; Git emitted missing-submodule access warnings, no submodule initialization/qualification claimed.
+
+External Claude Code: user requested a separate human collaborator; created CLAUDE.md entry point, explicit CL01 handoff/allowlist/acceptance cases/handback protocol and READY child tracker. Codex owns source/build/CMake/runner/shared plans and R02–R04; Claude owns four docs/collaboration/claude/ files, records active status there and returns local commits for Codex to mirror/integrate. No subagent dispatched, no message sent externally, no integration branch pushed. Next R02 source/patch guard qualification in separate checkout; CL01 can start independently now. See alignment plan for exact pins and requirements.
+
+
+R01 final documentation validation: git ls-remote Supermedo refs/tags/windows-v1.7.2 returned e5d04e2ba4864ccf40de6c3cf6aa532855320b0d; git ls-remote CLSAMG22/BBSC refs/tags/v0.0.2 returned4f11faf88b6ba658ebde6fe5fbefdadedba4fa41. git show -s e5d04e2 reports Version1.7.2; git ls-tree -r confirms source owners. Python hashlib verified pinned patch input; one-off UTF8/local Markdown target check65PASS and pin/allowlist/reopened-checklist consistency PASS. Git diff --check with core.whitespace=cr-at-eol exits0. Target patch check/build/tests/gameplay remain NOT RUN, not skipped passes.13 exact documentation paths in checkpoint; no native source changes. Source/reference notes private under .superpowers/release-pins-20261023. Final usage28% primary/64% weekly remaining. Shared documentation publication follows; code branches remain LOCAL.

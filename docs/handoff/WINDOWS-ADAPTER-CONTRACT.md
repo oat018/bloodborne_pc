@@ -1,5 +1,7 @@
 # BBSC Windows adapter contract map
 
+> Target changed2026-10-23: BBport1.7.2 + BBSC0.0.2. This document records the previous base; its paths/claims/results require R02–R04 requalification under [the alignment plan](../superpowers/plans/2026-10-23-bbport172-bbsc002-alignment.md). Do not treat old VERIFIED or PASS labels as new-target evidence.
+
 Status: W03 source mapping VERIFIED after independent review; native qualification blocked pending G1–G3. This document is for W03 and is based on source inspection at upstream `de2e38af055f09f819946951075c6bb119e62ae6` and historical BBSC `ea8ac53801e49b5dc79c072971c0e05efcd7651f`. It does not define guessed native offsets or enable managed admission.
 
 ## Verified upstream lifecycle and memory boundary
