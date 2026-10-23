@@ -28,6 +28,13 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
+
 #include <cstdio>
 #include <fmt/format.h>
 
@@ -1037,6 +1044,21 @@ T ReadValue(u64 address, size_t offset) {
 
     std::memcpy(&value, reinterpret_cast<const void*>(source), sizeof(value));
     return value;
+}
+
+// A copy that fails instead of faulting when the memory is gone (test aids that scan pointers;
+// the value is left as it was then).
+bool ReadNoFault(u64 address, void* out, size_t size) {
+#ifdef _WIN32
+    SIZE_T copied = 0;
+    return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(address), out,
+                             size, &copied) &&
+           copied == size;
+#else
+    iovec local{out, size};
+    iovec remote{reinterpret_cast<void*>(address), size};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(size);
+#endif
 }
 
 template <typename T>
@@ -3160,15 +3182,17 @@ void ApplyDebugCommands() {
         s32 killed = 0;
         words >> std::dec >> wanted_max_hp; // mark <max hp>, e.g. 3015 for the Cleric Beast
         words >> highest_max_hp;
-        // Plain reads after "mapped": the access check of ReadValue costs a millisecond.
+        // Reads after "mapped" through the system, not memcpy: the access check of ReadValue
+        // costs a millisecond, so pages are checked once per scan, and a page the game frees
+        // during the scan (the other game's reload) then gives 0 instead of a fault.
         const auto raw = [](u64 address) {
             u64 value = 0;
-            std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+            ReadNoFault(address, &value, sizeof(value));
             return value;
         };
         const auto raw32 = [](u64 address) {
             s32 value = 0;
-            std::memcpy(&value, reinterpret_cast<const void*>(address), sizeof(value));
+            ReadNoFault(address, &value, sizeof(value));
             return value;
         };
         bool done = false;                  // "mark" stops at the first match
@@ -3294,14 +3318,14 @@ void ApplyDebugCommands() {
             candidates.clear();
             for (u64 page = low & ~0xFFFULL; page < high && candidates.size() < 6000000;
                  page += 0x1000) {
-                if (!HasMemoryAccess(page, 0x1000, MemoryProt::CpuRead)) {
+                std::array<float, 0x400> values;
+                if (!HasMemoryAccess(page, 0x1000, MemoryProt::CpuRead) ||
+                    !ReadNoFault(page, values.data(), 0x1000)) {
                     continue;
                 }
-                for (u64 at = page; at < page + 0x1000; at += 4) {
-                    float value;
-                    std::memcpy(&value, reinterpret_cast<const void*>(at), sizeof(value));
-                    if (value >= 0.05f && value <= 40.0f) {
-                        candidates.emplace_back(at, value);
+                for (size_t index = 0; index < values.size(); ++index) {
+                    if (values[index] >= 0.05f && values[index] <= 40.0f) {
+                        candidates.emplace_back(page + index * 4, values[index]);
                     }
                 }
             }
@@ -3318,7 +3342,9 @@ void ApplyDebugCommands() {
                     continue;
                 }
                 float value;
-                std::memcpy(&value, reinterpret_cast<const void*>(at), sizeof(value));
+                if (!ReadNoFault(at, &value, sizeof(value))) {
+                    continue;
+                }
                 const float moved = std::abs(value - before);
                 if (moved >= passed * 0.8f && moved <= passed * 1.2f) {
                     kept.emplace_back(at, value);
