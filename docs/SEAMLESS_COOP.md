@@ -1,6 +1,6 @@
 # Seamless co-op for bbport
 
-This branch adds a seamless co-op mode to the Windows version of bbport 1.9
+This branch adds a seamless co-op mode to the Windows version of bbport 1.9.4
 (`Supermedo/bloodborne_pc`, itself based on `deadinside28/bloodborne_pc`). It started on the
 online play of 1.6 (the network and PSN libraries of `Wozzardman/shadp2p`) and on that
 project's experimental seamless mode, and adds session rules in the spirit of the Seamless
@@ -53,7 +53,7 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   (`SHADPS4_BLOODBORNE_GUEST_TALK=0` turns it off).
 - A lobby with a password instead of the bells (new after v2.5): with
   `SHADPS4_BLOODBORNE_LOBBY=host` on one player and `=join` plus the same
-  `SHADPS4_BLOODBORNE_LOBBY_PASSWORD` on the others. Since v3.4 the players meet when they
+  `SHADPS4_BLOODBORNE_LOBBY_PASSWORD` on the others. Since v3.3 the players meet when they
   choose to: the host rings the Beckoning Bell and a joining player the Small Resonant Bell
   (from the items or by hotkey; the bell's own summon search is called off at once, the bell
   only starts the role). While a joining game that has rung is in the lobby, the host's game
@@ -61,7 +61,7 @@ With `SHADPS4_BLOODBORNE_SEAMLESS_COOP=1` (cross-area summoning, from shadp2p) a
   directly. Deaths keep the session; after a disconnection they find each other again by
   themselves; after Home or a restarted game the bell is needed again.
   `SHADPS4_BLOODBORNE_LOBBY_AUTO=1` takes the role at the start without a bell (as before
-  v3.4). See "The lobby" below.
+  v3.3). See "The lobby" below.
 - Bell hotkeys (without a lobby), so no bell items are needed: PgUp = Beckoning Bell (host),
   PgDn = Small Resonant Bell (guest), Home = leave the session, End = leave and ring again.
 - Ringing the Beckoning Bell costs no Insight, by hotkey or from the inventory: the game took one
